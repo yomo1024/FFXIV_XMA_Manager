@@ -48,6 +48,15 @@ public class Configuration : IPluginConfiguration
     /// <summary>收到"待确认安装"时自动弹出插件窗口。</summary>
     public bool AutoOpenOnRequest { get; set; } = true;
 
+    /// <summary>
+    /// 安装任务全部结束后自动关掉插件窗口。配合上面那条用：请求来了自动弹出来确认，
+    /// 装完它自己收起来，不用再手动点右上角的 X。默认关，勾上才生效。
+    /// </summary>
+    public bool AutoCloseWhenDone { get; set; } = false;
+
+    /// <summary>自动关窗前停留几秒（让人能看清"完成/失败"）。</summary>
+    public int AutoCloseDelaySec { get; set; } = 3;
+
     /// <summary>最近安装记录条数上限。</summary>
     public int MaxHistory { get; set; } = 50;
 

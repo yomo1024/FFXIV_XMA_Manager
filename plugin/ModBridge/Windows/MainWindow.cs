@@ -48,6 +48,8 @@ public class MainWindow : Window, IDisposable
                                (bridge.Available ? $"API {bridge.ApiMajor}.{bridge.ApiMinor}" : "未连接"));
         ImGui.Separator();
 
+        UpdateAutoClose(cfg);      // 「安装完成后自动关闭窗口」
+
         // ================= 待确认安装（两段式的核心） =================
         var pending = _plugin.Requests.Pending();
         if (pending.Count > 0)
@@ -146,6 +148,13 @@ public class MainWindow : Window, IDisposable
         if (ImGui.Checkbox("收到请求时自动弹这个窗口", ref autoOpen))
         {
             cfg.AutoOpenOnRequest = autoOpen;
+            cfg.Save();
+        }
+        ImGui.SameLine();
+        var autoClose = cfg.AutoCloseWhenDone;
+        if (ImGui.Checkbox("安装完成后自动关闭这个窗口", ref autoClose))
+        {
+            cfg.AutoCloseWhenDone = autoClose;
             cfg.Save();
         }
 
@@ -346,6 +355,53 @@ public class MainWindow : Window, IDisposable
         var job = _plugin.Jobs.Start(r.Source, r.IsLocal, r.DirName, r.Enable, r.Priority);
         _plugin.Requests.MarkApproved(r.Id, job.Id);
         return $"开始安装「{r.Name}」…（进度见下方安装记录）";
+    }
+
+    // ---- 「安装完成后自动关闭窗口」的状态 ----
+    private bool _sawRunningJob;                    // 见到过在跑的任务（避免刚开窗就被关掉）
+    private DateTime _allDoneAt = DateTime.MinValue;
+
+    /// <summary>
+    /// 勾了「安装完成后自动关闭这个窗口」时：任务全部结束 → 停留几秒 → 自动关窗。
+    /// 失败也会关（详情在聊天框和安装记录里），但会先在聊天框提醒一句。
+    /// </summary>
+    private void UpdateAutoClose(Configuration cfg)
+    {
+        if (!cfg.AutoCloseWhenDone)
+        {
+            _sawRunningJob = false;
+            _allDoneAt = DateTime.MinValue;
+            return;
+        }
+
+        var jobs = _plugin.Jobs.Snapshot();
+        if (jobs.Any(j => j.State is JobState.Queued or JobState.Downloading or JobState.Installing))
+        {
+            _sawRunningJob = true;
+            _allDoneAt = DateTime.MinValue;
+            return;
+        }
+
+        if (!_sawRunningJob || !IsOpen)
+            return;
+
+        var delay = Math.Clamp(cfg.AutoCloseDelaySec, 0, 60);
+        if (_allDoneAt == DateTime.MinValue)
+        {
+            _allDoneAt = DateTime.Now;
+            var failed = jobs.Count(j => j.State == JobState.Error);
+            Plugin.ChatGui.Print(failed > 0
+                ? $"[Mod Bridge] 有 {failed} 条安装失败，窗口 {delay} 秒后自动关闭（详情：/modbridge）"
+                : $"[Mod Bridge] 安装完成，窗口 {delay} 秒后自动关闭");
+            return;
+        }
+
+        if ((DateTime.Now - _allDoneAt).TotalSeconds >= delay)
+        {
+            IsOpen = false;
+            _sawRunningJob = false;
+            _allDoneAt = DateTime.MinValue;
+        }
     }
 
     private static Vector2 FitSize(Vector2 src, float box)
