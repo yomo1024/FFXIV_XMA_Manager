@@ -3231,6 +3231,18 @@ def api_bridge_autopair(b=None):
     }
 
 
+def api_bridge_installed():
+    """游戏里 Penumbra 已装的 mod 列表（name + Penumbra 目录名），给「手动指定目录」用"""
+    try:
+        plug = bridge_call("/mods", timeout=25) or {}
+    except SystemExit as e:
+        return {"ok": False, "error": str(e), "items": []}
+    items = [{"name": (p.get("name") or ""), "dir": (p.get("dir") or "")}
+             for p in (plug.get("mods") or [])]
+    items.sort(key=lambda x: x["name"].lower())
+    return {"ok": True, "items": items, "count": len(items)}
+
+
 def _bridge_get(path_qs, timeout=25):
     """插件有几个只读接口是 GET（/cover-check、/status），bridge_call 只发 POST → 单独走这条"""
     cfg = cfg_now()
@@ -3270,14 +3282,21 @@ def api_bridge_cover_check(folder, dir_name=""):
     if dir_name:
         targets = [dir_name]
     else:
+        # 匹配键：库里的名字 + 库里的**文件夹名**（安装时 dirName 就是这个），
+        # 并容错 helio 的 hs- 前缀 —— 以前只比名字，改过名/helio 规范名就会「对不上」。
         want = _bridge_norm(m.get("name") or "")
+        base = _bridge_norm(Path(folder).name)
+        base2 = base[3:] if base.startswith("hs-") else base
         targets = [p.get("dir") for p in plist
-                   if any(_bridge_name_match(a, c) for a in want
+                   if any(_bridge_name_match(a, c)
+                          for a in (want, base, base2)
                           for c in _bridge_norm(p.get("name"), p.get("dir")))]
     out["installed_dirs"] = targets
+    out["installed_count"] = len(plist)
+    out["installed_sample"] = [(p.get("name") or "")[:28] for p in plist[:20]]
     if not targets:
-        out["hint"] = ("游戏里没找到同名的已装 mod（还没装进去？或目录名对不上）。"
-                       "游戏里现有：%s" % "、".join((p.get("name") or "")[:20] for p in plist[:12]))
+        out["hint"] = ("游戏里没找到同名的已装 mod（还没装进去？或 Penumbra 里的目录名/显示名和库里对不上）。"
+                       "可以点「手动指定目录」从已装列表里选一个。")
         return out
     for d in targets:
         try:
@@ -3306,9 +3325,11 @@ def api_bridge_fix_cover(folder, dir_name=""):
         targets = [dir_name]
     else:
         want = _bridge_norm(libname)
+        base = _bridge_norm(Path(folder).name)          # 库里的文件夹名（= 安装时的 dirName）
+        base2 = base[3:] if base.startswith("hs-") else base
         for p in plist:
             keys = _bridge_norm(p.get("name"), p.get("dir"))
-            if any(_bridge_name_match(a, c) for a in want for c in keys):
+            if any(_bridge_name_match(a, c) for a in (want, base, base2) for c in keys):
                 targets.append(p.get("dir"))
     if not targets:
         return {"ok": False, "error": "在游戏里没找到对应的已装 mod（名字对不上）。"
@@ -3716,6 +3737,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_mod_history(q))
                 if u.path == "/api/mod/download":
                     return self.api_mod_download(q)
+
+                if u.path == "/api/bridge/installed":
+                    return self._json(api_bridge_installed())
                 if u.path == "/api/bridge/requests":
                     return self._json(api_bridge_requests())
                 if u.path == "/api/images":
@@ -3882,6 +3906,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api_bridge_autopair(body))
             if u.path == "/api/bridge/sync-covers":
                 return self._json(api_bridge_sync_covers(body))
+            if u.path == "/api/bridge/installed":
+                return self._json(api_bridge_installed())
             if u.path == "/api/bridge/cover-check":
                 return self._json(api_bridge_cover_check(body.get("folder") or "",
                                                          body.get("dir") or ""))
