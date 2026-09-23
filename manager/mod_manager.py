@@ -1012,8 +1012,17 @@ def site_time_iso(text) -> str:
     形如 'Tue Aug 18 2026 21:41:17 GMT+0000 (Coordinated Universal Time)'。
     不用 strptime 是因为 %a/%b 跟系统语言有关，中文环境下会解析失败。
     """
+    s = str(text or "").strip()
+    # 登录后站点用的是 <code class="server-date">2026/9/21 08:34:00</code> —— 实测那一栏
+    # 已经是**浏览器本地时区**（拿已知 UTC 值反推确认过），所以直接当本地时间存
+    m0 = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})\s*$", s)
+    if m0:
+        try:
+            return _dt.datetime(*[int(x) for x in m0.groups()]).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return ""
     m = re.search(r"(\w{3})\s+(\w{3})\s+(\d{1,2})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*GMT\s*([+-]\d{4})",
-                  str(text or ""))
+                  s)
     if not m:
         return ""
     mon = SITE_MONTHS.get(m.group(2).lower())
