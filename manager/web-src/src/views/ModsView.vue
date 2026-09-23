@@ -152,14 +152,6 @@ async function loadAffects() {
   }
 }
 
-/** 点表格里的小标签 = 直接按它筛选 */
-function toggleTagFilter(t) {
-  const s = String(t || '').trim()
-  if (!s) return
-  advOpen.value = true
-  fTagsText.value = fTagsText.value.trim() === s ? '' : s
-}
-
 /** 「影响/替换」在库里是一整串（可能含多项），按逗号拆成一个个，方便像标签那样显示/编辑 */
 function splitList(text) {
   return String(text || '')
@@ -706,26 +698,6 @@ const columns = computed(() => [
   { title: '序号', key: 'seq', width: 84, align: 'center', sorter: (a, b) => a.seq - b.seq },
   { title: '作者', key: 'author', width: 176, minWidth: 140, ellipsis: { tooltip: true }, resizable: true },
   {
-    title: '标签', key: 'tags', width: 168,
-    render: (r) => {
-      const ts = r.tags || []
-      if (!ts.length) return h('span', { style: 'opacity:.35' }, '—')
-      const kids = []
-      for (const t of ts.slice(0, 3)) {
-        kids.push(h(NTag, {
-          size: 'tiny', bordered: false, type: 'info',
-          style: 'margin:1px 2px 1px 0;cursor:pointer',
-          onClick: (e) => { e.stopPropagation(); toggleTagFilter(t) },
-        }, { default: () => t }))
-      }
-      if (ts.length > 3) kids.push(h('span', { style: 'opacity:.5;font-size:11px' }, `+${ts.length - 3}`))
-      return h(NTooltip, null, {
-        trigger: () => h('div', null, kids),
-        default: () => ts.join('、'),
-      })
-    },
-  },
-  {
     title: '类型', key: 'nsfw', width: 84,
     render: (r) => h(NTag, { size: 'small', bordered: false, type: r.nsfw === 'NSFW' ? 'warning' : 'success' },
       { default: () => r.nsfw }),
@@ -960,8 +932,8 @@ async function copyPath() {
                   placeholder="全部子分类" style="width: 120px" />
         <n-select v-model:value="zone" :options="zoneOptions" size="small" clearable
                   placeholder="全部类型" style="width: 104px" />
-        <n-button size="small" :type="advOpen ? 'primary' : 'default'" @click="advOpen = !advOpen">
-          筛选{{ advCount ? `（${advCount}）` : '' }}
+        <n-button size="small" :type="advCount ? 'primary' : 'default'" @click="advOpen = true">
+          高级搜索{{ advCount ? `（${advCount}）` : '' }}
         </n-button>
         <n-button-group size="small">
           <n-button :type="wall ? 'default' : 'primary'" @click="wall = false">表格</n-button>
@@ -989,40 +961,6 @@ async function copyPath() {
           </n-button>
         </template>
         <span v-else class="dim">检查到站点有新版本时，这里会出现「只看有新版 / 更新选中」</span>
-      </div>
-      <div v-if="advOpen" class="advbar">
-        <div class="advgrid">
-          <span class="lbl">名称</span>
-          <n-input v-model:value="fName" size="small" clearable placeholder="名称包含…" />
-          <span class="lbl">作者</span>
-          <n-input v-model:value="fAuthor" size="small" clearable placeholder="作者包含…" />
-          <span class="lbl">影响/替换</span>
-          <n-input v-model:value="fAffectsText" size="small" clearable placeholder="它替换的对象包含…" />
-          <span class="lbl">标签</span>
-          <n-input v-model:value="fTagsText" size="small" clearable placeholder="标签包含…" />
-          <span class="lbl">分类</span>
-          <n-select v-model:value="fCats" :options="catOptions" multiple filterable clearable
-                    size="small" placeholder="可多选" />
-          <span class="lbl">安装状态</span>
-          <n-select v-model:value="fInst" :options="instOptions" size="small" clearable
-                    placeholder="全部" />
-          <span class="lbl">标签有无</span>
-          <n-select v-model:value="fTagState" :options="tagStateOptions" size="small" clearable
-                    placeholder="全部" />
-          <span class="lbl">预览图</span>
-          <n-select v-model:value="fImg" :options="imgOptions" size="small" clearable
-                    placeholder="全部" />
-          <span class="lbl">排序</span>
-          <n-select v-model:value="sortBy" :options="sortOptions" size="small" />
-          <span class="lbl">方向</span>
-          <n-select v-model:value="sortDir" :options="sortDirOptions" size="small" />
-        </div>
-        <div class="row">
-          <n-button size="small" @click="clearAdv">清空条件</n-button>
-          <span class="dim">当前显示 {{ view.length }} / {{ mods.length }} 条</span>
-          <div class="grow"></div>
-          <span class="dim">提示：点表格里的小标签，可以快速按它筛选</span>
-        </div>
       </div>
       <div v-if="checked.length" class="batchbar">
         <b>已选 {{ checked.length }} 个</b>
@@ -1065,7 +1003,7 @@ async function copyPath() {
           :columns="columns" :data="view" :row-class-name="rowClassName" :row-props="rowProps"
           :row-key="(r) => r.folder" :checked-row-keys="checked"
           @update:checked-row-keys="(k) => (checked = k)"
-          :max-height="'100%'" :scroll-x="1390" size="small" striped flex-height
+          :max-height="'100%'" :scroll-x="1220" size="small" striped flex-height
         />
         <n-empty v-else style="margin: auto" description="还没有索引数据，点右上角「重新扫描」" />
       </div>
@@ -1317,6 +1255,49 @@ async function copyPath() {
         </n-space>
       </template>
     </n-modal>
+    <!-- 高级搜索（工具条按钮点进来） -->
+    <n-modal v-model:show="advOpen" preset="card" style="width: 780px" title="高级搜索">
+      <n-alert type="default" :show-icon="false" style="margin-bottom: 12px">
+        就是几个填空 + 下拉：<b>留空 = 不看这个条件</b>，改完<b>立即生效</b>（后面的列表实时跟着变）。
+        标签也可以用这里的「标签」框筛，不再占表格一列。
+      </n-alert>
+      <div class="advgrid">
+        <span class="lbl">名称</span>
+        <n-input v-model:value="fName" size="small" clearable placeholder="名称包含…" />
+        <span class="lbl">作者</span>
+        <n-input v-model:value="fAuthor" size="small" clearable placeholder="作者包含…" />
+        <span class="lbl">影响/替换</span>
+        <n-input v-model:value="fAffectsText" size="small" clearable placeholder="它替换的对象包含…" />
+        <span class="lbl">标签</span>
+        <n-select v-model:value="fTagsText" :options="tagOptions" size="small" filterable tag clearable
+                  placeholder="选已有标签或直接输入（包含匹配）" />
+        <span class="lbl">分类</span>
+        <n-select v-model:value="fCats" :options="catOptions" multiple filterable clearable
+                  size="small" placeholder="可多选" />
+        <span class="lbl">安装状态</span>
+        <n-select v-model:value="fInst" :options="instOptions" size="small" clearable placeholder="全部" />
+        <span class="lbl">标签有无</span>
+        <n-select v-model:value="fTagState" :options="tagStateOptions" size="small" clearable
+                  placeholder="全部" />
+        <span class="lbl">预览图</span>
+        <n-select v-model:value="fImg" :options="imgOptions" size="small" clearable placeholder="全部" />
+        <span class="lbl">排序</span>
+        <n-select v-model:value="sortBy" :options="sortOptions" size="small" />
+        <span class="lbl">方向</span>
+        <n-select v-model:value="sortDir" :options="sortDirOptions" size="small" />
+      </div>
+      <template #footer>
+        <n-space justify="space-between" align="center" style="width: 100%">
+          <n-space align="center">
+            <n-button size="small" @click="clearAdv">清空条件</n-button>
+            <n-button size="small" quaternary @click="loadTags">刷新标签列表</n-button>
+            <span class="dim">当前显示 {{ view.length }} / {{ mods.length }} 条</span>
+          </n-space>
+          <n-button size="small" type="primary" @click="advOpen = false">完成</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
     <!-- 手动上传 / 指定新文件替换 -->
     <n-modal v-model:show="showReplace" preset="card" style="width: 600px" title="上传新文件替换">
       <n-alert v-if="repForm.name" type="info" :show-icon="false" style="margin-bottom: 10px">
@@ -1771,11 +1752,16 @@ async function copyPath() {
   padding-top: 4px;
   border-top: 1px dashed rgba(128, 128, 128, 0.25);
 }
-.advbar .advgrid {
+.advgrid {
   display: grid;
   grid-template-columns: auto minmax(150px, 1fr) auto minmax(150px, 1fr);
   gap: 6px 10px;
   align-items: center;
+}
+.advgrid .lbl {
+  color: #888;
+  font-size: 13px;
+  white-space: nowrap;
 }
 .n-data-table .row-installed td {
   background: rgba(60, 200, 120, 0.1) !important;
