@@ -2155,8 +2155,11 @@ def api_categories():
             merged.append({"name": dbn, "path": "", "zone": "", "abs": "", "files": 0,
                            "count": n, "on_disk": False})
         merged.sort(key=lambda x: (not x["on_disk"], x["name"]))
+        # 旧字段：只列 SFW/NSFW 下的子分类目录名（浏览器拓展 content.js 在读，别删）
+        dsc = [s["name"] for s in dsk.get("subs", []) if s.get("zone")]
         names.append({"name": c, "count": counts.get(c, 0), "on_disk": c in on_disk,
                       "abs": str(root / c) if root.is_dir() else "",
+                      **({"disk_subcats": dsc} if dsc else {}),
                       "files": dsk.get("files", 0), "loose": dsk.get("loose", 0),
                       "zones": dsk.get("zones", []), "subcats": merged,
                       "sub_count": len(merged)})

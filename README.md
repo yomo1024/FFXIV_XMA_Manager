@@ -17,6 +17,10 @@
 | `plugin/` | **ModBridge**：游戏内插件，管理器点「安装到游戏」→ 游戏内确认 → 装进 Penumbra 并即时生效（含预览图绘制） | C# / .NET 10 / Dalamud API 15 / Penumbra.Api |
 | `browser-extension/` | **浏览器拓展**：XMA 页面右下角小面板，选分类/子分类/标签 → 加入队列 → 自动下载 + 自动入库 | Chrome MV3（原生 JS，无构建） |
 
+> 接口契约自检：`python scripts/check_api_contract.py` —— 会核对「拓展 / 网页用到的 /api 路径」
+> 与「后端真实注册的路由」、以及几个关键响应字段（比如 `/api/categories` 的 `disk_subcats`）。
+> 改后端接口后跑一次，避免像 v2.18.0 那样把拓展在读的字段删掉。
+
 ![拓展面板：队列与进度](docs/images/extension-panel.png)
 
 ![管理器：下载工作台](docs/images/workbench.png)
@@ -198,7 +202,7 @@ XMA 的下载需要登录，而且 **NSFW 的 Mod 未登录根本看不到文件
 
 | 组件 | 版本 |
 |---|---|
-| 管理器 ModManager | v2.18.0 |
+| 管理器 ModManager | v2.18.1 |
 | 游戏插件 ModBridge | v0.2.7（管理器要求 ≥ v0.2.6） |
 | 浏览器拓展 | v1.0.0 |
 

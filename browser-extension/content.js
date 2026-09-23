@@ -116,9 +116,13 @@
       CATS = (o.cats || []);
       const fillSub = () => {
         const one = CATS.filter((x) => x && x.name === cat.value)[0];
-        const subs = ((one && one.subcats) || []).concat((one && one.disk_subcats) || [])
+        // 后端 subcats 是对象（{name,count,...}），disk_subcats 是字符串，两种都要能取到名字
+        const pick = (list) => (list || [])
+          .map((s) => (s && typeof s === 'object') ? String(s.name || '') : String(s || ''))
+          .filter(Boolean);
+        const subs = pick(one && one.subcats).concat(pick(one && one.disk_subcats))
           .filter((v, i, a) => a.indexOf(v) === i);
-        $('#ffmm-sublist').innerHTML = subs.map((s) => '<option>' + String(s).replace(/</g, '&lt;') + '</option>').join('');
+        $('#ffmm-sublist').innerHTML = subs.map((s) => '<option>' + s.replace(/</g, '&lt;') + '</option>').join('');
       };
       cat.addEventListener('change', fillSub);
       fillSub();
