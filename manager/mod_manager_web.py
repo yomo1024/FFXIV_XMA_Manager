@@ -3282,14 +3282,11 @@ def api_bridge_cover_check(folder, dir_name=""):
     if dir_name:
         targets = [dir_name]
     else:
-        # 匹配键：库里的名字 + 库里的**文件夹名**（安装时 dirName 就是这个），
-        # 并容错 helio 的 hs- 前缀 —— 以前只比名字，改过名/helio 规范名就会「对不上」。
-        want = _bridge_norm(m.get("name") or "")
-        base = _bridge_norm(Path(folder).name)
-        base2 = base[3:] if base.startswith("hs-") else base
+        # 匹配键：库里的名字 + 库里的**文件夹名**（安装时 dirName 就是这个）。
+        # _bridge_norm() 返回**列表**（内部已去掉 [作者] / 序号 / hs- 前缀等），别当字符串用。
+        keys_all = _bridge_norm(m.get("name") or "", Path(folder).name)
         targets = [p.get("dir") for p in plist
-                   if any(_bridge_name_match(a, c)
-                          for a in (want, base, base2)
+                   if any(_bridge_name_match(a, c) for a in keys_all
                           for c in _bridge_norm(p.get("name"), p.get("dir")))]
     out["installed_dirs"] = targets
     out["installed_count"] = len(plist)
@@ -3324,12 +3321,11 @@ def api_bridge_fix_cover(folder, dir_name=""):
     if dir_name:
         targets = [dir_name]
     else:
-        want = _bridge_norm(libname)
-        base = _bridge_norm(Path(folder).name)          # 库里的文件夹名（= 安装时的 dirName）
-        base2 = base[3:] if base.startswith("hs-") else base
+        # 库里的名字 + 库里的文件夹名（= 安装时的 dirName）；_bridge_norm 返回列表
+        keys_all = _bridge_norm(libname, Path(folder).name)
         for p in plist:
             keys = _bridge_norm(p.get("name"), p.get("dir"))
-            if any(_bridge_name_match(a, c) for a in (want, base, base2) for c in keys):
+            if any(_bridge_name_match(a, c) for a in keys_all for c in keys):
                 targets.append(p.get("dir"))
     if not targets:
         return {"ok": False, "error": "在游戏里没找到对应的已装 mod（名字对不上）。"
