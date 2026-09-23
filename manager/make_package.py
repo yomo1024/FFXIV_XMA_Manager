@@ -67,6 +67,7 @@ DEPLOY_TEXT = """FFXIV Mod 管理工具 · Web 版   v{ver}   部署说明
   使用说明.txt               原来 tkinter 版的说明（备用）
   web\\                       前端构建产物（后端直接serve，改前端后重新打包会覆盖）
   browser-extension\\         浏览器拓展（Chrome/Edge「加载已解压的扩展程序」选它）
+  docs\\                      说明文档（迁移到新电脑.md / 使用说明.md / 浏览器拓展-安装说明.md）
   源码\\                      源码 + 重新打包脚本 + scripts\\check_versions.py（版本校验）
 
 【四、运行后会生成（都在程序目录里）】
@@ -81,7 +82,10 @@ DEPLOY_TEXT = """FFXIV Mod 管理工具 · Web 版   v{ver}   部署说明
   · 程序和数据是分开的：程序 = 这个文件夹；数据 = Mod 根目录 + 生成的汇总表
   · 工具栏「打包备份」：把 Mod 文件夹 + 索引库 + 汇总表 打成一个 zip（有进度、可取消）
   · 「备份 / 恢复」里可以恢复：跳过已存在 / 覆盖（旧的进回收站）/ 另存一份
-  · 换电脑：整个文件夹拷过去 + Mod 目录拷过去 → 首次运行重新选一次 Mod 根目录
+  · 换电脑（迁机）：新机装本程序 → 「备份 / 恢复」恢复旧机导出的备份，
+    勾「Mod 文件夹 + 索引库 + 汇总表」和「套用备份里的配置」→ 路径类项新机上不存在会自动
+    保留新机当前设置（差异会列出）→ 插件点一次「测试连接 / 自动配对」即可。
+    详见 docs\迁移到新电脑.md（备份包内也自带一份「迁移到新电脑.txt」）
   · 想重置：删掉 mod_manager.json / mod_manager.db / .thumb_cache / backup 即可
 
 【六、从源码运行 / 重新打包（可选）】
@@ -172,6 +176,14 @@ def main():
         if d:
             n = add_tree(z, d, "%s/browser-extension" % PKG_NAME)
             written.append("browser-extension\\（%d 个文件）" % n)
+        docs_dir = APP_DIR.parent / "docs"               # 说明文档（迁机指南等）
+        if docs_dir.is_dir():
+            got = 0
+            for f in sorted(docs_dir.glob("*.md")):
+                z.write(f, "%s/docs/%s" % (PKG_NAME, f.name))
+                got += 1
+            if got:
+                written.append("docs\\（%d 个 md：迁移到新电脑 / 使用说明 / 浏览器拓展安装）" % got)
 
     size = zip_path.stat().st_size / 1048576
     print("部署包已生成：")

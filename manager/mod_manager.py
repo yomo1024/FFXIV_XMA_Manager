@@ -2469,6 +2469,76 @@ BACKUP_APP = "FFXIV Mod 管理工具"
 BACKUP_MOD_PREFIX = "mods/"
 BACKUP_DB_PREFIX = "index/"
 BACKUP_XL_PREFIX = "excel/"
+BACKUP_CFG_PREFIX = "index/"           # 配置（mod_manager.json）在包里的位置
+MIGRATE_NAME = "迁移到新电脑.txt"
+
+# 「路径类」配置：换电脑后盘符/目录一般不同。恢复时若本机没有这个路径，
+# 就保留本机当前值（不硬套），并把差异列出来给主人看。
+BACKUP_PATH_KEYS = ("root", "excel", "download_dir", "inbox_dir", "install_dir",
+                    "backup_dir", "browser_path", "browser_dir")
+
+
+def migrate_note(cfg) -> str:
+    """写进备份包里的迁移步骤（新电脑上直接照着做，纯文本）"""
+    return "\n".join([
+        "FFXIV XMA Manager —— 把这份备份搬到新电脑",
+        "=" * 46,
+        "",
+        "这个包里已经包含：",
+        "  · mods/     Mod 文件夹（元数据 + 预览图 + 地址.txt；已归档的载荷不在包里）",
+        "  · index/    索引库 mod_manager.db + 配置 mod_manager.json",
+        "  · excel/    汇总表 .xlsx",
+        "",
+        "新电脑上的步骤：",
+        "  1. 先装程序：把部署包（XMA-Manager-v*.zip）解压到任意目录，双击 ModManagerWeb.exe",
+        "  2. 管理器 → 「备份 / 恢复」→ 恢复这个 zip：",
+        "       · 勾「Mod 文件夹」+「索引库 + 汇总表」",
+        "       · 勾「套用备份里的配置」（推荐，迁机就是靠它）",
+        "       · 冲突方式选「跳过已存在」最保险",
+        "  3. 路径类设置（Mod 根目录 / 汇总表 / 下载 / 暂存 / Penumbra / 备份目录）：",
+        "     新电脑上如果和旧电脑不一样，会自动保留新电脑当前的设置，",
+        "     恢复完在「设置」里指到新电脑的对应目录即可（差异会列在恢复结果里）。",
+        "  4. 云盘：夸克 Cookie 也在配置里，恢复后「设置 → 云存储 → 测试连接」确认一下；",
+        "     已归档的载荷不用下载 —— 需要装进游戏时会自动从云端取回。",
+        "  5. 游戏插件：Dalamud 里装好插件后，管理器「设置 → 游戏插件」点一次",
+        "     「测试连接 / 自动配对」（插件在新电脑上会生成新 Token，配对一下就行）。",
+        "  6. 浏览器拓展（可选）：按说明加载一次，端口填 8765。",
+        "",
+        "旧电脑上的 Mod 根目录：%s" % str(cfg.get("root") or ""),
+        "备份时间：%s" % _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    ])
+
+
+def apply_backup_config(cfg: dict, packed: dict) -> dict:
+    """把备份包里的配置套用到本机。
+    非路径项 → 直接套用；路径项 → 本机存在该路径才套用，否则保留本机当前值并记录差异。"""
+    applied, kept = {}, []
+    if not isinstance(packed, dict):
+        return {"applied": applied, "kept": kept}
+    for k, v in packed.items():
+        if k in BACKUP_PATH_KEYS:
+            cur = cfg.get(k) or ""
+            if str(cur) == str(v or ""):
+                continue
+            if not v:
+                kept.append({"key": k, "from_pack": "", "current": str(cur or ""),
+                             "why": "包里这项是空的，保留当前设置"})
+                continue
+            try:
+                exists = Path(str(v)).exists()
+            except Exception:
+                exists = False
+            if exists:                       # 新电脑上恰好也有这个路径 → 安全套用
+                cfg[k] = v
+                applied[k] = v
+            else:
+                kept.append({"key": k, "from_pack": str(v), "current": str(cur or ""),
+                             "why": "本机没有这个路径，保留当前设置"})
+            continue
+        if cfg.get(k) != v:
+            cfg[k] = v
+            applied[k] = v
+    return {"applied": applied, "kept": kept}
 
 
 class BackupCancelled(Exception):
@@ -2577,6 +2647,13 @@ def make_backup(cfg, dest=None, include_mods=True, include_meta=True, compress=F
         "归档说明": ("已归档的 Mod 载荷不在本包里（长期副本在夸克网盘）："
                  "恢复后本地只有元数据+图，需要时点「从云盘取回」把载荷拉回来。"),
         "分类": sorted(d.name for d in root.iterdir() if d.is_dir()) if root.is_dir() else [],
+        # ---- 迁机：让包自己说清楚「怎么搬到新电脑」 ----
+        "含配置": any(arc.name == CONFIG_PATH.name for arc, _ in entries),
+        "配置项数": (len(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+                    if CONFIG_PATH.is_file() else 0),
+        "迁移说明": ("包里带了 index/mod_manager.json（配置）——恢复时勾「套用备份里的配置」即可；"
+                 "路径类项（Mod 根目录/汇总表/下载/暂存/Penumbra/备份目录）如果新电脑上没有，"
+                 "会自动保留新电脑当前的设置。详细步骤见包内「%s」。" % MIGRATE_NAME),
     }
     comp = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     tmp = dest.with_name(dest.name + ".part")
@@ -2595,6 +2672,10 @@ def make_backup(cfg, dest=None, include_mods=True, include_meta=True, compress=F
     try:
         with zipfile.ZipFile(str(tmp), "w", compression=comp, allowZip64=True) as zf:
             zf.writestr(BACKUP_MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=2))
+            try:
+                zf.writestr(MIGRATE_NAME, migrate_note(cfg))
+            except Exception:
+                pass
             for arc, src in entries:
                 if should_cancel and should_cancel():
                     raise BackupCancelled()
@@ -2660,7 +2741,8 @@ def inspect_backup(zip_path):
     zip_path = Path(zip_path)
     info = {"path": str(zip_path), "bytes": _bsize(zip_path), "ok": False, "error": "",
             "manifest": None, "n_files": 0, "raw_bytes": 0, "mods": [],
-            "has_db": False, "has_excel": False, "excel_name": "", "cats": []}
+            "has_db": False, "has_excel": False, "excel_name": "", "cats": [],
+            "has_config": False, "config_keys": 0, "config_keep": [], "has_migrate_note": False}
     if not zip_path.is_file():
         info["error"] = "文件不存在"
         return info
@@ -2691,6 +2773,22 @@ def inspect_backup(zip_path):
                     if seg and seg[0] and seg[0] not in cats:
                         cats.append(seg[0])
             info["cats"] = cats
+            info["has_migrate_note"] = MIGRATE_NAME in names
+            for n in names:
+                if n.startswith(BACKUP_CFG_PREFIX) and Path(n).name == CONFIG_PATH.name:
+                    info["has_config"] = True
+                    try:
+                        packed = json.loads(zf.read(n).decode("utf-8-sig"))
+                        info["config_keys"] = len(packed)
+                        cur = load_config()
+                        for k in BACKUP_PATH_KEYS:      # 预览：哪些路径类项会被保留
+                            pv = str(packed.get(k) or "")
+                            if pv and pv != str(cur.get(k) or "") and not Path(pv).exists():
+                                info["config_keep"].append({"key": k, "from_pack": pv,
+                                                            "current": str(cur.get(k) or "")})
+                    except Exception:
+                        pass
+                    break
             info["ok"] = bool(info["mods"] or info["has_db"] or info["has_excel"])
             if not info["ok"]:
                 info["error"] = "里面既没有 Mod 文件夹，也没有索引库/汇总表"
@@ -2729,7 +2827,7 @@ def merge_db_from(path: Path) -> int:
 
 
 def restore_backup(cfg, zip_path, include_mods=True, include_meta=True, mode="skip",
-                   progress=None, should_cancel=None, dry_run=False):
+                   progress=None, should_cancel=None, dry_run=False, apply_config=False):
     """从备份 zip 恢复到 Mod 根目录 / 索引库。返回统计 dict。"""
     zip_path = Path(zip_path)
     root = Path(cfg.get("root") or "")
@@ -2741,6 +2839,7 @@ def restore_backup(cfg, zip_path, include_mods=True, include_meta=True, mode="sk
         raise SystemExit("「Mod 文件夹」和「索引库+汇总表」至少要勾一个。")
     st = {"mods_new": 0, "mods_skipped": 0, "mods_overwritten": 0, "mods_renamed": 0,
           "files": 0, "bytes": 0, "db": False, "excel": False, "db_rows": 0,
+          "config": None, "config_error": "", "config_backup": "",
           "renamed_list": [], "db_sidecar": ""}
     with zipfile.ZipFile(str(zip_path)) as zf:
         names = zf.namelist()
@@ -2840,6 +2939,35 @@ def restore_backup(cfg, zip_path, include_mods=True, include_meta=True, mode="sk
                     with zf.open(n) as src, open(str(dst), "wb") as fh:
                         shutil.copyfileobj(src, fh)
                     st["excel"] = True
+
+        # ---------------- 配置（迁机用）：套用包里的 mod_manager.json ----------------
+        if apply_config and not dry_run:
+            packed = None
+            for n in names:
+                if n.startswith(BACKUP_CFG_PREFIX) and Path(n).name == CONFIG_PATH.name:
+                    try:
+                        packed = json.loads(zf.read(n).decode("utf-8-sig"))
+                    except Exception:
+                        packed = None
+                    break
+            if packed is None:
+                st["config_error"] = ("包里没有配置（%s%s）—— 可能是旧版本打的包，"
+                                      "或者打包时没勾「索引库 + 汇总表」"
+                                      % (BACKUP_CFG_PREFIX, CONFIG_PATH.name))
+            else:
+                try:
+                    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                    if CONFIG_PATH.is_file():
+                        dst_bak = BACKUP_DIR / ("mod_manager.json.%s" % backup_stamp())
+                        shutil.copy2(str(CONFIG_PATH), str(dst_bak))
+                        st["config_backup"] = str(dst_bak)
+                    cur = load_config()
+                    st["config"] = apply_backup_config(cur, packed)
+                    save_config(cur)
+                    log("恢复配置：套用 %d 项，保留本机路径 %d 项"
+                        % (len(st["config"]["applied"]), len(st["config"]["kept"])))
+                except Exception as e:
+                    st["config_error"] = "套用配置失败：%s" % str(e)[:160]
     return st
 
 

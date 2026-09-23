@@ -351,7 +351,8 @@ def _job_restore(job: Job):
         job.set(d, t, "%s ｜ %s / %s" % (name, mm.fmt_size(b), mm.fmt_size(tb)))
 
     r = mm.restore_backup(cfg, src, inc_mods, inc_meta, mode, progress=prog,
-                          should_cancel=job.cancelled)
+                          should_cancel=job.cancelled,
+                          apply_config=bool(job.params.get("apply_config")))
     if inc_mods and not job.cancelled():
         job.set(1, 1, "重扫索引并重新生成 Excel…")
         _job_scan(job)
@@ -2351,6 +2352,8 @@ def api_backups():
                 row.update({"mods": len(info["mods"]), "files": info["n_files"],
                             "raw": mm.fmt_size(info["raw_bytes"]),
                             "has_index": info["has_db"], "has_excel": info["has_excel"],
+                            "has_config": info.get("has_config", False),
+                            "config_keys": info.get("config_keys", 0),
                             "cats": info["cats"],
                             "created": (info.get("manifest") or {}).get("备份时间", "")})
             except Exception:
@@ -2381,7 +2384,14 @@ def api_inspect(q):
             "files": d["n_files"], "raw": mm.fmt_size(d["raw_bytes"]),
             "zip": mm.fmt_size(d["bytes"]), "has_index": d["has_db"],
             "has_excel": d["has_excel"], "cats": d["cats"],
-            "created": mf.get("备份时间", ""), "mod_list": d["mods"][:200]}
+            "created": mf.get("备份时间", ""), "mod_list": d["mods"][:200],
+            # ---- 迁机：包里有没有配置、哪些路径项会被保留 ----
+            "has_config": d.get("has_config", False),
+            "config_keys": d.get("config_keys", 0),
+            "config_keep": d.get("config_keep", []),
+            "has_migrate_note": d.get("has_migrate_note", False),
+            "migrate_hint": mf.get("迁移说明", ""),
+            "archived": mf.get("已归档到云端", 0)}
 
 
 def api_images(q):

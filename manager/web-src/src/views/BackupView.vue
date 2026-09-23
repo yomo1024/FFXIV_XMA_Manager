@@ -28,6 +28,8 @@ const mode = ref('skip')
 const include = ref(['mods'])
 
 const showDel = ref(false)
+const applyCfg = ref(true)          // 恢复时套用包里的配置（迁机用）
+const showMigrate = ref(false)      // 「迁机说明」弹窗
 const delTargets = ref([])
 const delWhy = ref('pick')
 const delPerm = ref(false)
@@ -129,6 +131,7 @@ async function openRestore(row) {
   info.value = null
   try {
     info.value = await api.inspect(row.path)
+    applyCfg.value = !!info.value?.has_config
   } catch (e) {
     msg.error(e.message)
   }
@@ -138,6 +141,7 @@ function doRestore() {
   const inc_mods = include.value.includes('mods')
   const inc_meta = include.value.includes('meta')
   if (!inc_mods && !inc_meta) return msg.warning('至少要勾一样')
+  const apply_config = !!applyCfg.value && !!info.value?.has_config
   if (inc_mods && mode.value === 'overwrite') {
     dialog.error({
       title: '确认覆盖？',
@@ -146,13 +150,15 @@ function doRestore() {
       negativeText: '再想想',
       onPositiveClick: () => {
         showRestore.value = false
-        startJob('restore', { file: pick.value.path, mode: mode.value, mods: inc_mods, meta: inc_meta })
+        startJob('restore', { file: pick.value.path, mode: mode.value, mods: inc_mods,
+                              meta: inc_meta, apply_config })
       },
     })
     return
   }
   showRestore.value = false
-  startJob('restore', { file: pick.value.path, mode: mode.value, mods: inc_mods, meta: inc_meta })
+  startJob('restore', { file: pick.value.path, mode: mode.value, mods: inc_mods,
+                        meta: inc_meta, apply_config })
 }
 
 function contentCell(r) {
@@ -163,6 +169,7 @@ function contentCell(r) {
     h('span', {}, r.mods + ' Mod ｜ ' + (r.files || 0) + ' 文件'),
     r.has_index ? tag('+索引库') : null,
     r.has_excel ? tag('+汇总表') : null,
+    r.has_config ? tag('+配置') : null,
   ].filter(Boolean))
 }
 
@@ -207,6 +214,7 @@ const columns = [
     <n-card size="small" title="备份 / 恢复">
       <template #header-extra>
         <n-space>
+          <n-button size="small" @click="showMigrate = true">迁机说明</n-button>
           <n-button size="small" @click="api.open('backup')">打开备份目录</n-button>
           <n-button size="small" @click="load">刷新</n-button>
           <n-button size="small" type="primary" @click="makeBackup">打包备份…</n-button>
@@ -293,6 +301,26 @@ const columns = [
               </n-space>
             </n-checkbox-group>
           </div>
+          <div v-if="info?.has_config" class="cfgbox">
+            <n-checkbox v-model:checked="applyCfg">套用备份里的配置（迁机就用这个）</n-checkbox>
+            <div class="dim">
+              包里带了配置 <b>{{ info.config_keys }}</b> 项（云盘 Cookie、分类顺序、界面偏好…）；
+              恢复前会先把你当前配置备份一份，再套用包里的。
+              <b>路径类</b>（Mod 根目录 / 汇总表 / 下载 / 暂存 / Penumbra / 备份目录）如果这台电脑上没有，
+              会保留当前设置 —— 差异在下面列出来。
+            </div>
+            <n-alert v-if="info.config_keep && info.config_keep.length" type="warning" :show-icon="false">
+              <div>这 {{ info.config_keep.length }} 个路径本机没有，会保留本机的：</div>
+              <div v-for="k in info.config_keep" :key="k.key" class="keep">
+                · <b>{{ k.key }}</b>：包里 <span class="mono">{{ k.from_pack }}</span>
+                → 保留 <span class="mono">{{ k.current || '（空）' }}</span>
+              </div>
+            </n-alert>
+          </div>
+          <n-alert v-else-if="info" type="info" :show-icon="false">
+            这个包里没有配置（可能是旧版本打的包）—— 恢复完到「设置」里手动填一遍即可。
+          </n-alert>
+
           <div>
             <div class="label">已经存在同名的 Mod 时</div>
             <n-radio-group v-model:value="mode">
@@ -311,6 +339,28 @@ const columns = [
           <n-button size="small" type="primary" :disabled="!info?.ok" @click="doRestore">开始恢复</n-button>
         </n-space>
       </template>
+    </n-modal>
+
+    <!-- 迁机说明 -->
+    <n-modal v-model:show="showMigrate" preset="card" style="width: 620px" title="搬到新电脑（迁机）">
+      <n-alert type="info" :show-icon="false" style="margin-bottom:10px">
+        备份包里已经带了：<b>Mod 文件夹</b>（元数据+图+地址.txt）、<b>索引库</b>、<b>汇总表</b>、
+        <b>配置</b>（含云盘 Cookie、分类顺序、界面偏好）。已归档的载荷在网盘里，不用下载。
+      </n-alert>
+      <ol class="steps">
+        <li>新电脑上先装程序：解压部署包（<span class="mono">XMA-Manager-v*.zip</span>）→ 双击
+          <span class="mono">ModManagerWeb.exe</span></li>
+        <li>「备份 / 恢复」→ 恢复这个备份 zip：勾 <b>Mod 文件夹</b> + <b>索引库 + 汇总表</b>，
+          再勾 <b>套用备份里的配置</b>，冲突方式选「跳过已存在」</li>
+        <li>路径类设置（Mod 根目录 / 汇总表 / 下载 / 暂存 / Penumbra / 备份目录）：
+          新电脑上不一样的会自动<b>保留新电脑当前的</b>，恢复完在「设置」里指到对应目录</li>
+        <li>云盘：夸克 Cookie 也带过来了 → 「设置 → 云存储 → 测试连接」确认一下；
+          已归档的载荷不用下载，装进游戏时会自动从云端取回</li>
+        <li>游戏插件：Dalamud 里装好插件后，管理器「设置 → 游戏插件」点一次
+          <b>测试连接 / 自动配对</b>（插件在新电脑上会生成新 Token）</li>
+        <li>浏览器拓展（可选）：按说明加载一次，端口填 8765</li>
+      </ol>
+      <div class="dim">包内也带了一份同样的说明：<span class="mono">迁移到新电脑.txt</span></div>
     </n-modal>
 
     <!-- 删除 -->
@@ -472,5 +522,28 @@ const columns = [
 .rline {
   font-size: 13px;
   margin-bottom: 4px;
+}
+.cfgbox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(32, 128, 240, 0.06);
+}
+.cfgbox .keep {
+  font-size: 12px;
+  line-height: 1.7;
+  word-break: break-all;
+}
+.mono {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+}
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.9;
+  font-size: 13px;
 }
 </style>
