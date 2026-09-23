@@ -1177,11 +1177,21 @@ async function submitForm() {
   }
 }
 function doDelete(rows) {
-  const list = (rows && rows.length ? rows : cur.value ? [cur.value] : [])
+  const src = (rows && rows.length ? rows : cur.value ? [cur.value] : [])
+  // ★ 工具栏按钮传的是 checked = **文件夹路径字符串数组**，右侧按钮传的是整条 Mod 对象。
+  //   这里统一成 {folder, name}：以前直接按对象读 m.folder/m.name，对字符串全是 undefined，
+  //   于是把 undefined 发给后端 → "路径不在 Mod 目录里，拒绝删除"（2026-09 主人报的 bug）。
+  const list = src.map((x) => {
+    if (typeof x === 'string') {
+      const hit = (props.mods || []).find((m) => m.folder === x)
+      return hit || { folder: x, name: x.split(/[\\/]/).filter(Boolean).pop() || x }
+    }
+    return x && x.folder ? x : null
+  }).filter(Boolean)
   if (!list.length) return msg.warning('先选要删的 Mod')
   dialog.warning({
     title: '删除 Mod',
-    content: `要把这 ${list.length} 个 Mod 移入回收站吗？\n${list.slice(0, 6).map((m) => '· ' + m.name).join('\n')}` +
+    content: `要把这 ${list.length} 个 Mod 移入回收站吗？\n${list.slice(0, 6).map((m) => '· ' + (m.name || m.folder)).join('\n')}` +
       (list.length > 6 ? `\n… 还有 ${list.length - 6} 个` : ''),
     positiveText: '移入回收站',
     negativeText: '取消',
@@ -1194,7 +1204,7 @@ function doDelete(rows) {
           await api.deleteMod({ folder: m.folder })
           ok.push(m.name)
         } catch (e) {
-          bad.push(`${m.name}：${e.message}`)
+          bad.push(`${m.name || m.folder || '（没有名字）'}：${e.message}`)
         }
       }
       busy.value = false

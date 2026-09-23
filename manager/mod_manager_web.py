@@ -4646,9 +4646,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def mod_delete(self, b):
         cfg = cfg_now()
-        folder = str(b.get("folder") or "")
+        folder = str(b.get("folder") or "").strip()
+        if not folder:
+            return self._json({"error": "没指定要删哪条 Mod（页面传了个空路径，刷新页面再试一次）"}, 400)
         if not inside_root(folder, cfg.get("root") or ""):
-            return self._json({"error": "路径不在 Mod 目录里，拒绝删除"}, 403)
+            # 把被拒的路径打出来，以后一看就知道是哪条/什么传错了
+            return self._json({"error": "路径不在 Mod 目录里，拒绝删除：%s" % folder}, 403)
         if not Path(folder).exists():
             return self._json({"error": "文件夹不存在"}, 400)
         how = mm.delete_mod(folder, to_recycle=not bool(b.get("permanent")))
