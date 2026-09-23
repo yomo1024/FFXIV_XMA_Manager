@@ -85,13 +85,6 @@ watch(
   },
 )
 
-// 换选中行时，把「已保存的影响/替换」记下来，失焦保存时才知道有没有改动
-watch(
-  () => cur.value && cur.value.folder,
-  () => {
-    if (cur.value) cur.value._affects_saved = cur.value.affects || ''
-  },
-)
 const pickOnce = ref(null)
 
 // 这个 Mod 的全部图片（大图下面那条缩略图）
@@ -110,22 +103,32 @@ const bridgeVerOld = ref(false)     // 插件版本低于管理器要求
 
 // ---------------- 高级搜索 ----------------
 const advOpen = ref(false)
-const fTags = ref([])              // 选中的标签
-const tagMode = ref('any')          // any=任一 all=全部
-const fCats = ref([])               // 分类多选
-const fAuthor = ref('')
-const fAddr = ref('')
+// 高级搜索（照 XMA 那个表单来：几个填空 + 几个下拉，够用就好）
+const fName = ref('')               // 名称包含
+const fAuthor = ref('')             // 作者包含
+const fAffectsText = ref('')        // 影响/替换 包含
+const fTagsText = ref('')           // 标签 包含
+const fCats = ref([])               // 分类（可多选）
 const fInst = ref('')               // '' / yes / no / unknown
 const fImg = ref('')                // '' / yes / no
 const fTagState = ref('')           // '' / has / none
-const fFields = ref(['name', 'author', 'addr', 'folder'])
-const fAffects = ref([])            // 选中的「影响/替换」值（命中任意一个即显示）
-const allTags = ref([])             // [{tag, count}]
+const sortBy = ref('default')       // default / name / author / seq / updated / category
+const sortDir = ref('asc')
+const allTags = ref([])             // [{tag, count}]  ← 给批量条/编辑窗做候选用
 const allAffects = ref([])          // [{affects, count}]
 const advCount = computed(() =>
-  (fTags.value.length ? 1 : 0) + (fCats.value.length ? 1 : 0) + (fAuthor.value ? 1 : 0) +
-  (fAddr.value ? 1 : 0) + (fInst.value ? 1 : 0) + (fImg.value ? 1 : 0) + (fTagState.value ? 1 : 0) +
-  (fAffects.value.length ? 1 : 0))
+  (fName.value.trim() ? 1 : 0) + (fAuthor.value.trim() ? 1 : 0) + (fAffectsText.value.trim() ? 1 : 0) +
+  (fTagsText.value.trim() ? 1 : 0) + (fCats.value.length ? 1 : 0) +
+  (fInst.value ? 1 : 0) + (fImg.value ? 1 : 0) + (fTagState.value ? 1 : 0) +
+  (sortBy.value !== 'default' ? 1 : 0))
+
+const sortOptions = [
+  { label: '默认（分类 + 序号）', value: 'default' },
+  { label: '名称', value: 'name' }, { label: '作者', value: 'author' },
+  { label: '序号', value: 'seq' }, { label: '更新时间', value: 'updated' },
+  { label: '分类', value: 'category' },
+]
+const sortDirOptions = [{ label: '升序 ↑', value: 'asc' }, { label: '降序 ↓', value: 'desc' }]
 
 async function loadTags() {
   try {
@@ -149,14 +152,36 @@ async function loadAffects() {
   }
 }
 
-/** 点列里的值 = 直接按它筛选 */
-function toggleAffectsFilter(v) {
-  const s = String(v || '').trim()
+/** 点表格里的小标签 = 直接按它筛选 */
+function toggleTagFilter(t) {
+  const s = String(t || '').trim()
   if (!s) return
   advOpen.value = true
-  const i = fAffects.value.findIndex((x) => x.toLowerCase() === s.toLowerCase())
-  if (i >= 0) fAffects.value.splice(i, 1)
-  else fAffects.value.push(s)
+  fTagsText.value = fTagsText.value.trim() === s ? '' : s
+}
+
+/** 「影响/替换」在库里是一整串（可能含多项），按逗号拆成一个个，方便像标签那样显示/编辑 */
+function splitList(text) {
+  return String(text || '')
+    .split(/[,，、；;]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+}
+/** 详情面板改「影响/替换」：拆开的数组 → 存回逗号分隔的字符串 */
+async function saveAffectsList(list) {
+  if (!cur.value) return
+  const want = (list || []).map((x) => String(x).trim()).filter(Boolean)
+  const txt = want.join(', ')
+  if (txt === String(cur.value.affects || '').trim()) return
+  try {
+    const r = await api.setAffects(cur.value.folder, txt)
+    cur.value.affects = r.affects
+    await loadAffects()
+    msg.success(r.affects ? `已保存影响/替换：${r.affects}` : '已清空影响/替换')
+    emit('changed')
+  } catch (e) {
+    msg.error('保存影响/替换失败：' + e.message)
+  }
 }
 
 const instOptions = [
@@ -164,42 +189,18 @@ const instOptions = [
 ]
 const imgOptions = [{ label: '有预览图', value: 'yes' }, { label: '没有预览图', value: 'no' }]
 const tagStateOptions = [{ label: '有标签', value: 'has' }, { label: '没有标签', value: 'none' }]
-const fieldOptions = [
-  { label: '名称', value: 'name' }, { label: '作者', value: 'author' },
-  { label: '地址', value: 'addr' }, { label: '路径', value: 'folder' },
-  { label: '分类', value: 'category' }, { label: '标签', value: 'tags' },
-  { label: '影响/替换', value: 'affects' },
-]
-
 function clearAdv() {
-  fTags.value = []; fCats.value = []; fAuthor.value = ''; fAddr.value = ''
-  fInst.value = ''; fImg.value = ''; fTagState.value = ''; fAffects.value = []
-  q.value = ''; cat.value = ''; sub.value = ''; zone.value = ''
+  fName.value = ''; fAuthor.value = ''; fAffectsText.value = ''; fTagsText.value = ''
+  fCats.value = []; fInst.value = ''; fImg.value = ''; fTagState.value = ''
+  sortBy.value = 'default'; sortDir.value = 'asc'
+  q.value = ''; cat.value = ''; sub.value = ''; zone.value = ''; onlyUpd.value = false
 }
 
-function toggleTagFilter(t) {
-  advOpen.value = true
-  const i = fTags.value.findIndex((x) => x.toLowerCase() === String(t).toLowerCase())
-  if (i >= 0) fTags.value.splice(i, 1)
-  else fTags.value.push(t)
-}
-
-function hitTags(m, picked, mode) {
-  const mine = (m.tags || []).map((x) => x.toLowerCase())
-  if (!picked.length) return true
-  return mode === 'all'
-    ? picked.every((t) => mine.includes(String(t).toLowerCase()))
-    : picked.some((t) => mine.includes(String(t).toLowerCase()))
-}
-
+/** 顶部搜索框：所有字段一起找（不再让用户选「关键字范围」，太绕） */
 function fieldHit(m, needle) {
-  const fields = fFields.value.length ? fFields.value : ['name', 'author', 'addr', 'folder']
-  return fields.some((f) => {
-    if (f === 'tags') return (m.tags || []).some((t) => String(t).toLowerCase().includes(needle))
-    const v = { name: m.name, author: m.author, addr: m.addr, folder: m.rel || m.folder,
-                category: m.category, subcat: m.subcat, affects: m.affects }[f] || ''
-    return String(v).toLowerCase().includes(needle)
-  })
+  const parts = [m.name, m.author, m.addr, m.rel || m.folder, m.category, m.subcat, m.affects,
+                 (m.tags || []).join(' ')]
+  return parts.some((v) => String(v || '').toLowerCase().includes(needle))
 }
 
 async function saveTags(list) {   // 单条：整条覆盖
@@ -314,23 +315,6 @@ async function submitReplace() {
     msg.error('替换失败：' + e.message)
   } finally {
     repReplacing.value = false
-  }
-}
-
-async function saveAffects() {          // 失焦/回车即保存（和标签一样的即时反馈）
-  if (!cur.value) return
-  const want = String(cur.value.affects || '').trim()
-  const old = String(cur.value._affects_saved ?? '').trim()
-  if (want === old) return
-  try {
-    const r = await api.setAffects(cur.value.folder, want)
-    cur.value.affects = r.affects
-    cur.value._affects_saved = r.affects
-    await loadAffects()
-    msg.success(r.affects ? `已保存影响/替换：${r.affects}` : '已清空影响/替换')
-    emit('changed')
-  } catch (e) {
-    msg.error('保存影响/替换失败：' + e.message)
   }
 }
 
@@ -652,24 +636,21 @@ watch(
 )
 
 // ------------------------------------------------------------------ 表格
-const view = computed(() =>
+const filtered = computed(() =>
   props.mods.filter((m) => {
     if (cat.value && m.category !== cat.value) return false
     if (zone.value && m.nsfw !== zone.value) return false
     if (sub.value && (m.subcat || '') !== sub.value) return false
     const k = q.value.trim().toLowerCase()
     if (k && !fieldHit(m, k)) return false
-    // ---------- 高级搜索 ----------
+    // ---------- 高级搜索（就是几个填空/下拉，跟 XMA 那个表单一个思路）----------
+    const has = (v, needle) => String(v || '').toLowerCase().includes(String(needle).toLowerCase())
+    if (fName.value.trim() && !has(m.name, fName.value.trim())) return false
+    if (fAuthor.value.trim() && !has(m.author, fAuthor.value.trim())) return false
+    if (fAffectsText.value.trim() && !has(m.affects, fAffectsText.value.trim())) return false
+    if (fTagsText.value.trim() &&
+        !(m.tags || []).some((t) => has(t, fTagsText.value.trim()))) return false
     if (fCats.value.length && !fCats.value.includes(m.category)) return false
-    if (fAuthor.value.trim() &&
-        !String(m.author || '').toLowerCase().includes(fAuthor.value.trim().toLowerCase())) return false
-    if (fAddr.value.trim() &&
-        !String(m.addr || '').toLowerCase().includes(fAddr.value.trim().toLowerCase())) return false
-    if (!hitTags(m, fTags.value, tagMode.value)) return false
-    if (fAffects.value.length) {
-      const mine = String(m.affects || '').toLowerCase()
-      if (!fAffects.value.some((v) => mine.includes(String(v).toLowerCase()))) return false
-    }
     if (onlyUpd.value && !m.update_avail) return false
     if (fTagState.value === 'has' && !(m.tags || []).length) return false
     if (fTagState.value === 'none' && (m.tags || []).length) return false
@@ -681,6 +662,26 @@ const view = computed(() =>
     return true
   }),
 )
+/** 排序（照 XMA 的 Sort by + 升/降序）：默认还是按分类+序号 */
+const view = computed(() => {
+  const list = [...filtered.value]
+  const by = sortBy.value
+  const dir = sortDir.value === 'desc' ? -1 : 1
+  if (by === 'default') return list
+  const val = (m) => {
+    if (by === 'seq') return Number(m.seq) || 0
+    if (by === 'updated') return String(m.site_latest || m.site_updated || '')
+    if (by === 'author') return String(m.author || '').toLowerCase()
+    if (by === 'category') return String(m.category || '').toLowerCase()
+    return String(m.name || '').toLowerCase()      // name
+  }
+  return list.sort((a, b) => {
+    const x = val(a), y = val(b)
+    if (x < y) return -1 * dir
+    if (x > y) return 1 * dir
+    return 0
+  })
+})
 const subFilterOptions = computed(() => {
   const s = new Set()
   props.mods.forEach((m) => {
@@ -730,21 +731,10 @@ const columns = computed(() => [
       { default: () => r.nsfw }),
   },
   {
-    title: '影响/替换', key: 'affects', width: 190, minWidth: 120, resizable: true,
-    render: (r) => {
-      const v = String(r.affects || '').trim()
-      if (!v) return h('span', { style: 'opacity:.35' }, '—')
-      return h('span', {
-        style: 'cursor:pointer;border-bottom:1px dashed currentColor',
-        title: '点一下按它筛选',
-        onClick: (e) => { e.stopPropagation(); toggleAffectsFilter(v) },
-      }, v)
-    },
-  },
-  {
     title: '更新时间', key: 'site_updated', width: 168, resizable: true,
     render: (r) => {
-      const v = String(r.site_updated || '').trim()
+      // 优先显示「站点上最后更新时间」（检查更新就能填上）；老数据没查过就退回首行基线
+      const v = String(r.site_latest || r.site_updated || '').trim()
       const kids = []
       if (r.update_avail) {
         kids.push(h(NTag, {
@@ -754,12 +744,15 @@ const columns = computed(() => [
         }, { default: () => '有新版' }))
       }
       kids.push(h('span', { style: v ? '' : 'opacity:.35' }, v ? v.slice(0, 10) : '—'))
-      return h(NTooltip, {
+      // 注意：naive-ui 的插槽要作为 h() 的**第三个参数**传；写成 props 会静默渲染成空（踩过）
+      return h(NTooltip, null, {
         trigger: () => h('div', { style: 'display:flex;align-items:center;gap:2px' }, kids),
         default: () => [
-          `本地这份：站点更新时间 ${r.site_updated || '未知'}`,
-          r.site_latest ? `站点现在：${r.site_latest}${r.site_version ? '（v' + r.site_version + '）' : ''}` : '',
+          `站点上最后更新：${r.site_latest || r.site_updated || '未知'}`,
+          r.site_version ? `站点版本：v${r.site_version}` : '',
           r.site_checked ? `上次检查：${r.site_checked}` : '',
+          r.site_updated && r.site_latest && r.site_updated !== r.site_latest
+            ? `本地这份下载于：${r.site_updated}` : '',
         ].filter(Boolean).join('｜'),
       })
     },
@@ -801,7 +794,6 @@ function openEdit() {
   form.value = { src: '', folder: m.folder, category: m.category, zone: m.nsfw,
                  subcat: m.subcat || '', seq: m.seq, author: m.author, name: m.name,
                  addr: m.addr || '', affects: m.affects || '', move: false }
-  m._affects_saved = m.affects || ''
   mode.value = 'edit'
   showForm.value = true
 }
@@ -819,10 +811,7 @@ async function submitForm() {
         folder: f.folder, category: f.category, zone: f.zone, subcat: f.subcat || '',
         author: f.author, name: f.name, seq: f.seq, addr: f.addr, affects: f.affects || '',
       })
-      if (cur.value && cur.value.folder === f.folder) {
-        cur.value.affects = r.affects ?? (f.affects || '')
-        cur.value._affects_saved = cur.value.affects
-      }
+      if (cur.value && cur.value.folder === f.folder) cur.value.affects = r.affects ?? (f.affects || '')
       msg.success('已更新：' + r.rel)
     }
     showForm.value = false
@@ -963,103 +952,76 @@ async function copyPath() {
   <div class="wrap">
     <div class="left">
       <div class="bar">
-        <n-input ref="searchEl" v-model:value="q" placeholder="搜索 作者 / 名称 / 路径…" size="small" clearable
-                 style="width: 190px" />
-        <n-button size="small" :type="advOpen ? 'primary' : 'default'" @click="advOpen = !advOpen">
-          高级搜索{{ advCount ? `（${advCount}）` : '' }}
-        </n-button>
+        <n-input ref="searchEl" v-model:value="q" placeholder="搜索 名称／作者／标签／影响替换／路径…" size="small"
+                 clearable style="width: 230px" />
         <n-select v-model:value="cat" :options="catOptions" size="small" clearable
-                  placeholder="全部分类" style="width: 150px" />
+                  placeholder="全部分类" style="width: 140px" />
         <n-select v-model:value="sub" :options="subFilterOptions" size="small" clearable
-                  placeholder="全部子分类" style="width: 130px" />
+                  placeholder="全部子分类" style="width: 120px" />
         <n-select v-model:value="zone" :options="zoneOptions" size="small" clearable
-                  placeholder="全部类型" style="width: 110px" />
+                  placeholder="全部类型" style="width: 104px" />
+        <n-button size="small" :type="advOpen ? 'primary' : 'default'" @click="advOpen = !advOpen">
+          筛选{{ advCount ? `（${advCount}）` : '' }}
+        </n-button>
         <n-button-group size="small">
           <n-button :type="wall ? 'default' : 'primary'" @click="wall = false">表格</n-button>
           <n-button :type="wall ? 'primary' : 'default'" @click="wall = true">图片墙</n-button>
         </n-button-group>
         <span class="dim">共 {{ mods.length }} 条 ｜ 显示 {{ view.length }} 条</span>
         <div class="grow"></div>
-        <n-button size="small" :loading="updateChecking" @click="checkUpdates">检查更新</n-button>
-        <n-button v-if="updCount" size="small" :type="onlyUpd ? 'primary' : 'default'"
-                  @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>
-        <n-select v-model:value="replaceMode" size="small" style="width: 152px"
-                  :options="[{ label: '只替换同名文件', value: 'same_name' },
-                             { label: '清掉旧文件再放', value: 'all_payload' }]" />
-        <n-button size="small" :loading="updating" :disabled="!updFolders.length" @click="doUpdate()">
-          更新选中{{ updFolders.length ? `（${updFolders.length}）` : '' }}
-        </n-button>
         <n-button size="small" type="primary" @click="openAdd">添加 Mod…</n-button>
         <n-button size="small" @click="openEdit" :disabled="!cur">编辑</n-button>
         <n-button size="small" :disabled="!checked.length && !cur" @click="doDelete(checked)">
           删除{{ checked.length ? `（${checked.length}）` : '' }}
         </n-button>
-        <n-button size="small" :disabled="!cur" :loading="fixing" @click="fixCover">
-          补预览图
-        </n-button>
+        <n-button size="small" :disabled="!cur" :loading="fixing" @click="fixCover">补预览图</n-button>
+      </div>
+      <div class="bar row2">
+        <n-button size="small" :loading="updateChecking" @click="checkUpdates">检查更新</n-button>
+        <template v-if="updCount">
+          <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
+                    @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>
+          <n-select v-model:value="replaceMode" size="small" style="width: 148px"
+                    :options="[{ label: '只替换同名文件', value: 'same_name' },
+                               { label: '清掉旧文件再放', value: 'all_payload' }]" />
+          <n-button size="small" :loading="updating" :disabled="!updFolders.length" @click="doUpdate()">
+            更新选中{{ updFolders.length ? `（${updFolders.length}）` : '' }}
+          </n-button>
+        </template>
+        <span v-else class="dim">检查到站点有新版本时，这里会出现「只看有新版 / 更新选中」</span>
       </div>
       <div v-if="advOpen" class="advbar">
-        <div class="row">
+        <div class="advgrid">
+          <span class="lbl">名称</span>
+          <n-input v-model:value="fName" size="small" clearable placeholder="名称包含…" />
+          <span class="lbl">作者</span>
+          <n-input v-model:value="fAuthor" size="small" clearable placeholder="作者包含…" />
+          <span class="lbl">影响/替换</span>
+          <n-input v-model:value="fAffectsText" size="small" clearable placeholder="它替换的对象包含…" />
           <span class="lbl">标签</span>
-          <n-select v-model:value="fTags" :options="tagOptions" multiple filterable clearable
-                    size="small" placeholder="选标签（可多选；也能直接输入找）" style="width: 300px" />
-          <n-radio-group v-model:value="tagMode" size="small">
-            <n-radio-button value="any">任一</n-radio-button>
-            <n-radio-button value="all">全部</n-radio-button>
-          </n-radio-group>
-          <n-select v-model:value="fTagState" :options="tagStateOptions" size="small" clearable
-                    placeholder="标签有无" style="width: 120px" />
-        </div>
-        <div class="row">
+          <n-input v-model:value="fTagsText" size="small" clearable placeholder="标签包含…" />
           <span class="lbl">分类</span>
           <n-select v-model:value="fCats" :options="catOptions" multiple filterable clearable
-                    size="small" placeholder="可多选分类" style="width: 240px" />
-          <span class="lbl">作者</span>
-          <n-input v-model:value="fAuthor" size="small" placeholder="作者包含…" style="width: 130px" />
-          <span class="lbl">地址</span>
-          <n-input v-model:value="fAddr" size="small" placeholder="地址包含…" style="width: 130px" />
-        </div>
-        <div class="row">
-          <span class="lbl">安装</span>
+                    size="small" placeholder="可多选" />
+          <span class="lbl">安装状态</span>
           <n-select v-model:value="fInst" :options="instOptions" size="small" clearable
-                    placeholder="安装状态" style="width: 120px" />
+                    placeholder="全部" />
+          <span class="lbl">标签有无</span>
+          <n-select v-model:value="fTagState" :options="tagStateOptions" size="small" clearable
+                    placeholder="全部" />
           <span class="lbl">预览图</span>
           <n-select v-model:value="fImg" :options="imgOptions" size="small" clearable
-                    placeholder="预览图" style="width: 130px" />
-          <span class="lbl">影响/替换</span>
-          <n-select v-model:value="fAffects" :options="affectsOptions" multiple filterable clearable
-                    size="small" placeholder="选它替换的对象（可多选）" style="width: 240px" />
-          <span class="lbl">关键字范围</span>
-          <n-checkbox-group v-model:value="fFields" size="small">
-            <n-checkbox v-for="f in fieldOptions" :key="f.value" :value="f.value" :label="f.label"
-                        style="margin-right:8px" />
-          </n-checkbox-group>
+                    placeholder="全部" />
+          <span class="lbl">排序</span>
+          <n-select v-model:value="sortBy" :options="sortOptions" size="small" />
+          <span class="lbl">方向</span>
+          <n-select v-model:value="sortDir" :options="sortDirOptions" size="small" />
         </div>
         <div class="row">
-          <n-button size="small" @click="clearAdv">清空全部条件</n-button>
-          <n-button size="small" quaternary @click="loadTags">刷新标签列表</n-button>
-          <n-button size="small" quaternary @click="loadAffects">刷新影响/替换列表</n-button>
+          <n-button size="small" @click="clearAdv">清空条件</n-button>
           <span class="dim">当前显示 {{ view.length }} / {{ mods.length }} 条</span>
           <div class="grow"></div>
           <span class="dim">提示：点表格里的小标签，可以快速按它筛选</span>
-        </div>
-        <div v-if="allAffects.length" class="row tagcloud">
-          <span class="lbl">影响/替换</span>
-          <n-tag v-for="af in allAffects" :key="af.affects" size="tiny" checkable
-                 :checked="fAffects.some((x) => x.toLowerCase() === af.affects.toLowerCase())"
-                 style="margin: 1px 4px 1px 0"
-                 @update:checked="toggleAffectsFilter(af.affects)">
-            {{ af.affects }} <span style="opacity:.5">{{ af.count }}</span>
-          </n-tag>
-        </div>
-        <div v-if="allTags.length" class="row tagcloud">
-          <span class="lbl">全部标签</span>
-          <n-tag v-for="tg in allTags" :key="tg.tag" size="tiny" checkable
-                 :checked="fTags.some((x) => x.toLowerCase() === tg.tag.toLowerCase())"
-                 style="margin: 1px 4px 1px 0"
-                 @update:checked="toggleTagFilter(tg.tag)">
-            {{ tg.tag }} <span style="opacity:.5">{{ tg.count }}</span>
-          </n-tag>
         </div>
       </div>
       <div v-if="checked.length" class="batchbar">
@@ -1103,7 +1065,7 @@ async function copyPath() {
           :columns="columns" :data="view" :row-class-name="rowClassName" :row-props="rowProps"
           :row-key="(r) => r.folder" :checked-row-keys="checked"
           @update:checked-row-keys="(k) => (checked = k)"
-          :max-height="'100%'" :scroll-x="1578" size="small" striped flex-height
+          :max-height="'100%'" :scroll-x="1390" size="small" striped flex-height
         />
         <n-empty v-else style="margin: auto" description="还没有索引数据，点右上角「重新扫描」" />
       </div>
@@ -1167,12 +1129,12 @@ async function copyPath() {
           <n-descriptions-item label="序号">{{ cur?.seq ?? '—' }}</n-descriptions-item>
           <n-descriptions-item label="子分类">{{ cur?.subcat || '—' }}</n-descriptions-item>
         <n-descriptions-item label="更新时间" :span="2">
-          {{ cur?.site_updated || '—' }}
+          {{ cur?.site_latest || cur?.site_updated || '—' }}
           <n-tag v-if="cur?.update_avail" size="tiny" type="warning" :bordered="false"
                  style="margin-left:6px;cursor:pointer" @click="onlyUpd = true">有新版</n-tag>
-          <span v-if="cur?.site_latest" class="dim">
-            ｜ 站点最新 {{ cur.site_latest }}{{ cur.site_version ? '（v' + cur.site_version + '）' : '' }}
-          </span>
+          <span v-if="cur?.site_version" class="dim">｜ 站点版本 v{{ cur.site_version }}</span>
+          <span v-if="cur?.site_updated && cur?.site_latest && cur.site_updated !== cur.site_latest"
+                class="dim">｜ 本地这份下载于 {{ cur.site_updated }}</span>
         </n-descriptions-item>
           <n-descriptions-item label="作者">{{ cur?.author || '—' }}</n-descriptions-item>
           <n-descriptions-item label="类型" :span="2">{{ cur?.nsfw || '—' }}</n-descriptions-item>
@@ -1194,10 +1156,8 @@ async function copyPath() {
           <span class="lbl" title="这条 Mod 替换/影响游戏里的哪些东西（来自 XMA 的 Affects / Replaces）">
             影响/替换
           </span>
-          <n-input :value="(cur && cur.affects) || ''" size="small" :disabled="!cur"
-                   placeholder="例如：Eerie Tights ／ Skin, Body（改完点空白处即保存）"
-                   @update:value="(v) => cur && (cur.affects = v)"
-                   @blur="saveAffects" @keyup.enter="saveAffects" />
+          <n-dynamic-tags :value="splitList(cur && cur.affects)" size="small"
+                          :disabled="!cur" @update:value="saveAffectsList" />
         </div>
         <n-descriptions :column="1" label-placement="left" size="small" label-width="56">
           <n-descriptions-item label="地址">
@@ -1806,6 +1766,17 @@ async function copyPath() {
 </style>
 
 <style>
+.bar.row2 {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed rgba(128, 128, 128, 0.25);
+}
+.advbar .advgrid {
+  display: grid;
+  grid-template-columns: auto minmax(150px, 1fr) auto minmax(150px, 1fr);
+  gap: 6px 10px;
+  align-items: center;
+}
 .n-data-table .row-installed td {
   background: rgba(60, 200, 120, 0.1) !important;
 }
