@@ -181,6 +181,61 @@ public class MainWindow : Window, IDisposable
 
         ImGui.Separator();
 
+        // ================= 封面 / 其它（以前只能改配置文件，现在能勾） =================
+        ImGui.Text("封面 / 其它");
+
+        var drawCovers = cfg.DrawCovers;
+        if (ImGui.Checkbox("自己在 Penumbra 面板里画封面", ref drawCovers))
+        {
+            cfg.DrawCovers = drawCovers;
+            cfg.Save();
+        }
+        ImGui.SameLine();
+        var skipHelio = cfg.SkipHeliosphereMods;
+        if (ImGui.Checkbox("Heliosphere 的包让它的插件去画（免得画两遍）", ref skipHelio))
+        {
+            cfg.SkipHeliosphereMods = skipHelio;
+            cfg.Save();
+        }
+
+        var coverSize = cfg.CoverSize;
+        ImGui.SetNextItemWidth(150);
+        if (ImGui.SliderFloat("封面高度比例", ref coverSize, 0.1f, 1.0f, "%.3f"))
+        {
+            cfg.CoverSize = coverSize;
+            cfg.Save();
+        }
+        ImGui.SameLine();
+        ImGui.TextColored(Dim, "（Heliosphere 默认 0.375）");
+
+        var helioNaming = cfg.UseHeliosphereNaming;
+        if (ImGui.Checkbox("装 Heliosphere 包时用它的规范目录名（hs-名字-版本-Sqids）", ref helioNaming))
+        {
+            cfg.UseHeliosphereNaming = helioNaming;
+            cfg.Save();
+        }
+
+        var maxHist = cfg.MaxHistory;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputInt("安装记录保留条数", ref maxHist))
+        {
+            cfg.MaxHistory = Math.Clamp(maxHist, 5, 500);
+            cfg.Save();
+        }
+
+        var referer = cfg.DownloadReferer ?? string.Empty;
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputText("下载 Referer##referer", ref referer, 512);
+        if (ImGui.IsItemDeactivatedAfterEdit()
+            && !string.Equals(referer, cfg.DownloadReferer, StringComparison.Ordinal))
+        {
+            cfg.DownloadReferer = referer;
+            cfg.Save();
+        }
+        ImGui.TextColored(Dim, "有些站点挡外链，带上 Referer 才下得动；一般不用改");
+
+        ImGui.Separator();
+
         // ================= 安装记录 =================
         ImGui.Text("安装记录");
         ImGui.SameLine();

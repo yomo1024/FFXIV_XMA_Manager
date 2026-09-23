@@ -213,7 +213,11 @@ Penumbra.Api.IpcSubscribers.PreSettingsTabBarDraw.Subscriber(pi, (directory, wid
 - 配置项（配置文件里可直接改）：
   | 键 | 默认 | 说明 |
   | --- | --- | --- |
-  | `AutoCloseWhenDone` | false | **安装任务全部结束后自动关掉插件窗口**（窗口里可勾选） |
+  > 下面这些**都能在插件窗口里直接改**（`/modbridge` → 「行为开关」和「封面 / 其它」两块）；
+  > 配置文件里也能改。
+  | 键 | 默认 | 说明 |
+  | --- | --- | --- |
+  | `AutoCloseWhenDone` | false | **安装任务全部结束后自动关掉插件窗口** |
   | `AutoCloseDelaySec` | 3 | 自动关窗前停留几秒（0~60） |
   | `AutoOpenOnRequest` | true | 收到"待确认安装"时自动弹出窗口（和上面那条配成一套） |
   | `DrawCovers` | true | 关掉就不自己画 |
