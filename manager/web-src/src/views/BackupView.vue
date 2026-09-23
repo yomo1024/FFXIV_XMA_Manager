@@ -25,7 +25,7 @@ const showRestore = ref(false)
 const pick = ref(null)
 const info = ref(null)
 const mode = ref('skip')
-const include = ref(['mods'])
+const include = ref(['mods', 'meta'])
 
 const showDel = ref(false)
 const applyCfg = ref(true)          // 恢复时套用包里的配置（迁机用）
@@ -132,6 +132,8 @@ async function openRestore(row) {
   try {
     info.value = await api.inspect(row.path)
     applyCfg.value = !!info.value?.has_config
+    // 包里带索引库就默认勾上 —— 云端状态/标签/影响替换都在索引库里，不勾重扫就重建不出来
+    include.value = info.value?.has_index ? ['mods', 'meta'] : ['mods']
   } catch (e) {
     msg.error(e.message)
   }
@@ -292,12 +294,18 @@ const columns = [
           <div class="rline dim">
             已归档到云端的 Mod：载荷不在包里，恢复后需要时点「从云盘取回」。
           </div>
+          <n-alert v-if="info && (info.archived || info.has_index) && !include.includes('meta')"
+                   type="error" :show-icon="false">
+            包里含索引库{{ info.archived ? '，其中 ' + info.archived + ' 条 Mod 的载荷已归档到云端' : '' }} ——
+            <b>不勾「索引库 + 汇总表」会把云端状态 / 标签 / 影响替换 / 站点版本全丢掉</b>
+            （重扫只能重建文件夹层面的信息）。建议勾上。
+          </n-alert>
           <div>
             <div class="label">恢复什么</div>
             <n-checkbox-group v-model:value="include">
               <n-space vertical>
                 <n-checkbox value="mods">Mod 文件夹</n-checkbox>
-                <n-checkbox value="meta">索引库 + 汇总表（一般不用勾，恢复完会自动重扫重建）</n-checkbox>
+                <n-checkbox value="meta">索引库 + 汇总表（<b>迁机 / 想保住云状态·标签就勾上</b>；恢复完会自动重扫重建缺的部分）</n-checkbox>
               </n-space>
             </n-checkbox-group>
           </div>

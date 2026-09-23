@@ -2839,8 +2839,26 @@ def restore_backup(cfg, zip_path, include_mods=True, include_meta=True, mode="sk
         raise SystemExit("「Mod 文件夹」和「索引库+汇总表」至少要勾一个。")
     st = {"mods_new": 0, "mods_skipped": 0, "mods_overwritten": 0, "mods_renamed": 0,
           "files": 0, "bytes": 0, "db": False, "excel": False, "db_rows": 0,
-          "config": None, "config_error": "", "config_backup": "",
+          "config": None, "config_error": "", "config_backup": "", "cloud_warn": "",
           "renamed_list": [], "db_sidecar": ""}
+    # 包内库的「已归档」条数：用来在恢复后自检云端状态有没有丢
+    packed_archived = None
+    if not include_meta:
+        try:
+            with zipfile.ZipFile(str(zip_path)) as _zf:
+                for _n in _zf.namelist():
+                    if _n.startswith(BACKUP_DB_PREFIX) and _n.endswith(".db"):
+                        _tmp = Path(str(DB_PATH) + ".peek")
+                        with _zf.open(_n) as _s, open(str(_tmp), "wb") as _fh:
+                            shutil.copyfileobj(_s, _fh)
+                        _cx = sqlite3.connect(str(_tmp))
+                        packed_archived = _cx.execute(
+                            "SELECT COUNT(*) FROM mods WHERE cloud_state='archived'").fetchone()[0]
+                        _cx.close()
+                        _tmp.unlink(missing_ok=True)
+                        break
+        except Exception:
+            packed_archived = None
     with zipfile.ZipFile(str(zip_path)) as zf:
         names = zf.namelist()
         infos = {i.filename: i for i in zf.infolist()}
@@ -2968,6 +2986,23 @@ def restore_backup(cfg, zip_path, include_mods=True, include_meta=True, mode="sk
                         % (len(st["config"]["applied"]), len(st["config"]["kept"])))
                 except Exception as e:
                     st["config_error"] = "套用配置失败：%s" % str(e)[:160]
+
+    # ---------------- 自检：云端状态/元数据有没有因为「没勾索引库」而丢 ----------------
+    if packed_archived:
+        try:
+            _cx = sqlite3.connect(str(DB_PATH))
+            now_archived = _cx.execute(
+                "SELECT COUNT(*) FROM mods WHERE cloud_state='archived'").fetchone()[0]
+            _cx.close()
+        except Exception:
+            now_archived = 0
+        if now_archived < packed_archived:
+            st["cloud_warn"] = (
+                "注意：这个备份里有 %d 条 Mod 的载荷在云端，但本机现在只认出 %d 条 —— "
+                "多半是恢复时没勾「索引库 + 汇总表」（重扫只能重建文件层面的信息，"
+                "云端状态/标签/影响替换都在索引库里）。重新恢复一次并勾上它就回来了；"
+                "Mod 文件夹已存在会被跳过，不影响已恢复的内容。" % (packed_archived, now_archived))
+            log("恢复自检：" + st["cloud_warn"])
     return st
 
 
