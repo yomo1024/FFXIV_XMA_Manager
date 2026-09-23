@@ -1235,6 +1235,117 @@ def _job_update_check(job: Job):
 #     非秒传时比对云端回读的文件大小。**不重复下载整包**（主人认可的取舍）；
 #     要全量下载复核时用「校验」动作。
 PAYLOAD_EXT = (".pmp", ".ttmp2", ".pcp", ".zip", ".7z", ".rar")
+COVER_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
+
+
+def local_covers(folder) -> list:
+    """这条 mod 在**本地**的预览图候选（相对 mod 文件夹的路径）。
+
+    两条来源（实测两类都存在）：
+      ① mod 文件夹里的图（`[Pocky] Botanica Ruffle.jpg` 这种）
+      ② 分类目录里的**同级大图**（`9.[Pocky] Botanica Ruffle.jpg` —— 在文件夹外面！）
+    ②是最脆的一类：只要单独搬走 mod 文件夹（或从云端重建），图就丢了。
+    """
+    p = Path(str(folder))
+    if not p.is_dir():
+        return []
+    out = []
+    for dp, dn, fn in os.walk(p):
+        for n in fn:
+            if os.path.splitext(n)[1].lower() not in COVER_EXT:
+                continue
+            q = Path(dp) / n
+            try:
+                stt = q.stat()
+            except OSError:
+                continue
+            out.append({"abs": str(q), "rel": os.path.relpath(str(q), str(p)),
+                        "size": stt.st_size, "mtime": stt.st_mtime})
+    out.sort(key=lambda x: (x["rel"].count(os.sep), len(x["rel"])))
+    return out
+
+
+def pull_cover_from_cloud(cfg, folder, on_step=None) -> dict:
+    """库里的 mod 文件夹没有图时，去**云端目录**把预览图取回来（并记账）。
+
+    为什么需要它（2026-09 主人点出的真根因）：
+      预览图其实一直在云端（整目录传过，连 地址.txt 都在），但「取回」只按载荷清单
+      拉 .pmp → 图从来没被列进去 → 新电脑取回后库里没图 → 推给插件时无图可写，
+      游戏里那条 mod 目录就永远是空的。这条自愈路径让「换机 / 重装 / 新环境」也能出图。
+
+    尽力而为：任何失败都只记日志，不打断调用方（安装/补封面）。
+    """
+    folder = str(folder)
+    if local_covers(folder):
+        return {"ok": True, "why": "库里已有图", "files": 0}
+    try:
+        drv = cloud_drive(cfg)
+        st = mm.Store()
+        row = st.cx.execute("SELECT cloud_path FROM mods WHERE folder=?", (folder,)).fetchone()
+        st.cx.close()
+        cpath = (row["cloud_path"] if row else "") or mod_cloud_path(cfg, folder)
+        fid = drv.resolve(cpath)
+        if not fid:
+            return {"ok": False, "why": "云端目录找不到：%s" % cpath}
+        items = _cloud_walk(drv, fid)
+        imgs = [x for x in items if os.path.splitext(x[0])[1].lower() in COVER_EXT]
+        if not imgs:
+            return {"ok": False, "why": "云端目录里也没有图"}
+        root = Path(folder)
+        got, recs = 0, []
+        for rel, size, cfid in imgs:
+            if on_step:
+                on_step(rel)
+            try:
+                data = _cloud_download(drv, cfg, cfid)
+                dest = root / rel.replace("/", os.sep)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                recs.append({"rel_path": rel.replace("/", os.sep), "size": len(data), "cloud_fid": cfid})
+                got += 1
+            except Exception as e:
+                mm.log("取回预览图失败 %s/%s：%s" % (root.name, rel, e))
+        if recs:
+            st = mm.Store()
+            st.set_payload_files(folder, recs, state="cover")
+            st.cx.close()
+        mm.log("从云端取回预览图：%s（%d/%d 张）" % (root.name, got, len(imgs)))
+        return {"ok": got > 0, "files": got, "total": len(imgs),
+                "why": "" if got else "下载失败"}
+    except Exception as e:
+        mm.log(traceback.format_exc())
+        return {"ok": False, "why": str(e)[:160]}
+
+
+def ensure_cover_inside(folder) -> dict:
+    """让「封面就在 mod 文件夹里」成立 —— mod 文件夹自包含。
+
+    为什么必须做：预览图常常只在**分类目录里**（同级大图）。一旦只搬 mod 文件夹、
+    或在新电脑上只从云端取回载荷，图就没了 → 推给游戏插件时无图可写 → 目录里没图。
+    只**复制**一份进来，**不删**外面那张（不制造副作用）。
+    """
+    p = Path(str(folder))
+    if not p.is_dir():
+        return {"ok": False, "why": "mod 文件夹不存在"}
+    inside = local_covers(p)
+    if inside:
+        return {"ok": True, "inside": inside[0]["abs"], "copied": None}
+    src = None
+    for ext in COVER_EXT:
+        s = p.parent / (p.name + ext)
+        if s.is_file():
+            src = s
+            break
+    if src is None:
+        return {"ok": False, "why": "文件夹内和分类目录里都没有图"}
+    dst = p / src.name
+    try:
+        import shutil as _sh
+        _sh.copy2(str(src), str(dst))
+        mm.log("封面自包含：%s ← %s（外面那张保留）" % (dst, src))
+        return {"ok": True, "inside": str(dst), "copied": str(src)}
+    except Exception as e:
+        return {"ok": False, "why": str(e)[:160]}
 
 
 def _qd():
@@ -1412,6 +1523,8 @@ def _job_cloud_reconcile(job: Job):
         # 只有这些才算「载荷」——云端目录里还可能有图/地址.txt，不能都当载荷
         # （否则详情「云端载荷」会列出图片、大小也虚高）
         files = [x for x in all_files if os.path.splitext(x[0])[1].lower() in PAYLOAD_EXT]
+        # 云端里的预览图也认回来（state=cover）——不然「对账」会把封面账目抹掉
+        cvfiles = [x for x in all_files if os.path.splitext(x[0])[1].lower() in COVER_EXT]
         if not files:
             (local_only if has_local else missing).append(
                 {"folder": folder, "name": r["name"], "path": cpath,
@@ -1421,12 +1534,16 @@ def _job_cloud_reconcile(job: Job):
             continue
         size = sum(x[1] for x in files)
         found.append({"folder": folder, "name": r["name"], "path": cpath,
-                      "files": len(files), "size": size, "has_local": has_local})
+                      "files": len(files), "size": size, "covers": len(cvfiles),
+                      "has_local": has_local})
         if write:
             st.set_cloud(folder, backend="quark", path=cpath, state="archived",
                          size=size, synced=now_str())
             st.set_payload_files(folder, [{"rel_path": x[0], "size": x[1], "cloud_fid": x[2]}
                                           for x in files], state="archived")
+            if cvfiles:
+                st.set_payload_files(folder, [{"rel_path": x[0], "size": x[1], "cloud_fid": x[2]}
+                                              for x in cvfiles], state="cover")
     if write:
         mod_index(force=True)
     mm.log("云盘对账：%d 条里云端有 %d 条、云端没有 %d 条、本地独有 %d 条、出错 %d 条（%s）"
@@ -1435,7 +1552,8 @@ def _job_cloud_reconcile(job: Job):
     return {"write": write, "checked": len(rows), "found": found, "missing": missing,
             "local_only": local_only, "errors": errs,
             "total_files": sum(x["files"] for x in found),
-            "total_size": sum(x["size"] for x in found)}
+            "total_size": sum(x["size"] for x in found),
+            "total_covers": sum(x.get("covers") or 0 for x in found)}
 
 
 def _job_cloud_archive(job: Job):
@@ -1447,19 +1565,28 @@ def _job_cloud_archive(job: Job):
     delete_local = bool(job.params.get("delete_local", True))
     st = mm.Store()
     rows = {r["folder"]: r for r in st.all()}
-    plan = [(f, local_payloads(f)) for f in folders]
-    total = max(1, sum(len(p) for _, p in plan))
+    # ★ 预览图也要跟着载荷一起上云。原来只传 PAYLOAD_EXT，图从来没上过云 →
+    #   新电脑上「本地只剩元数据+地址.txt」，推给游戏插件时无图可写、目录里就一直没有图。
+    #   顺手先把「只存在于分类目录的同级大图」复制进 mod 文件夹（自包含，复制不删原件）。
+    for f in folders:
+        try:
+            ensure_cover_inside(f)
+        except Exception:
+            mm.log(traceback.format_exc())
+    plan = [(f, local_payloads(f), local_covers(f)) for f in folders]
+    total = max(1, sum(len(p) + len(c) for _, p, c in plan))
     done, results = 0, []
-    for folder, pays in plan:
+    for folder, pays, covers in plan:
         row = rows.get(folder) or {}
         name = row.get("name") or Path(folder).name
-        if not pays:
+        if not pays and not covers:
             st.set_cloud(folder, state="archived" if row.get("cloud_path") else "local")
             results.append({"folder": folder, "name": name, "ok": True, "files": 0, "size": 0,
                             "note": "本地已经没有载荷了"})
             continue
         cpath = mod_cloud_path(cfg, folder)
-        recs, failed = [], []
+        recs, failed = [], []          # 载荷
+        crecs, cfailed = [], []        # 预览图（state=cover）
         skipped = 0
         dir_cache = {}                      # 云端目录 fid -> {归一化名: 条目}，避免每个文件都列一遍
 
@@ -1468,10 +1595,12 @@ def _job_cloud_archive(job: Job):
                 dir_cache[fid_dir] = {qd.norm(i.get("file_name")): i for i in drv.list_dir(fid_dir)}
             return dir_cache[fid_dir]
 
-        for pay in pays:
+        tasks = [("payload", x) for x in pays] + [("cover", x) for x in covers]
+        for kind, pay in tasks:
             if job.cancelled():
                 break
-            job.set(done, total, "%s：%s" % (str(name)[:22], str(pay["rel"])[:46]))
+            job.set(done, total, "%s%s：%s" % (str(name)[:22], "（封面）" if kind == "cover" else "",
+                                               str(pay["rel"])[:46]))
             sub_dir = os.path.dirname(pay["rel"].replace("\\", "/"))
             fid_dir = drv.ensure_dir(cpath + ("/" + sub_dir if sub_dir else ""))
             idx = cloud_index(fid_dir)
@@ -1482,8 +1611,9 @@ def _job_cloud_archive(job: Job):
             # 实测把整库又多存了一遍（115 个重复 / 2571 MB）——主人一句「网盘里有就别再备份了」点出来的。
             if hit is not None and int(hit.get("size") or -1) == int(pay["size"]):
                 md5, sha1 = qd.file_hashes(pay["abs"])
-                recs.append({"rel_path": pay["rel"], "size": pay["size"], "md5": md5,
-                             "sha1": sha1, "cloud_fid": str(hit.get("fid") or "")})
+                (crecs if kind == "cover" else recs).append(
+                    {"rel_path": pay["rel"], "size": pay["size"], "md5": md5,
+                     "sha1": sha1, "cloud_fid": str(hit.get("fid") or "")})
                 skipped += 1
                 done += 1
                 continue
@@ -1497,11 +1627,13 @@ def _job_cloud_archive(job: Job):
             out = _cloud_upload_one(drv, qd, pay, fid_dir)
             done += 1
             if out["ok"]:
-                recs.append({"rel_path": pay["rel"], "size": pay["size"], "md5": out["md5"],
-                             "sha1": out["sha1"], "cloud_fid": out["fid"]})
+                (crecs if kind == "cover" else recs).append(
+                    {"rel_path": pay["rel"], "size": pay["size"], "md5": out["md5"],
+                     "sha1": out["sha1"], "cloud_fid": out["fid"]})
                 idx[base] = {"fid": out["fid"], "size": pay["size"]}
             else:
-                failed.append({"rel": pay["rel"], "why": out["why"]})
+                # 封面没传上去不该卡住归档（载荷的硬闸不变）；记进日志 + 结果里让人看得见
+                (cfailed if kind == "cover" else failed).append({"rel": pay["rel"], "why": out["why"]})
         if failed:
             results.append({"folder": folder, "name": name, "ok": False, "files": len(recs),
                             "failed": failed[:5],
@@ -1512,9 +1644,14 @@ def _job_cloud_archive(job: Job):
             mm.log("归档顺带清理了 %d 个重复文件（%.1f MB）：%s"
                    % (cleaned, cbytes / 1048576.0, name))
         st.set_payload_files(folder, recs, state="archived")
-        st.set_cloud(folder, backend="quark", path=cpath, state="archived",
+        if crecs:
+            st.set_payload_files(folder, crecs, state="cover")
+        if cfailed:
+            mm.log("封面没传上云（%s）：%s" % (name, "; ".join(x["why"] for x in cfailed[:3])))
+        st.set_cloud(folder, backend="quark", path=cpath,
+                     state=("archived" if (recs or row.get("cloud_path")) else "local"),
                      size=sum(p["size"] for p in pays), synced=now_str(),
-                     payload_mtime=max(p["mtime"] for p in pays))
+                     payload_mtime=(max(p["mtime"] for p in pays) if pays else None))
         deleted = 0
         if delete_local:
             for pay in pays:                       # 进回收站，随时能还原
@@ -1532,15 +1669,18 @@ def _job_cloud_archive(job: Job):
             mod_index(force=True)
         results.append({"folder": folder, "name": name, "ok": True, "files": len(recs),
                         "size": sum(p["size"] for p in pays), "deleted": deleted,
-                        "skipped": skipped, "cleaned": cleaned,
+                        "skipped": skipped, "cleaned": cleaned, "covers": len(crecs),
+                        "covers_failed": [x["rel"] for x in cfailed][:5],
                         "cloud": cpath, "seconds": round(time.time() - job.t0, 1)})
     st.cx.close()
     okn = sum(1 for r in results if r.get("ok"))
-    mm.log("归档：%d 条（成功 %d）、共 %.1f MB、跳过（云端已有）%d 个文件、删本地 %d 个文件"
+    mm.log("归档：%d 条（成功 %d）、载荷 %.1f MB、封面 %d 张、跳过（云端已有）%d 个文件、删本地 %d 个文件"
            % (len(results), okn, sum(r.get("size") or 0 for r in results) / 1048576.0,
+              sum(r.get("covers") or 0 for r in results),
               sum(r.get("skipped") or 0 for r in results), sum(r.get("deleted") or 0 for r in results)))
     return {"done": len(results), "ok": okn, "items": results,
             "bytes": sum(r.get("size") or 0 for r in results),
+            "covers": sum(r.get("covers") or 0 for r in results),
             "deleted": sum(r.get("deleted") or 0 for r in results)}
 
 
@@ -1582,7 +1722,10 @@ def _cloud_restore_files(cfg, folder, rows, dest_root=None, on_step=None) -> dic
         rel = str(pf["rel_path"])
         if on_step:
             on_step(done_files, len(rows), rel)
-        dest = root / rel
+        # 预览图（state=cover）永远回到 Mod 库里那条文件夹 —— 即使载荷是取回到暂存目录安装用的。
+        # 否则「游戏里没图、库里也没图」会一直复发（2026-09 主人点出的真根因）。
+        tgt = Path(folder) if str(pf.get("state") or "") == "cover" else root
+        dest = tgt / rel
         try:
             want = qd.norm(rel.replace("\\", "/"))
             it = idx.get(want)
@@ -1614,6 +1757,12 @@ def _ensure_payload_for_install(cfg, folder) -> str:
     """
     # 注意：_bridge_find_package 在「文件夹里没有可安装的包」时是**抛 SystemExit**，不是返回 None ——
     # 一开始没接住它，导致归档后的 Mod 点「安装到游戏」直接报「没有包」，永远走不到自动取回（踩过）。
+    # 推送前先确保「本地有封面」——库里没图就去云端取回来（换机/重装后靠这条自愈）
+    try:
+        if not local_covers(folder):
+            pull_cover_from_cloud(cfg, folder)
+    except Exception:
+        mm.log(traceback.format_exc())
     try:
         pkg = _bridge_find_package(folder)
     except SystemExit:
@@ -1621,15 +1770,17 @@ def _ensure_payload_for_install(cfg, folder) -> str:
     if pkg:
         return str(pkg)
     st = mm.Store()
-    rows = st.payload_files_of(folder, ["archived", "missing"])
+    rows = st.payload_files_of(folder, ["archived", "missing", "cover"])
     st.cx.close()
-    if not rows:
+    pays = [x for x in rows if str(x.get("state") or "") != "cover"]
+    if not pays:
         raise SystemExit("这条 Mod 本地没有载荷，也没有云端归档记录——没法装（可以先「从站点更新」重新下一份）")
     dest = Path(mm.resolve_dirs(cfg)[1]) / "_云端取回" / Path(str(folder)).name
     if dest.is_dir():                                   # 先清掉上一次取回的残留
         import shutil as _sh
         _sh.rmtree(dest, ignore_errors=True)
-    mm.log("安装前自动取回：%s（%d 个文件 → %s）" % (Path(str(folder)).name, len(rows), dest))
+    mm.log("安装前自动取回：%s（%d 个文件，其中封面 %d 个 → %s）"
+           % (Path(str(folder)).name, len(rows), len(rows) - len(pays), dest))
     r = _cloud_restore_files(cfg, folder, rows, dest_root=dest)
     if not r["ok"]:
         raise SystemExit("从云端取回失败：%s" % (r["failed"][0].get("why") if r["failed"] else "未知原因"))
@@ -1653,7 +1804,7 @@ def _job_cloud_restore(job: Job):
     rows = {r["folder"]: r for r in st.all()}
     todo = []
     for f in folders:
-        pf = st.payload_files_of(f, ["archived", "missing"])
+        pf = st.payload_files_of(f, ["archived", "missing", "cover"])
         for x in pf:
             todo.append((f, x))
     total = max(1, len(todo))
@@ -1675,10 +1826,17 @@ def _job_cloud_restore(job: Job):
         except Exception as e:
             r = {"ok": False, "files": 0, "failed": [{"rel": "-", "why": str(e)[:140]}], "bytes": 0}
         good = [x for x in pfs if x["rel_path"] not in {f["rel"] for f in r["failed"]}]
-        if good:
+        # 预览图取回后状态仍是 cover（别写成 local，否则「载荷是否已归档」的统计会被图污染）
+        gpay = [x for x in good if str(x.get("state") or "") != "cover"]
+        gcov = [x for x in good if str(x.get("state") or "") == "cover"]
+        if gpay:
             st.set_payload_files(folder, [{"rel_path": x["rel_path"], "size": x["size"],
                                            "md5": x.get("md5") or "", "sha1": x.get("sha1") or "",
-                                           "cloud_fid": x.get("cloud_fid") or ""} for x in good], state="local")
+                                           "cloud_fid": x.get("cloud_fid") or ""} for x in gpay], state="local")
+        if gcov:
+            st.set_payload_files(folder, [{"rel_path": x["rel_path"], "size": x["size"],
+                                           "md5": x.get("md5") or "", "sha1": x.get("sha1") or "",
+                                           "cloud_fid": x.get("cloud_fid") or ""} for x in gcov], state="cover")
         for bad in r["failed"]:
             rel = bad["rel"]
             src = next((x for x in pfs if x["rel_path"] == rel), None)
@@ -3264,10 +3422,13 @@ def api_bridge_cover_check(folder, dir_name=""):
     m = one_mod(cfg_now(), folder)
     if not m:
         raise SystemExit("找不到这条 Mod（先点一下「重新扫描」）")
+    cov_pull = {"ok": True, "why": "库里已有图"}
+    if not local_covers(m["folder"]):                    # 库里没图 → 先从云端取回来
+        cov_pull = pull_cover_from_cloud(cfg_now(), m["folder"])
     cover = _bridge_find_cover(Path(m["folder"]))
     webp = cover_to_webp(cover) if cover else None
     draw = cover_to_decodable(cover) if cover else None
-    out = {"ok": True, "mod": m.get("name"), "folder": folder,
+    out = {"ok": True, "mod": m.get("name"), "folder": folder, "cover_pull": cov_pull,
            "cover": str(cover) if cover else "",
            "cover_exists": bool(cover and Path(cover).is_file()),
            "webp": str(webp) if webp else "", "webp_exists": bool(webp and Path(webp).is_file()),

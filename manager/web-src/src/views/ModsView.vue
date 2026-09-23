@@ -448,7 +448,7 @@ async function archiveCloud(folders) {
     title: '归档到云盘',
     content: `把 ${list.length} 条 Mod 的载荷（约 ${humanMB(total)}）上传到夸克；`
       + `上传并逐个校验通过后，会删掉本地载荷（进回收站，可还原）。`
-      + `预览图、地址.txt、元信息都留在本地。`
+      + `预览图会跟载荷**一起上云**（换机/新电脑才有图可推给游戏，本地也各留一份）；地址.txt 和元信息只留本地。`
       + (already ? `\n其中 ${already} 条已经在云端了，会自动走秒传、不用重传。` : ''),
     positiveText: '开始归档',
     negativeText: '取消',
@@ -1173,7 +1173,10 @@ async function diagCover() {
   try {
     const r = await api.bridgeCoverCheck(cur.value.folder)
     const f = (b, p, empty) => (b ? '✓ ' + p : '✗ ' + (p || empty))
+    const cp = r.cover_pull || {}
     const lines = [
+      (cp.files ? `从云端取回封面 : ✓ ${cp.files} 张（库里原来没有，已从网盘取回）`
+                : (cp.ok === false ? `从云端取回封面 : ✗ ${cp.why || '没取到'}` : '')),
       `管理器找到的图 : ${f(r.cover_exists, r.cover, '没找到能当封面的图')}`,
       `转好的 WebP   : ${f(r.webp_exists, r.webp, '没生成（多半是 Pillow 缺或转换报错）')}`,
       `转好的 JPEG   : ${f(r.draw_exists, r.draw, '没生成（同上）')}`,
