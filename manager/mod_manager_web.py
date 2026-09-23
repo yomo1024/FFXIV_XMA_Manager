@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import html as _html
 import json
 import mimetypes
 import os
@@ -273,7 +274,8 @@ JOBS = {"cur": None}
 JOB_TITLES = {"scan": "扫描目录", "export": "生成 Excel", "run": "扫描并生成 Excel", "selfdownload": "在自己浏览器里下载 → 自动入库", "importfile": "入库（浏览器下好的文件）",
               "backup": "打包备份", "restore": "导入备份", "import": "导入下载",
               "renumber": "重排序号", "download": "从页面下载", "watch": "监视下载",
-              "fetch": "解析并下载入库"}
+              "fetch": "解析并下载入库",
+              "update_check": "检查更新", "mod_update": "更新 Mod（覆盖下载）"}
 
 
 # --------------------------------------------------------------------- 各任务
@@ -660,7 +662,9 @@ def _job_fetch(job: Job):
     _meta = apply_meta_after_import(
         cfg, target,
         tags=info.get("tags") or q.get("tags") or [],
-        affects=q.get("affects") if q.get("affects") is not None else info.get("affects"))
+        affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
+        addr=addr)
+    _site = record_site_update(cfg, target, addr)
     if q.get("export", True):
         _job_export(job)
     return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
@@ -781,7 +785,9 @@ def _job_selfdownload(job: Job):
         _meta = apply_meta_after_import(
             cfg, target,
             tags=info.get("tags") or q.get("tags") or [],
-            affects=q.get("affects") if q.get("affects") is not None else info.get("affects"))
+            affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
+            addr=addr)
+        record_site_update(cfg, target, addr)
         if q.get("export", True):
             _job_export(job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
@@ -800,7 +806,113 @@ def _job_selfdownload(job: Job):
     return {"inbox": str(tgt), "file": hit.name, "dir": str(dl_dir), "no_category": True}
 
 
-def apply_meta_after_import(cfg, target, tags=None, affects=None):
+def find_mod_row(st, target):
+    """按完整路径精确匹配索引库记录；路径对不上时只按唯一同名兜底（多个同名返回 None）。
+
+    为什么要有兜底：rename/导入后的路径写法可能跟扫描写进库的不完全一致
+    （大小写、结尾斜杠），但只按名字找又会在两个同名 Mod 之间写错行。
+    """
+    name = Path(str(target)).name
+    want = str(target).rstrip("\\/").lower()
+    rows = st.all()
+    for m in rows:
+        if str(m.get("folder") or "").rstrip("\\/").lower() == want:
+            return m
+    same = [m for m in rows if Path(str(m.get("folder") or "")).name == name]
+    if len(same) == 1:
+        return same[0]
+    if len(same) > 1:
+        mm.log("找记录：有 %d 个同名文件夹、路径又没匹配上，跳过 %s（免得写错行）" % (len(same), name))
+    return None
+
+
+def now_str() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_multipart(raw: bytes, ctype: str):
+    """极简 multipart/form-data 解析 → (普通字段 dict, 文件 dict{字段: (文件名, 字节)})。
+
+    只为自己用（浏览器上传一个文件 + 几个文本字段），不追求规范全覆盖。
+    """
+    m = re.search(r'boundary="?([^";]+)"?', ctype or "")
+    if not m:
+        raise ValueError("没有 boundary")
+    bd = b"--" + m.group(1).encode("latin-1")
+    fields, files = {}, {}
+    parts = raw.split(bd)
+    for part in parts[1:-1]:                 # 首尾是 preamble / epilogue
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        head, sep, data = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        hs = head.decode("utf-8", "replace")
+        nm = re.search(r'name="([^"]*)"', hs)
+        if not nm:
+            continue
+        fn = re.search(r'filename="([^"]*)"', hs)
+        if fn and fn.group(1):
+            files[nm.group(1)] = (fn.group(1), data)
+        else:
+            fields[nm.group(1)] = data.decode("utf-8", "replace")
+    return fields, files
+
+
+def save_upload(files) -> str:
+    """把浏览器上传的那个文件落到「待导入」目录，返回路径"""
+    name, data = next(iter(files.values()))
+    safe = re.sub(r'[\\/:*?"<>|]+', "_", Path(str(name or "上传文件")).name) or "上传文件"
+    dest = Path(mm.resolve_dirs(cfg_now())[1]) / safe
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest = dest.with_name("%s_%d%s" % (dest.stem, int(time.time()), dest.suffix))
+    dest.write_bytes(data)
+    mm.log("收到上传的新文件：%s（%.1f MB）" % (dest.name, len(data) / 1048576.0))
+    return str(dest)
+
+
+def _site_info(cfg, addr):
+    """读站点更新信息：先直连；被挡（NSFW 未登录等）再借内置浏览器的登录态重试。"""
+    info = mm.fetch_site_update(cfg, addr)
+    if info.get("ok"):
+        return info
+    try:
+        ck = _browser_cookie_header(cfg)
+        if ck:
+            info2 = mm.fetch_site_update(cfg, addr, cookies=ck)
+            if info2.get("ok"):
+                info2["source"] = (info2.get("source") or "") + "+cookie"
+                return info2
+    except Exception:
+        pass
+    return info
+
+
+def record_site_update(cfg, target, addr):
+    """下载/入库后把站点上的「最后更新时间」记成基线（这样以后才比得出有没有新版）。"""
+    if not (str(addr or "").strip()):
+        return {}
+    try:
+        info = _site_info(cfg, addr)
+        if not info.get("ok"):
+            mm.log("记站点更新时间：没读到（%s）%s" % (Path(str(target)).name[:40], info.get("error") or ""))
+            return {}
+        st = mm.Store()
+        row = find_mod_row(st, target)
+        if row is not None:
+            st.set_site_info(row["folder"], updated=info["updated"], latest=info["updated"],
+                             version=info.get("version") or "", checked=now_str(), avail=0)
+        st.cx.close()
+        return info
+    except Exception as e:
+        mm.log("记站点更新时间失败：%s" % e)
+        return {}
+
+
+def apply_meta_after_import(cfg, target, tags=None, affects=None, addr=None):
     """入库后给这个 Mod 写「标签」和「影响/替换」（folder 用索引库里的键，保证和前端一致）。
 
     两项都来自 Mod 站的页面信息（扩展 / 书签小工具 / 内置浏览器解析都会带过来）：
@@ -808,6 +920,7 @@ def apply_meta_after_import(cfg, target, tags=None, affects=None):
       affects = 站点的「Affects / Replaces」——它替换的是游戏里哪件装备/哪个部位
     None = 这项不动；"" = 明确清空。
     """
+    addr = (addr or "").strip()
     want_tags = mm.norm_tags(list(tags or [])) if tags is not None else None
     want_aff = mm.norm_affects(affects) if affects is not None else None
     out = {"tags": [], "affects": ""}
@@ -817,20 +930,7 @@ def apply_meta_after_import(cfg, target, tags=None, affects=None):
     try:
         mm.cmd_scan(cfg, quiet=True)
         st = mm.Store()
-        rows = st.all()
-        want = str(target).rstrip("\\/")
-        hit = None
-        for m in rows:                      # ① 先按完整路径精确匹配（最可靠）
-            if str(m.get("folder") or "").rstrip("\\/").lower() == want.lower():
-                hit = m
-                break
-        if hit is None:                     # ② 路径形式对不上，才退回按文件夹名找，且必须唯一
-            same = [m for m in rows if Path(str(m.get("folder") or "")).name == name]
-            if len(same) == 1:
-                hit = same[0]
-            elif len(same) > 1:
-                mm.log("写页面信息：有 %d 个同名文件夹、路径又没匹配上，跳过 %s（免得写错行）"
-                       % (len(same), name))
+        hit = find_mod_row(st, target)
         if hit is not None:
             m = hit
             if want_tags:
@@ -849,6 +949,166 @@ def apply_meta_after_import(cfg, target, tags=None, affects=None):
 def apply_tags_after_import(cfg, target, tags):
     """兼容旧名字：只打标签"""
     return apply_meta_after_import(cfg, target, tags=tags or []).get("tags") or []
+
+
+# ------------------------------------------------------- 检查更新 / 更新 Mod
+def _pick_download_link(html: str) -> str:
+    """从 Mod 页 HTML 里挑主下载直链（#mod-download-link 优先，其次任意 /files/ 链接）"""
+    m = (re.search(r'id="mod-download-link"[^>]*href="([^"]+)"', html)
+         or re.search(r'href="([^"]+)"[^>]*id="mod-download-link"', html)
+         or re.search(r'href="([^"]*/files/[^"]+)"', html))
+    if not m:
+        return ""
+    u = _html.unescape(m.group(1))
+    if u.startswith("/"):
+        u = "https://www.xivmodarchive.com" + u
+    return u if u.lower().startswith("http") else ""
+
+
+def _site_download(cfg, addr, inbox, job=None):
+    """从站点下这条 Mod 的最新文件。返回 (文件路径, 站点更新信息)。
+
+    ① 借内置浏览器的登录态直接抓页面 → 取直链 → 下（最省事，不用开浏览器窗口）
+    ② 不行才开内置浏览器，让页面自己下载（NSFW + 人机验证那种）
+    """
+    info = _site_info(cfg, addr)
+    page = str(addr or "").strip()
+    ck = _browser_cookie_header(cfg)
+    inbox = Path(inbox)
+    inbox.mkdir(parents=True, exist_ok=True)
+    dl = ""
+    try:
+        html = mm._site_get(page, ck).decode("utf-8", "replace")
+        dl = _pick_download_link(html)
+    except Exception as e:
+        mm.log("找下载直链失败（%s），改用内置浏览器" % str(e)[:80])
+    if dl:
+        try:
+            p = _stream_to(dl, inbox, cookies=ck, referer=page,
+                           on_tick=(lambda d, t: job.set(job.done, job.total,
+                                                         "下载中… %s%s" % (mm.fmt_size(d),
+                                                                          (" / " + mm.fmt_size(t)) if t else ""))
+                                    if job else None),
+                           should_cancel=(job.cancelled if job else None))
+            return Path(p), info
+        except Exception as e:
+            mm.log("直链下载失败（%s），改用内置浏览器" % str(e)[:80])
+    try:
+        mm.launch_browser(cfg, page)
+        mm.browser_wait_ready(cfg, timeout=60)
+        _href, path = mm.browser_download(cfg, inbox, timeout=900, url=page)
+        return Path(path), info
+    except Exception as e:
+        raise RuntimeError("下载失败：%s" % str(e)[:140])
+
+
+def _local_ref_time(folder) -> str:
+    """本地这份 Mod 的文件时间（老数据没有站点基线时，拿它当参照比一比）"""
+    try:
+        ts = [f.stat().st_mtime for f in Path(folder).iterdir()
+              if f.is_file() and f.suffix.lower() not in mm.PARTIAL_EXT]
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(max(ts))) if ts else ""
+    except Exception:
+        return ""
+
+
+def _job_update_check(job: Job):
+    """检查站点上有没有比本地新的版本（读站点的 Last Version Update 跟基线比）"""
+    cfg = cfg_now()
+    st = mm.Store()
+    rows = st.all()
+    st.cx.close()
+    want = {str(f) for f in (job.params.get("folders") or [])}
+    todo = [m for m in rows if ((not want) or m["folder"] in want) and (m.get("addr") or "").strip()]
+    if not todo:
+        raise RuntimeError("没有可检查的 Mod（选中的这些没有站点地址）")
+    has, cur, unknown = [], 0, []
+    for i, m in enumerate(todo, 1):
+        if job.cancelled():
+            raise mm.BackupCancelled()
+        job.set(i - 1, len(todo), "%s ｜ %s" % (m["name"][:34], m["addr"]))
+        info = _site_info(cfg, m["addr"])
+        if not info.get("ok"):
+            unknown.append({"folder": m["folder"], "name": m["name"],
+                            "why": (info.get("error") or "读不到站点信息")[:120]})
+            continue
+        latest = info["updated"]
+        base = m.get("site_updated") or ""
+        ref = "站点基线"
+        if not base:                       # 老数据：拿本地文件时间当参照
+            base = _local_ref_time(m["folder"])
+            ref = "本地文件时间"
+        avail = 1 if (latest and base and latest > base) else 0
+        st2 = mm.Store()
+        st2.set_site_info(m["folder"], latest=latest, version=info.get("version") or "",
+                          checked=now_str(), avail=avail)
+        st2.cx.close()
+        item = {"folder": m["folder"], "rel": m.get("rel") or "", "name": m["name"],
+                "local": base, "latest": latest, "ref": ref,
+                "version": info.get("version") or "", "patch": info.get("patch") or "",
+                "avail": bool(avail)}
+        if avail:
+            has.append(item)
+        else:
+            cur += 1
+    mod_index(force=True)
+    mm.log("检查更新：%d 条里 %d 条有新版，%d 条最新，%d 条读不到"
+           % (len(todo), len(has), cur, len(unknown)))
+    return {"checked": len(todo), "has_update": has, "up_to_date": cur,
+            "unknown": unknown, "total": len(todo)}
+
+
+def _job_mod_update(job: Job):
+    """从站点下载最新文件覆盖本地（保留 地址.txt / 预览图 / 编号，旧文件进回收站）"""
+    cfg = cfg_now()
+    mode = str(job.params.get("mode") or "same_name")
+    folders = [str(f) for f in (job.params.get("folders") or [])]
+    if not folders:
+        raise RuntimeError("没选要更新的 Mod")
+    inbox = mm.resolve_dirs(cfg)[1]
+    st = mm.Store()
+    rows = {str(m["folder"]): m for m in st.all()}
+    st.cx.close()
+    done, failed = [], []
+    for i, folder in enumerate(folders, 1):
+        if job.cancelled():
+            raise mm.BackupCancelled()
+        m = rows.get(folder)
+        if m is None:
+            failed.append("索引里找不到：%s" % folder)
+            continue
+        addr = (m.get("addr") or "").strip()
+        if not addr:
+            failed.append("%s：没有站点地址，无法从站点更新（可以手动上传替换）" % m["name"])
+            continue
+        try:
+            job.set(i - 1, len(folders), "下载最新版：%s" % m["name"][:34])
+            path, info = _site_download(cfg, addr, inbox, job=job)
+            job.set(i - 1, len(folders), "替换文件：%s" % m["name"][:34])
+            rep = mm.replace_mod_payload(cfg, folder, path, mode=mode)
+            try:
+                path.unlink()               # 已经拷进 Mod 文件夹，暂存区不用留副本
+            except OSError:
+                pass
+            st2 = mm.Store()
+            st2.set_site_info(folder, updated=info.get("updated") or "",
+                              latest=info.get("updated") or "",
+                              version=info.get("version") or "",
+                              checked=now_str(), avail=0)
+            st2.cx.close()
+            done.append({"folder": folder, "name": m["name"], "removed": rep["removed"],
+                         "added": rep["added"], "kept": rep["kept"],
+                         "updated": info.get("updated") or "", "version": info.get("version") or "",
+                         "patch": info.get("patch") or ""})
+        except Exception as e:
+            mm.log("更新失败 %s：%s" % (m["name"][:40], e))
+            failed.append("%s：%s" % (m["name"], str(e)[:140]))
+    if done:
+        job.set(len(folders), len(folders), "重扫索引…")
+        _job_scan(job)
+        if job.params.get("export", True):
+            _job_export(job)
+    return {"ok": done, "failed": failed}
 
 
 def _job_import_file(job: Job):
@@ -899,7 +1159,9 @@ def _job_import_file(job: Job):
         _meta = apply_meta_after_import(
             cfg, target,
             tags=q.get("tags") or info.get("tags") or [],
-            affects=q.get("affects") if q.get("affects") is not None else info.get("affects"))
+            affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
+            addr=addr)
+        record_site_update(cfg, target, addr)
         if q.get("export", True):
             _job_export(job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
@@ -925,7 +1187,8 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "import": _job_import, "renumber": _job_renumber,
              "download": _job_download, "watch": _job_watch,
              "selfdownload": _job_selfdownload, "importfile": _job_import_file,
-             "fetch": _job_fetch}
+             "fetch": _job_fetch,
+             "update_check": _job_update_check, "mod_update": _job_mod_update}
 
 
 def start_job(kind: str, params: dict | None = None):
@@ -1008,6 +1271,11 @@ def api_mods():
             "ih": (m.get("img_hash") or "")[:16],
             "tags": tag_map.get(m["folder"], []),
             "affects": m.get("affects") or "",
+            "site_updated": m.get("site_updated") or "",     # 本地这份的站点更新时间（基线）
+            "site_latest": m.get("site_latest") or "",       # 最近一次检查看到的站点值
+            "site_version": m.get("site_version") or "",
+            "site_checked": m.get("site_checked") or "",
+            "update_avail": bool(m.get("update_avail")),
             "installed": inst.get(m["folder"]) if inst_dir else None,
         })
     return {"mods": out, "install_dir": inst_dir or ""}
@@ -2178,11 +2446,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urllib.parse.urlsplit(self.path)
         n = int(self.headers.get("Content-Length") or 0)
-        try:
-            raw = self.rfile.read(n).decode("utf-8") if n else "{}"
-            body = json.loads(raw or "{}")
-        except Exception:
-            body = {}
+        ctype = self.headers.get("Content-Type") or ""
+        body = {}
+        if "multipart/form-data" in ctype:          # 「手动上传新文件」用浏览器选文件
+            try:
+                fields, files = parse_multipart(self.rfile.read(n) if n else b"", ctype)
+                body = dict(fields)
+                if files:
+                    body["_upload"] = save_upload(files)
+            except Exception as e:
+                body = {"_upload_error": str(e)}
+        else:
+            try:
+                raw = self.rfile.read(n).decode("utf-8") if n else "{}"
+                body = json.loads(raw or "{}")
+            except Exception:
+                body = {}
         try:
             if u.path == "/api/job":
                 kind = str(body.get("kind") or "")
@@ -2215,6 +2494,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.mod_set_preview(body)
             if u.path == "/api/mod/fix-cover":
                 return self.mod_fix_cover(body)
+            if u.path == "/api/mod/replace":
+                return self.mod_replace(body)
             if u.path == "/api/mod/tags":
                 return self._json(api_mod_set_tags(body))
             if u.path == "/api/mod/affects":
@@ -2404,6 +2685,37 @@ class Handler(BaseHTTPRequestHandler):
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
         return self._json({"ok": True, "how": how})
+
+    def mod_replace(self, b):
+        """手动上传/指定一个新文件，替换掉这条 Mod 的旧文件（保留 地址.txt、预览图、编号）"""
+        cfg = cfg_now()
+        if b.get("_upload_error"):
+            return self._json({"error": "上传失败：%s" % b["_upload_error"]}, 400)
+        folder = str(b.get("folder") or "")
+        src = str(b.get("_upload") or b.get("src") or "").strip().strip('"')
+        mode = str(b.get("mode") or "same_name")
+        if not folder or not inside_root(folder, cfg.get("root") or ""):
+            return self._json({"error": "先选一条 Mod（要在 Mod 目录里）"}, 400)
+        if not Path(folder).is_dir():
+            return self._json({"error": "Mod 文件夹不存在：%s" % folder}, 400)
+        if not src:
+            return self._json({"error": "还没给新文件：可以在弹窗里直接选文件，"
+                                        "或填本地路径，或从「待导入」里挑一个"}, 400)
+        f = Path(src)
+        if not f.exists():
+            return self._json({"error": "新文件不存在：%s" % src}, 400)
+        try:
+            if f.is_dir() and f.resolve() == Path(folder).resolve():
+                return self._json({"error": "新文件不能就是这条 Mod 自己的文件夹"}, 400)
+        except OSError:
+            pass
+        try:
+            rep = mm.replace_mod_payload(cfg, folder, f, mode=mode)
+        except SystemExit as e:
+            return self._json({"error": str(e)}, 400)
+        mm.cmd_scan(cfg, quiet=True)
+        mod_index(force=True)
+        return self._json({"ok": True, **rep})
 
     def mod_fix_cover(self, b):
         """补预览图：已有的直接用；没有就按「推来的封面 → 内置浏览器」去抓，并如实回报结果"""

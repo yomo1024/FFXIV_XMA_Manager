@@ -41,6 +41,8 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -104,9 +106,9 @@ def split_author_name(text: str):
     return "", s
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 ADDR_NAME = "地址.txt"
-HEADERS = ["序号", "作者", "NSFW/SFW", "影响/替换", "Mod名称", "Mod地址", "预览图"]
-COL_WIDTHS = [7.7, 15.9, 15.9, 30.0, 50.0, 63.0, 28.0]
-PREVIEW_COL = 7                  # 预览图所在列(G)
+HEADERS = ["序号", "作者", "NSFW/SFW", "影响/替换", "更新时间", "Mod名称", "Mod地址", "预览图"]
+COL_WIDTHS = [7.7, 15.9, 15.9, 30.0, 17.0, 48.0, 63.0, 28.0]
+PREVIEW_COL = 8                  # 预览图所在列(H)
 PREVIEW_COL_PX = 201
 ROW_HEIGHT_PT = 80
 EMU_PER_PX = 9525
@@ -128,7 +130,13 @@ CREATE TABLE IF NOT EXISTS mods (
     file_mtime  REAL,
     file_size   INTEGER,
     updated_at  TEXT,
-    affects     TEXT
+    affects     TEXT,
+    -- ---- 「检查更新」用（2026-09 加）----
+    site_updated TEXT,        -- 站点上 Last Version Update（= 我们这次下载/更新时的版本时间，基线）
+    site_latest  TEXT,        -- 最近一次检查时站点上的最后更新时间
+    site_version TEXT,        -- 站点上的最新版本号（版本历史里的 version_new）
+    site_checked TEXT,        -- 最近一次检查时间
+    update_avail INTEGER      -- 1 = 站点上有比本地新的文件
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 -- 标签单独一张表：按 folder 关联，重扫描/upsert 都不可能冲掉它
@@ -984,6 +992,141 @@ def browser_wait_ready(cfg, timeout=30, prefer="xivmodarchive", on_tick=None):
         time.sleep(0.6)
 
 
+# ------------------------------------------------------ 站点更新时间 / 检查更新
+SITE_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+               "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+SITE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+
+def _local_offset() -> _dt.timedelta:
+    return _dt.datetime.now() - _dt.datetime.utcnow()
+
+
+def site_time_iso(text) -> str:
+    """站点上的日期文本 -> 本机时区的 'YYYY-MM-DD HH:MM:SS'。
+
+    形如 'Tue Aug 18 2026 21:41:17 GMT+0000 (Coordinated Universal Time)'。
+    不用 strptime 是因为 %a/%b 跟系统语言有关，中文环境下会解析失败。
+    """
+    m = re.search(r"(\w{3})\s+(\w{3})\s+(\d{1,2})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*GMT\s*([+-]\d{4})",
+                  str(text or ""))
+    if not m:
+        return ""
+    mon = SITE_MONTHS.get(m.group(2).lower())
+    if not mon:
+        return ""
+    try:
+        t = _dt.datetime(int(m.group(4)), mon, int(m.group(3)),
+                         int(m.group(5)), int(m.group(6)), int(m.group(7)))
+        off = m.group(8)
+        d = _dt.timedelta(hours=int(off[1:3]), minutes=int(off[3:5]))
+        utc = t - (d if off[0] == "+" else -d)
+        return (utc + _local_offset()).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _site_get(url, cookies="", timeout=25) -> bytes:
+    req = urllib.request.Request(url, headers={
+        "User-Agent": SITE_UA, "Referer": BROWSER_HOME,
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "text/html,application/json,*/*"})
+    if cookies:
+        req.add_header("Cookie", cookies)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def fetch_site_update(cfg, addr, cookies="") -> dict:
+    """读站点上这条 Mod 的「最后更新时间 / 最新版本 / 更新说明」。
+
+    ① /api/mod/update_history → 时间戳精确、还带版本号和更新说明（作者有升版本时最准）
+    ② 页面 mod-meta-block 里的 `Last Version Update` → 兜底（没版本历史的 Mod 也有这一栏）
+    返回 {ok, modid, updated, version, patch, source, error}
+    """
+    out = {"ok": False, "modid": "", "updated": "", "version": "", "patch": "",
+           "source": "", "error": ""}
+    m = re.search(r"/modid/(\d+)", str(addr or ""))
+    if not m:
+        out["error"] = "这条 Mod 没有站点地址（缺 modid）"
+        return out
+    out["modid"] = m.group(1)
+    page = "https://www.xivmodarchive.com/modid/%s" % out["modid"]
+    errs = []
+    try:
+        j = json.loads(_site_get("https://www.xivmodarchive.com/api/mod/update_history?modid=%s"
+                                 % out["modid"], cookies).decode("utf-8", "replace") or "{}")
+        hist = j.get("version_history") or []
+        if hist:
+            last = max(hist, key=lambda h: int(h.get("timestamp") or 0))
+            out["updated"] = _dt.datetime.fromtimestamp(int(last["timestamp"]) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            out["version"] = str(last.get("version_new") or "")
+            out["patch"] = str(last.get("patch_notes") or "")[:400]
+            out["source"] = "api"
+            out["ok"] = True
+            return out
+    except Exception as e:
+        errs.append("版本接口：%s" % str(e)[:60])
+    try:
+        html = _site_get(page, cookies).decode("utf-8", "replace")
+        for m2 in re.finditer(r'<div[^>]*class="[^"]*mod-meta-block[^"]*"[^>]*>([\s\S]*?)</div>', html):
+            txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m2.group(1))).strip()
+            t = re.search(r"Last Version Update\s*:\s*(.+)$", txt, re.I)
+            if t:
+                iso = site_time_iso(t.group(1))
+                if iso:
+                    out["updated"] = iso
+                    out["source"] = "page"
+                    out["ok"] = True
+                    return out
+        errs.append("页面里没找到「Last Version Update」")
+    except Exception as e:
+        errs.append("页面：%s" % str(e)[:60])
+    out["error"] = "；".join(errs)
+    return out
+
+
+def replace_mod_payload(cfg, folder, new_file, mode="same_name", to_recycle=True) -> dict:
+    """把 Mod 文件夹里的旧载荷换成新文件（手动上传 / 从站点更新都走这里）。
+
+    保留：文件夹本身（编号/作者/名称不变）、地址.txt、所有图片（预览图/画廊图）。
+    mode:
+      same_name   只换掉与新文件同名（或同主名）的旧文件 —— 多功能变体的文件夹不受影响（推荐）
+      all_payload 把除 地址.txt / 图片 之外的全部旧文件换掉
+    """
+    folder, new_file = Path(folder), Path(new_file)
+    if not folder.is_dir():
+        raise SystemExit("Mod 文件夹不存在：%s" % folder)
+    if not new_file.exists():
+        raise SystemExit("新文件不存在：%s" % new_file)
+    olds = [f for f in sorted(folder.iterdir())
+            if f.is_file() and f.name != ADDR_NAME and f.suffix.lower() not in IMG_EXT]
+    if mode == "all_payload":
+        targets = olds
+    else:
+        stem = new_file.stem.lower()
+        targets = [f for f in olds if f.name.lower() == new_file.name.lower() or f.stem.lower() == stem]
+    removed, kept = [], []
+    for f in targets:
+        try:
+            if not (to_recycle and send_to_recycle_bin(f)):
+                f.unlink()
+            removed.append(f.name)
+        except OSError as e:
+            raise SystemExit("替换失败：%s 处理不了（%s）" % (f.name, e))
+    kept = [f.name for f in olds if f not in targets]
+    dst = folder / new_file.name
+    if new_file.is_dir():
+        shutil.copytree(str(new_file), str(dst), dirs_exist_ok=True)
+    else:
+        shutil.copy2(str(new_file), str(dst))
+    log("  %s：换掉 %s -> %s（保留 %s）"
+        % (folder.name, "、".join(removed) or "（无同名旧文件）", new_file.name,
+           "、".join(kept) or "无"))
+    return {"folder": str(folder), "mode": mode, "removed": removed, "kept": kept,
+            "added": [dst.name] if not new_file.is_dir() else ["（目录）" + dst.name]}
+
+
 def browser_capture(cfg) -> dict:
     """读取当前页面的 网址/名称/作者/封面/下载直链"""
     info = json.loads(browser_eval(cfg, PAGE_INFO_JS) or "{}")
@@ -1596,7 +1739,9 @@ class Store:
         self.cx.row_factory = sqlite3.Row
         self.cx.executescript(SCHEMA)
         have = {r["name"] for r in self.cx.execute("PRAGMA table_info(mods)")}
-        for col, typ in (("img_source", "TEXT"), ("subcat", "TEXT"), ("affects", "TEXT")):
+        for col, typ in (("img_source", "TEXT"), ("subcat", "TEXT"), ("affects", "TEXT"),
+                         ("site_updated", "TEXT"), ("site_latest", "TEXT"), ("site_version", "TEXT"),
+                         ("site_checked", "TEXT"), ("update_avail", "INTEGER")):
             if col not in have:
                 self.cx.execute("ALTER TABLE mods ADD COLUMN %s %s" % (col, typ))
         self.cx.commit()
@@ -1628,9 +1773,16 @@ class Store:
                  -- 重扫描时记录里没有 affects（它不在文件夹名里），给 NULL 就保留库里已有的；
                  -- 手动清空传的是 ""（不是 NULL），所以照样能清掉。
                  affects=COALESCE(excluded.affects, mods.affects),
+                 site_updated=COALESCE(excluded.site_updated, mods.site_updated),
+                 site_latest=COALESCE(excluded.site_latest, mods.site_latest),
+                 site_version=COALESCE(excluded.site_version, mods.site_version),
+                 site_checked=COALESCE(excluded.site_checked, mods.site_checked),
+                 update_avail=COALESCE(excluded.update_avail, mods.update_avail),
                  updated_at=excluded.updated_at""",
             {**m, "img_hash": img_hash, "file_mtime": mtime, "file_size": size,
-             "affects": m.get("affects"),
+             "affects": m.get("affects"), "site_updated": m.get("site_updated"),
+             "site_latest": m.get("site_latest"), "site_version": m.get("site_version"),
+             "site_checked": m.get("site_checked"), "update_avail": m.get("update_avail"),
              "updated_at": _dt.datetime.now().isoformat(timespec="seconds")})
         return img_hash
 
@@ -1669,6 +1821,23 @@ class Store:
             n += self.cx.execute("UPDATE mods SET affects=? WHERE folder=?", (val, str(f))).rowcount
         self.cx.commit()
         return n
+
+    def set_site_info(self, folder, updated=None, latest=None, version=None,
+                      checked=None, avail=None) -> dict:
+        """写「检查更新」相关字段（None = 这一项不动）。
+
+        updated = 站点上 Last Version Update（下载/更新时记基线）
+        latest  = 最近一次检查看到的站点值；avail = 1/0 有没有新版
+        """
+        pairs = (("site_updated", updated), ("site_latest", latest), ("site_version", version),
+                 ("site_checked", checked), ("update_avail", avail))
+        sets = [(c, v) for c, v in pairs if v is not None]
+        if sets:
+            self.cx.execute("UPDATE mods SET %s WHERE folder=?"
+                            % ", ".join("%s=?" % c for c, _ in sets),
+                            [v for _, v in sets] + [str(folder)])
+            self.cx.commit()
+        return dict(sets)
 
     def affects_all(self) -> list:
         """已有取值 + 条数（给界面做建议/筛选）"""
@@ -1839,8 +2008,8 @@ def write_excel(mods: list, cfg: dict, out_path: Path, use_store_hash=None, prog
         # 这个分类里有子分类时，表格里多加一列「子分类」
         show_sub = any((m.get("subcat") or "") for m in rows)
         if show_sub:
-            heads = ["序号", "子分类", "作者", "NSFW/SFW", "影响/替换", "Mod名称", "Mod地址", "预览图"]
-            cws = [7.7, 15.857, 15.857, 15.857, 26.0, 50.0, 63.0, 28.0]
+            heads = ["序号", "子分类", "作者", "NSFW/SFW", "影响/替换", "更新时间", "Mod名称", "Mod地址", "预览图"]
+            cws = [7.7, 15.857, 15.857, 15.857, 26.0, 17.0, 48.0, 63.0, 28.0]
         else:
             heads = list(HEADERS)
             cws = list(COL_WIDTHS)
@@ -1856,9 +2025,10 @@ def write_excel(mods: list, cfg: dict, out_path: Path, use_store_hash=None, prog
             ws.column_dimensions[get_column_letter(i)].width = w
         for r, m in enumerate(rows, start=2):
             vals = ([m["seq"], m.get("subcat") or "", m["author"], m["nsfw"],
-                     m.get("affects") or "", m["name"], m["addr"], None] if show_sub else
+                     m.get("affects") or "", m.get("site_updated") or "",
+                     m["name"], m["addr"], None] if show_sub else
                     [m["seq"], m["author"], m["nsfw"], m.get("affects") or "",
-                     m["name"], m["addr"], None])
+                     m.get("site_updated") or "", m["name"], m["addr"], None])
             for i, v in enumerate(vals, 1):
                 c = ws.cell(r, i, v)
                 c.font, c.alignment, c.border = f_body, center, border

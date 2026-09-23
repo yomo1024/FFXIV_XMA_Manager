@@ -61,6 +61,16 @@ export const api = {
   removeTags: (folders, tags) =>
     req('/api/mod/tags/remove', { method: 'POST', body: JSON.stringify({ folders, tags }) }),
 
+  // ---- 检查更新 / 更新 Mod ----
+  replaceMod: (body) => req('/api/mod/replace', { method: 'POST', body: JSON.stringify(body) }),
+  // 浏览器上传新文件替换：走 FormData，别手动设 Content-Type（要让浏览器自己带 boundary）
+  replaceModUpload: async (form) => {
+    const r = await fetch('/api/mod/replace', { method: 'POST', body: form })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status)
+    return j
+  },
+
   // ---- 影响/替换（这条 Mod 替换游戏里的哪些装备/部位） ----
   affects: () => req('/api/affects'),
   setAffects: (folder, affects) =>
@@ -104,6 +114,8 @@ export const JOB_TITLES = {
   download: '从页面下载',
   watch: '监视下载',
   fetch: '解析并下载入库',
+  update_check: '检查更新',
+  mod_update: '更新 Mod（覆盖下载）',
 }
 
 export function jobResultText(s) {
@@ -111,6 +123,18 @@ export function jobResultText(s) {
   if (s.state === 'cancelled') return '已取消'
   if (s.state === 'error') return '出错：' + (s.error || '')
   switch (s.kind) {
+    case 'update_check': {
+      const n = (r.has_update || []).length
+      const un = (r.unknown || []).length
+      return `检查更新：共 ${r.checked || 0} 条 ｜ 有新版 ${n} 条 ｜ 已是最新 ${r.up_to_date || 0} 条` +
+        (un ? ` ｜ ${un} 条读不到（可能被站点挡了）` : '') +
+        (n ? '（表格里带「有新版」标记，勾上点「更新选中」即可）' : '')
+    }
+    case 'mod_update': {
+      const ok = (r.ok || []).length
+      const bad = (r.failed || []).length
+      return `更新完成：成功 ${ok} 条` + (bad ? `，失败 ${bad} 条（看日志）` : '')
+    }
     case 'scan':
       return `扫描完成：${r.mods} 个 Mod` + (r.pruned ? `（清理失效 ${r.pruned} 条）` : '')
     case 'export':

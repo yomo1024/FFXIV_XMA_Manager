@@ -216,6 +216,90 @@ async function saveTags(list) {   // 单条：整条覆盖
   }
 }
 
+// ---------------- 检查更新 / 更新 Mod ----------------
+const onlyUpd = ref(false)              // 只看「有新版」
+const updateChecking = ref(false)
+const updating = ref(false)
+const replaceMode = ref('same_name')
+const updCount = computed(() => (props.mods || []).filter((m) => m.update_avail).length)
+const updFolders = computed(() =>
+  (checked.value.length ? checked.value : [])
+    .filter((f) => { const m = (props.mods || []).find((x) => x.folder === f); return m && m.update_avail }))
+
+async function checkUpdates() {
+  const folders = checked.value.length ? [...checked.value] : []
+  updateChecking.value = true
+  try {
+    await startJob('update_check', { folders })
+    msg.info(folders.length ? `开始检查选中的 ${folders.length} 条…` : '开始检查全部（有站点地址的）…')
+    setTimeout(() => { updateChecking.value = false }, 4000)
+  } catch (e) {
+    updateChecking.value = false
+    msg.error('启动检查失败：' + e.message)
+  }
+}
+
+function doUpdate(folders) {
+  const list = (folders && folders.length) ? folders : updFolders.value
+  if (!list.length) return msg.warning('先勾选「有新版」的 Mod，或点某条详情里的「从站点更新」')
+  const names = list.map((f) => ((props.mods || []).find((m) => m.folder === f) || {}).name || f)
+  dialog.warning({
+    title: '从站点下载最新版并覆盖',
+    content: `将更新 ${list.length} 条：\n${names.slice(0, 6).map((n) => '· ' + n).join('\n')}` +
+      (names.length > 6 ? `\n… 还有 ${names.length - 6} 条` : '') +
+      '\n\n旧文件会移入回收站（能还原）；地址.txt、预览图、编号、标签、影响/替换 都保留。' +
+      `\n替换方式：${replaceMode.value === 'all_payload' ? '清掉旧文件再放新的' : '只替换同名文件'}`,
+    positiveText: '开始更新',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      updating.value = true
+      startJob('mod_update', { folders: list, mode: replaceMode.value, export: true })
+        .catch((e) => msg.error('启动更新失败：' + e.message))
+        .finally(() => setTimeout(() => { updating.value = false }, 4000))
+    },
+  })
+}
+
+// 手动上传 / 指定新文件替换
+const showReplace = ref(false)
+const repReplacing = ref(false)
+const repForm = ref({ folder: '', name: '', mode: 'same_name', src: '', file: null, upName: '' })
+function openReplace() {
+  const m = cur.value
+  if (!m) return msg.warning('先在左边选一条 Mod')
+  repForm.value = { folder: m.folder, name: m.name, mode: 'same_name', src: '', file: null, upName: '' }
+  showReplace.value = true
+}
+function pickRepFile(e) {
+  const f = e && e.target && e.target.files && e.target.files[0]
+  repForm.value.file = f || null
+  repForm.value.upName = f ? f.name : ''
+}
+async function submitReplace() {
+  const f = repForm.value
+  if (!f.file && !String(f.src || '').trim()) return msg.warning('选一个新文件（也可以填本地路径）')
+  repReplacing.value = true
+  try {
+    let r
+    if (f.file) {
+      const fd = new FormData()
+      fd.append('folder', f.folder); fd.append('mode', f.mode); fd.append('file', f.file)
+      r = await api.replaceModUpload(fd)
+    } else {
+      r = await api.replaceMod({ folder: f.folder, src: String(f.src).trim(), mode: f.mode })
+    }
+    msg.success(`已替换：换掉 ${(r.removed || []).length} 个旧文件，放入 ${(r.added || []).join('、')}` +
+      ((r.kept || []).length ? `（保留 ${r.kept.length} 个）` : ''))
+    showReplace.value = false
+    emit('changed')
+    await loadMeta()
+  } catch (e) {
+    msg.error('替换失败：' + e.message)
+  } finally {
+    repReplacing.value = false
+  }
+}
+
 async function saveAffects() {          // 失焦/回车即保存（和标签一样的即时反馈）
   if (!cur.value) return
   const want = String(cur.value.affects || '').trim()
@@ -569,6 +653,7 @@ const view = computed(() =>
       const mine = String(m.affects || '').toLowerCase()
       if (!fAffects.value.some((v) => mine.includes(String(v).toLowerCase()))) return false
     }
+    if (onlyUpd.value && !m.update_avail) return false
     if (fTagState.value === 'has' && !(m.tags || []).length) return false
     if (fTagState.value === 'none' && (m.tags || []).length) return false
     if (fInst.value === 'yes' && m.installed !== true) return false
@@ -637,6 +722,29 @@ const columns = computed(() => [
         title: '点一下按它筛选',
         onClick: (e) => { e.stopPropagation(); toggleAffectsFilter(v) },
       }, v)
+    },
+  },
+  {
+    title: '更新时间', key: 'site_updated', width: 168, resizable: true,
+    render: (r) => {
+      const v = String(r.site_updated || '').trim()
+      const kids = []
+      if (r.update_avail) {
+        kids.push(h(NTag, {
+          size: 'tiny', bordered: false, type: 'warning',
+          style: 'margin-right:4px;cursor:pointer',
+          onClick: (e) => { e.stopPropagation(); onlyUpd.value = true },
+        }, { default: () => '有新版' }))
+      }
+      kids.push(h('span', { style: v ? '' : 'opacity:.35' }, v ? v.slice(0, 10) : '—'))
+      return h(NTooltip, {
+        trigger: () => h('div', { style: 'display:flex;align-items:center;gap:2px' }, kids),
+        default: () => [
+          `本地这份：站点更新时间 ${r.site_updated || '未知'}`,
+          r.site_latest ? `站点现在：${r.site_latest}${r.site_version ? '（v' + r.site_version + '）' : ''}` : '',
+          r.site_checked ? `上次检查：${r.site_checked}` : '',
+        ].filter(Boolean).join('｜'),
+      })
     },
   },
   { title: 'Mod 名称', key: 'name', minWidth: 260, ellipsis: { tooltip: true }, resizable: true },
@@ -855,6 +963,15 @@ async function copyPath() {
         </n-button-group>
         <span class="dim">共 {{ mods.length }} 条 ｜ 显示 {{ view.length }} 条</span>
         <div class="grow"></div>
+        <n-button size="small" :loading="updateChecking" @click="checkUpdates">检查更新</n-button>
+        <n-button v-if="updCount" size="small" :type="onlyUpd ? 'primary' : 'default'"
+                  @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>
+        <n-select v-model:value="replaceMode" size="small" style="width: 152px"
+                  :options="[{ label: '只替换同名文件', value: 'same_name' },
+                             { label: '清掉旧文件再放', value: 'all_payload' }]" />
+        <n-button size="small" :loading="updating" :disabled="!updFolders.length" @click="doUpdate()">
+          更新选中{{ updFolders.length ? `（${updFolders.length}）` : '' }}
+        </n-button>
         <n-button size="small" type="primary" @click="openAdd">添加 Mod…</n-button>
         <n-button size="small" @click="openEdit" :disabled="!cur">编辑</n-button>
         <n-button size="small" :disabled="!checked.length && !cur" @click="doDelete(checked)">
@@ -969,7 +1086,7 @@ async function copyPath() {
           :columns="columns" :data="view" :row-class-name="rowClassName" :row-props="rowProps"
           :row-key="(r) => r.folder" :checked-row-keys="checked"
           @update:checked-row-keys="(k) => (checked = k)"
-          :max-height="'100%'" :scroll-x="1410" size="small" striped flex-height
+          :max-height="'100%'" :scroll-x="1578" size="small" striped flex-height
         />
         <n-empty v-else style="margin: auto" description="还没有索引数据，点右上角「重新扫描」" />
       </div>
@@ -1032,6 +1149,14 @@ async function copyPath() {
           <n-descriptions-item label="分类">{{ cur?.category || '—' }}</n-descriptions-item>
           <n-descriptions-item label="序号">{{ cur?.seq ?? '—' }}</n-descriptions-item>
           <n-descriptions-item label="子分类">{{ cur?.subcat || '—' }}</n-descriptions-item>
+        <n-descriptions-item label="更新时间" :span="2">
+          {{ cur?.site_updated || '—' }}
+          <n-tag v-if="cur?.update_avail" size="tiny" type="warning" :bordered="false"
+                 style="margin-left:6px;cursor:pointer" @click="onlyUpd = true">有新版</n-tag>
+          <span v-if="cur?.site_latest" class="dim">
+            ｜ 站点最新 {{ cur.site_latest }}{{ cur.site_version ? '（v' + cur.site_version + '）' : '' }}
+          </span>
+        </n-descriptions-item>
           <n-descriptions-item label="作者">{{ cur?.author || '—' }}</n-descriptions-item>
           <n-descriptions-item label="类型" :span="2">{{ cur?.nsfw || '—' }}</n-descriptions-item>
         </n-descriptions>
@@ -1039,6 +1164,14 @@ async function copyPath() {
           <span class="lbl">标签</span>
           <n-dynamic-tags :value="(cur && cur.tags) || []" size="small"
                           :disabled="!cur" @update:value="saveTags" />
+        </div>
+        <div class="tagedit">
+          <span class="lbl" title="从站点重新下载最新版覆盖，或自己上传新文件替换">更新</span>
+          <n-button size="tiny" :disabled="!cur || !cur.addr" @click="doUpdate([cur.folder])">
+            从站点更新
+          </n-button>
+          <n-button size="tiny" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
+          <span v-if="cur && !cur.addr" class="dim">（没有站点地址，只能手动替换）</span>
         </div>
         <div class="tagedit">
           <span class="lbl" title="这条 Mod 替换/影响游戏里的哪些东西（来自 XMA 的 Affects / Replaces）">
@@ -1204,6 +1337,36 @@ async function copyPath() {
           <n-button size="small" type="primary" :loading="busy" @click="submitForm">
             {{ mode === 'add' ? '导入' : '保存' }}
           </n-button>
+        </n-space>
+      </template>
+    </n-modal>
+    <!-- 手动上传 / 指定新文件替换 -->
+    <n-modal v-model:show="showReplace" preset="card" style="width: 600px" title="上传新文件替换">
+      <n-alert v-if="repForm.name" type="info" :show-icon="false" style="margin-bottom: 10px">
+        目标：<b>{{ repForm.name }}</b><br />
+        文件夹里的 <b>地址.txt、预览图、编号、作者、名称、标签、影响/替换</b> 都会保留；
+        被换下来的旧文件进回收站，能还原。
+      </n-alert>
+      <n-form label-placement="left" label-width="92">
+        <n-form-item label="选新文件">
+          <input type="file" @change="pickRepFile" />
+          <span v-if="repForm.upName" class="dim" style="margin-left: 8px">{{ repForm.upName }}</span>
+        </n-form-item>
+        <n-form-item label="或填路径">
+          <n-input v-model:value="repForm.src" size="small" clearable
+                   placeholder="D:\下载\xxx.pmp ／ 也可以先用「待导入」，再填那个路径" />
+        </n-form-item>
+        <n-form-item label="替换方式">
+          <n-radio-group v-model:value="repForm.mode" size="small">
+            <n-radio-button value="same_name">只替换同名文件（推荐）</n-radio-button>
+            <n-radio-button value="all_payload">清掉旧文件再放新的</n-radio-button>
+          </n-radio-group>
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button size="small" @click="showReplace = false">取消</n-button>
+          <n-button size="small" type="primary" :loading="repReplacing" @click="submitReplace">开始替换</n-button>
         </n-space>
       </template>
     </n-modal>
