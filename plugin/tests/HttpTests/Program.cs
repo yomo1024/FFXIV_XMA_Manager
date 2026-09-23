@@ -398,6 +398,87 @@ public static class Program
         var m5 = MakeMod("m5", "{\"Name\":\"jpg\"}");
         var cv5 = ModBridge.Http.CoverWriter.Apply(m5, jpg);
         Check("jpg 用 _MetaImage.jpg", cv5.Ok && cv5.RelPath == "images\\_MetaImage.jpg", cv5.RelPath);
+
+        // ★ i) 封面注入进包（主人现场那批 mod 的正解：Penumbra 只接受包文件、由它解包成目录，
+        //      包内没图 = 装出来没图 → 把图塞进包里，解包时自然带上）
+        byte[] ReadAll(System.IO.Compression.ZipArchive z, string name)
+        {
+            using var s = z.GetEntry(name)!.Open();
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            return ms.ToArray();
+        }
+        var pkDir = Path.Combine(root, "inject");
+        Directory.CreateDirectory(pkDir);
+        var pk = Path.Combine(pkDir, "realmod.pmp");
+        using (var fs = File.Create(pk))
+        using (var za = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            var em = za.CreateEntry("meta.json");
+            using (var w = new StreamWriter(em.Open()))
+                w.Write("{\"FileVersion\":4,\"Name\":\"真包\",\"Author\":\"A\",\"Image\":\"\"}");
+            var ep = za.CreateEntry("base/chara/x.tex");
+            using (var st = ep.Open()) st.Write(new byte[] { 1, 2, 3 });
+        }
+        var pkBefore = File.ReadAllBytes(pk);
+        var inj = ModBridge.Http.CoverWriter.InjectIntoPackage(pk, jpg, webpSrc, jpg);
+        Check("注入产出新包", inj is not null && File.Exists(inj), inj ?? "null");
+        Check("原包没被改", File.ReadAllBytes(pk).SequenceEqual(pkBefore));
+        if (inj is not null)
+        {
+            using var z = System.IO.Compression.ZipFile.OpenRead(inj);
+            Check("包内有 cover.webp 且是真 WebP 内容",
+                z.GetEntry("cover.webp") is not null
+                && ReadAll(z, "cover.webp").SequenceEqual(File.ReadAllBytes(webpSrc)));
+            Check("包内有 cover.jpg", z.GetEntry("cover.jpg") is not null);
+            Check("包内有 images/_MetaImage.jpg", z.GetEntry("images/_MetaImage.jpg") is not null);
+            var meta = System.Text.Json.Nodes.JsonNode.Parse(
+                System.Text.Encoding.UTF8.GetString(ReadAll(z, "meta.json")))!;
+            Check("meta.json 的 Image 指向 images\\_MetaImage.jpg",
+                meta["Image"]?.GetValue<string>() == "images\\_MetaImage.jpg", meta["Image"]?.GetValue<string>());
+            Check("meta.json 其它字段没丢",
+                meta["Author"]?.GetValue<string>() == "A" && meta["FileVersion"]?.GetValue<int>() == 4);
+            Check("原 payload 还在", z.GetEntry("base/chara/x.tex") is not null);
+        }
+        Check("没图时不折腾（返回 null，继续用原包）",
+            ModBridge.Http.CoverWriter.InjectIntoPackage(pk, null, null, null) is null);
+        // i2) 作者包里自带**真** cover.webp → 注入时保留，不覆盖
+        var pk2 = Path.Combine(pkDir, "authorcover.pmp");
+        using (var fs = File.Create(pk2))
+        using (var za = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            var em = za.CreateEntry("meta.json");
+            using (var w = new StreamWriter(em.Open())) w.Write("{\"Name\":\"作者包\",\"Image\":\"\"}");
+            var ec = za.CreateEntry("cover.webp");
+            using (var st = ec.Open()) st.Write(File.ReadAllBytes(webpSrc));     // 真 WebP
+        }
+        var inj2 = ModBridge.Http.CoverWriter.InjectIntoPackage(pk2, jpg, webpSrc, jpg);
+        if (inj2 is not null)
+        {
+            using var z2 = System.IO.Compression.ZipFile.OpenRead(inj2);
+            Check("作者的真 cover.webp 原样保留（不被覆盖）",
+                z2.GetEntry("cover.webp") is not null
+                && ReadAll(z2, "cover.webp").SequenceEqual(File.ReadAllBytes(webpSrc)));
+            Check("仍然补了 images/_MetaImage.jpg", z2.GetEntry("images/_MetaImage.jpg") is not null);
+        }
+        // i3) 假 cover.webp（旧版留下的）→ 注入时换成我们的真 WebP
+        var pk3 = Path.Combine(pkDir, "fakecover.pmp");
+        using (var fs = File.Create(pk3))
+        using (var za = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            var em = za.CreateEntry("meta.json");
+            using (var w = new StreamWriter(em.Open())) w.Write("{\"Name\":\"假货包\"}");
+            var ec = za.CreateEntry("cover.webp");
+            using (var st = ec.Open()) st.Write(new byte[] { 9, 9, 9 });          // 伪 WebP
+        }
+        var inj3 = ModBridge.Http.CoverWriter.InjectIntoPackage(pk3, jpg, webpSrc, jpg);
+        if (inj3 is not null)
+        {
+            using var z3 = System.IO.Compression.ZipFile.OpenRead(inj3);
+            Check("伪 cover.webp 被换成真 WebP",
+                z3.GetEntry("cover.webp") is not null
+                && ReadAll(z3, "cover.webp").SequenceEqual(File.ReadAllBytes(webpSrc)));
+        }
         Check("jpg 文件在", File.Exists(Path.Combine(m5, "images", "_MetaImage.jpg")));
 
         // f) 换了扩展名时清掉同名的旧文件（可复现路径：meta 指向的图缺失 + 有旧扩展名残留）

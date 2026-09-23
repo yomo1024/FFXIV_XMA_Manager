@@ -3266,6 +3266,16 @@ def api_bridge():
     out["plugin_ok"] = bool(info.get("ok"))
     out["min_plugin_version"] = MIN_PLUGIN_VERSION
     out["version_message"] = info.get("message") or ""
+    feats = info.get("features") or []
+    out["plugin_features"] = feats
+    # 「把封面塞进包」的能力（插件 0.2.12+）。没有它就只能"装完再补写"，那一步不可靠
+    out["plugin_cover_inject"] = "coverInject" in feats
+    if out.get("plugin_ok") and not out["plugin_cover_inject"]:
+        out["cover_message"] = (
+            "游戏里的 Mod Bridge 是 v%s：还**没有**「封面塞进包」的能力（需要 v0.2.12+）。"
+            "现在装 mod 只会在装完后往目录里补写封面 —— Penumbra 已经装好的目录很可能补不上（就是"
+            "「Penumbra 里那条 mod 一个图都没有」的原因）。请在 Dalamud 里更新 Mod Bridge 并**重启游戏**（插件是 DLL，不能热更）。"
+            % (info.get("version") or "未知"))
     out["manager_version"] = MANAGER_VERSION
     out["manager_build"] = MANAGER_BUILD
     return out

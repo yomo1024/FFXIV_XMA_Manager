@@ -83,6 +83,158 @@ public static class CoverWriter
     }
 
     /// <summary>
+    /// 把封面**塞进包里**再交给 Penumbra —— 让图真正落进 mod 目录的可靠做法。
+    ///
+    /// 为什么必须这样：Penumbra 的 `InstallMod` 只接受**包文件**（.pmp/.zip…，它自己解包成目录），
+    /// 包内没有图 → 解出来的目录就没有图。而"装完再往目录里写"那一步会因时机/权限/占位等原因失败，
+    /// 现场表现就是「Penumbra 里那条 mod 一个图都没有」（2026-09 主人拷出目录实证：
+    /// 171 个条目、零张图、meta.json 连 Image 字段都没有）。塞进包里则解包时自然带上，不依赖事后写入。
+    ///
+    /// 返回新包路径（临时目录）；没有可用封面、或包不是 zip 时返回 null（调用方继续用原包，不影响安装）。
+    /// </summary>
+    public static string? InjectIntoPackage(string source, string? coverPath, string? coverWebpPath = null,
+                                            string? coverDrawPath = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(source) || !File.Exists(source))
+                return null;
+
+            var webpSrc = !string.IsNullOrWhiteSpace(coverWebpPath) && File.Exists(coverWebpPath)
+                          && IsRealWebp(coverWebpPath) ? coverWebpPath : null;
+            var drawSrc = coverDrawPath is not null && File.Exists(coverDrawPath)
+                          && Array.IndexOf(ImageExts, Path.GetExtension(coverDrawPath).ToLowerInvariant()) >= 0
+                ? coverDrawPath
+                : (coverPath is not null && File.Exists(coverPath) ? coverPath : null);
+            if (webpSrc is null && drawSrc is null)
+                return null;                                   // 没图就不折腾，原包直接用
+
+            var drawExt = drawSrc is null ? ".jpg" : Path.GetExtension(drawSrc).ToLowerInvariant();
+            if (Array.IndexOf(ImageExts, drawExt) < 0)
+                drawExt = ".jpg";
+
+            var dir = Path.Combine(Path.GetTempPath(), "ModBridgeCoverPacks");
+            Directory.CreateDirectory(dir);
+            var ext = Path.GetExtension(source);
+            if (string.IsNullOrWhiteSpace(ext))
+                ext = ".pmp";
+            var dest = Path.Combine(dir, Path.GetFileNameWithoutExtension(source) + "-cover" + ext);
+            if (File.Exists(dest))
+                File.Delete(dest);
+
+            string? metaJson = null;
+            var authorCoverKept = false;      // 作者自带的**真** cover.webp：保留，不覆盖
+            using (var src = ZipFile.OpenRead(source))
+            using (var outStream = File.Create(dest))
+            using (var dst = new ZipArchive(outStream, ZipArchiveMode.Create))
+            {
+                foreach (var e in src.Entries)
+                {
+                    var name = e.FullName.Replace('\\', '/');
+                    var atRoot = name.IndexOf('/') < 0;
+                    var isWebpName = atRoot && e.Name.Equals(CoverWebp, StringComparison.OrdinalIgnoreCase);
+                    var isRootCover = atRoot && e.Name.StartsWith(CoverBase + ".", StringComparison.OrdinalIgnoreCase);
+                    var isMetaImg = !atRoot && name.StartsWith(MetaDir + "/", StringComparison.OrdinalIgnoreCase)
+                        && e.Name.StartsWith(MetaBase + ".", StringComparison.OrdinalIgnoreCase);
+
+                    if (isWebpName)
+                    {
+                        // 作者给的是真 WebP → 原样留着（跟"装完补写"一个规矩：不覆盖作者的图）
+                        var head = new byte[12];
+                        using (var s0 = e.Open())
+                        {
+                            var n0 = s0.Read(head, 0, 12);
+                            var real = n0 >= 12 && head[0] == (byte)'R' && head[1] == (byte)'I'
+                                && head[2] == (byte)'F' && head[3] == (byte)'F'
+                                && head[8] == (byte)'W' && head[9] == (byte)'E' && head[10] == (byte)'B' && head[11] == (byte)'P';
+                            if (real)
+                            {
+                                authorCoverKept = true;
+                                var keep = dst.CreateEntry(name, CompressionLevel.Fastest);
+                                using var to0 = keep.Open();
+                                using var from0 = e.Open();
+                                from0.CopyTo(to0);
+                                continue;
+                            }
+                        }
+                        continue;                       // 伪 WebP（旧版留下的假货）→ 丢掉，换成我们的
+                    }
+                    if (isRootCover)
+                        continue;                       // 其它 cover.<ext>：由我们统一写 cover.<drawExt>
+                    if (isMetaImg)
+                        continue;                       // _MetaImage 由我们统一写
+                    if (atRoot && e.Name.Equals("meta.json", StringComparison.OrdinalIgnoreCase))
+                    {
+                        using var s = e.Open();
+                        using var reader = new StreamReader(s, Encoding.UTF8);
+                        metaJson = reader.ReadToEnd();
+                        continue;                                  // meta.json 最后自己写回去
+                    }
+                    var copy = dst.CreateEntry(name, CompressionLevel.Fastest);
+                    using var from = e.Open();
+                    using var to = copy.Open();
+                    from.CopyTo(to);
+                }
+
+                if (webpSrc is not null && !authorCoverKept)
+                    AddBytes(dst, CoverWebp, File.ReadAllBytes(webpSrc));
+                // 跟"装完补写"一样：cover.<真扩展名> 也放一份（有人按固定名+扩展名找）
+                if (drawSrc is not null && drawExt != ".webp")
+                    AddBytes(dst, CoverBase + drawExt, File.ReadAllBytes(drawSrc));
+                if (drawSrc is not null)
+                    AddBytes(dst, MetaDir + "/" + MetaBase + drawExt, File.ReadAllBytes(drawSrc));
+
+                if (metaJson is not null)
+                {
+                    var text = metaJson;
+                    try
+                    {
+                        if (JsonNode.Parse(metaJson) is JsonObject obj)
+                        {
+                            obj["Image"] = MetaRelPath(drawExt);   // 官方版/Penumbra 读它
+                            text = obj.ToJsonString();
+                        }
+                    }
+                    catch { /* 解析不了就原样写回 */ }
+                    var outEntry = dst.CreateEntry("meta.json", CompressionLevel.Fastest);
+                    using var w = new StreamWriter(outEntry.Open(), new UTF8Encoding(false));
+                    w.Write(text);
+                }
+            }
+
+            return File.Exists(dest) ? dest : null;
+        }
+        catch
+        {
+            return null;      // 注入失败不影响安装，装完还有"事后补写"这一层兜底
+        }
+    }
+
+    private static void AddBytes(ZipArchive dst, string entryName, byte[] data)
+    {
+        var e = dst.CreateEntry(entryName, CompressionLevel.Fastest);
+        using var s = e.Open();
+        s.Write(data, 0, data.Length);
+    }
+
+    /// <summary>清理注入出来的临时包（插件启动时调一次，别让 %TEMP% 里堆着）。</summary>
+    public static void CleanupInjected(int olderThanHours = 24)
+    {
+        try
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "ModBridgeCoverPacks");
+            if (!Directory.Exists(dir))
+                return;
+            var limit = DateTime.UtcNow.AddHours(-olderThanHours);
+            foreach (var f in Directory.GetFiles(dir, "*-cover.*"))
+            {
+                try { if (File.GetLastWriteTimeUtc(f) < limit) File.Delete(f); } catch { /* 忽略 */ }
+            }
+        }
+        catch { /* 忽略 */ }
+    }
+
+    /// <summary>
     /// 管理器没给封面时的兜底：先在 .pmp/.zip 旁边找同名图片（`Xxx.pmp` ↔ `Xxx.jpg`），
     /// 找不到就**打开包本身**，从里面抽出根部的 `cover.*`（Heliosphere 的包都自带）。
     /// </summary>

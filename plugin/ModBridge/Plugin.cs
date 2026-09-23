@@ -27,6 +27,8 @@ public sealed class Plugin : IDalamudPlugin
         "cover.webp",     // 写 mod 根目录 cover.webp（Heliosphere 认这个文件名）
         "coverDraw",      // 自己挂 Penumbra 绘制事件画封面
         "helioNaming",    // 装 Heliosphere 包时用它的规范目录名
+        "coverInject",    // ★ 把封面塞进包再交给 Penumbra（0.2.12+）：Penumbra 只接受包文件，
+                          //   包内没图 = 装出来没图；旧版只能"装完再写"，那一步不可靠
     ];
 
     private const string CommandName = "/modbridge";
@@ -66,6 +68,7 @@ public sealed class Plugin : IDalamudPlugin
         _http = new HttpClient { Timeout = TimeSpan.FromMinutes(20) };
 
         Bridge = new PenumbraBridge(PluginInterface, Framework, Log);
+        CoverWriter.CleanupInjected();          // 清掉上一次注入留在 %TEMP% 里的包（超过 24h 的）
 
         var tempDir = Path.Combine(PluginInterface.ConfigDirectory.FullName, "downloads");
         Jobs = new JobManager(_http, Bridge, Configuration, Log, tempDir);

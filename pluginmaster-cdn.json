@@ -3,7 +3,7 @@
     "Author": "yomo1024",
     "Name": "Mod Bridge",
     "InternalName": "ModBridge",
-    "AssemblyVersion": "0.2.11.0",
+    "AssemblyVersion": "0.2.12.0",
     "Punchline": "网页点一下，mod 直接装进 Penumbra。",
     "Description": "配合本地「FFXIV XMA Manager」使用：管理器点「安装到游戏」→ 游戏内弹窗确认 → 调 Penumbra IPC 解包装入并启用、触发重绘，mod 立刻生效（并可选写入/绘制预览封面）。\n服务只监听 127.0.0.1，带 token 鉴权；用 /modbridge 打开设置窗口查看端口、token 与最近安装记录。",
     "ApplicableVersion": "any",
@@ -26,11 +26,11 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "DownloadCount": 0,
-    "LastUpdate": 1790175149,
+    "LastUpdate": 1790176333,
     "RepoUrl": "https://github.com/yomo1024/FFXIV_XMA_Manager",
     "IconUrl": "",
-    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/yomo1024/FFXIV_XMA_Manager@main/plugin/release/ModBridge-0.2.11.zip",
+    "DownloadLinkInstall": "https://cdn.jsdelivr.net/gh/yomo1024/FFXIV_XMA_Manager@main/plugin/release/ModBridge-0.2.12.zip",
     "DownloadLinkTesting": "",
-    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/yomo1024/FFXIV_XMA_Manager@main/plugin/release/ModBridge-0.2.11.zip"
+    "DownloadLinkUpdate": "https://cdn.jsdelivr.net/gh/yomo1024/FFXIV_XMA_Manager@main/plugin/release/ModBridge-0.2.12.zip"
   }
 ]

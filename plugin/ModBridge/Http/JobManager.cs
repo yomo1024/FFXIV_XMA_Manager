@@ -242,6 +242,27 @@ public sealed class JobManager : IDisposable
                 }
             }
 
+            // ★ 把封面塞进包再交给 Penumbra：Penumbra 只接受**包文件**、由它自己解包成目录，
+            //   包内没有图 → 解出来就没有图（"装完再写"那一步不可靠，2026-09 主人现场实证过）。
+            //   塞进包里则解包时自然带上，不依赖事后写入。
+            try
+            {
+                var injected = CoverWriter.InjectIntoPackage(dest, job.CoverPath, job.CoverWebpPath, job.CoverDrawPath);
+                if (injected is not null)
+                {
+                    job.Step($"封面已塞进包：{Path.GetFileName(injected)}（Penumbra 解包时会一起装上）");
+                    dest = injected;
+                }
+                else
+                {
+                    job.Step("没有可塞的封面（管理器没给图、包内也没有），先按原包装");
+                }
+            }
+            catch (Exception e)
+            {
+                job.Step("封面注入失败（继续安装，装完还会再补写一次）：" + e.Message);
+            }
+
             var before = _bridge.Mods();
             job.Step($"Penumbra 已看到 {before.Count} 个 mod，提交安装");
             job.PenumbraResult = _bridge.Install(dest);

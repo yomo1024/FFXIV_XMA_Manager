@@ -261,6 +261,9 @@ async function save() {
               </div>
             </div>
           </n-form-item>
+          <n-form-item v-if="verInfo && verInfo.cover_message" label=" ">
+            <n-alert type="warning" :show-icon="false">{{ verInfo.cover_message }}</n-alert>
+          </n-form-item>
           <n-form-item v-if="verInfo && verInfo.plugin_version && !verInfo.plugin_ok" label=" ">
             <n-alert type="warning" :show-icon="false">{{ verInfo.version_message }}</n-alert>
           </n-form-item>
