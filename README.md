@@ -138,9 +138,37 @@ XMA 的下载需要登录，而且 **NSFW 的 Mod 未登录根本看不到文件
 
 | 组件 | 版本 |
 |---|---|
-| 管理器 ModManager | v2.2 |
+| 管理器 ModManager | v2.2.0 |
 | 游戏插件 ModBridge | v0.2.7（管理器要求 ≥ v0.2.6） |
 | 浏览器拓展 | v1.0.0 |
+
+### 版本规则（vX.Y.Z）
+
+组件之间各管各的版本，但都必须是 **三段式 `vX.Y.Z`**：
+
+| 段 | 什么时候 +1 | 例子 |
+|---|---|---|
+| **X** | 不兼容的大改（数据格式/目录结构变、旧配置不再适用） | 1.0.0 → 2.0.0 |
+| **Y** | 功能新增（新页面、新接口、新能力） | 2.1.0 → 2.2.0 |
+| **Z** | 修复 / 优化 / 文案（不改行为的调整） | 2.2.0 → 2.2.1 |
+
+**版本号只有一个来源**，别的地方都从它派生：
+
+| 组件 | 唯一来源 | 派生处 |
+|---|---|---|
+| 管理器 | `manager/app_version.py` 的 `APP_VERSION` | Web 后端、部署包名、`web-src/package.json`、README/使用说明版本表 |
+| 游戏插件 | `plugin/ModBridge/ModBridge.csproj` 的 `<Version>` | Dalamud 清单与 `pluginmaster*.json`（SDK 自动补成 `x.y.z.0`，这是 .NET 程序集的硬性格式，**别手改**）、发布包 zip 名 |
+| 浏览器拓展 | `browser-extension/manifest.json` 的 `"version"` | 安装说明里的版本提及 |
+
+改版本用现成脚本，别手敲（它会同步所有落点）：
+
+```bash
+python scripts/check_versions.py                     # 校验全仓库版本是否一致
+python scripts/check_versions.py --bump patch        # 管理器 Z+1（也可以 minor / major）
+python scripts/check_versions.py --bump-plugin patch # 插件 Z+1（之后还要 build + pack-release）
+```
+改了插件版本后必须补两步，否则 Dalamud 那边拿不到新包：
+`dotnet build -c Release` → `python plugin/pack-release.py plugin/ModBridge/bin/Release .`
 
 ---
 
