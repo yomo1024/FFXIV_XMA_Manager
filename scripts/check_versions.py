@@ -88,15 +88,22 @@ def bump(v, part):
 
 
 def rewrite(rel, pairs, times=1):
-    """old→new；times=None 表示替换全部（锁文件里根版本本来就有两处）。"""
+    """old→new；times=None 表示替换全部。
+
+    **行尾无关**：先把 CRLF 归一成 LF 再匹配，写回时还原成原来的风格 ——
+    Windows 上仓库文件都是 CRLF，按 \n 写模式串会一个都匹配不上（踩过）。
+    """
     p2 = ROOT / rel
-    body = p2.read_bytes().decode("utf-8")
+    raw2 = p2.read_bytes().decode("utf-8")
+    was_crlf = "\r\n" in raw2
+    body = raw2.replace("\r\n", "\n")
     for old, new in pairs:
-        n = body.count(old)
+        o, nw = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+        n = body.count(o)
         assert (n >= 1) if times is None else (n == times), \
-            "[%s] 期望匹配 %s 次，实际 %d 次：%r" % (rel, times, n, old[:70])
-        body = body.replace(old, new)
-    p2.write_bytes(body.encode("utf-8"))
+            "[%s] 期望匹配 %s 次，实际 %d 次：%r" % (rel, times, n, o[:70])
+        body = body.replace(o, nw)
+    p2.write_bytes((body.replace("\n", "\r\n") if was_crlf else body).encode("utf-8"))
 
 
 def do_bump(part):
@@ -104,7 +111,14 @@ def do_bump(part):
     new = bump(old, part)
     rewrite(MP + "app_version.py", [('APP_VERSION = "%s"' % old, 'APP_VERSION = "%s"' % new)])
     rewrite(MP + "web-src/package.json", [('"version": "%s"' % old, '"version": "%s"' % new)])
-    rewrite(MP + "web-src/package-lock.json", [('"version": "%s"' % old, '"version": "%s"' % new)], times=2)
+    # 锁文件里根版本有两处（根 + packages[""]），都紧跟在包名那行后面 —— 只认这两处，
+    # 免得把依赖包里碰巧同号的 version 也改掉（jiti 自己的版本号就跟我们对上过一次）
+    rewrite(MP + "web-src/package-lock.json", [
+        ('"name": "ffxiv-mod-manager-web",\n  "version": "%s"' % old,
+         '"name": "ffxiv-mod-manager-web",\n  "version": "%s"' % new),
+        ('"name": "ffxiv-mod-manager-web",\n      "version": "%s"' % old,
+         '"name": "ffxiv-mod-manager-web",\n      "version": "%s"' % new),
+    ])
     if rd("README.md"):
         rewrite("README.md", [("| 管理器 ModManager | v%s |" % old, "| 管理器 ModManager | v%s |" % new)])
     if rd("docs/使用说明.md"):
@@ -170,7 +184,13 @@ check_in(MP + "mod_manager_web.py", "MIN_PLUGIN_VERSION = app_version.MIN_PLUGIN
 check_in(MP + "make_package.py", "VERSION = APP_VERSION", "make_package 取来源", "部署包名/部署说明")
 check("web-src/package.json", grab(MP + "web-src/package.json", r'"version":\s*"([^"]+)"'), mgr)
 lock = rd(MP + "web-src/package-lock.json") or ""
-check("package-lock.json 两处根版本", lock.count('"version": "%s"' % mgr), 2)
+try:      # 按结构判断，别数出现次数（依赖包里会碰巧撞上同样的版本号，例如 jiti=2.7.0）
+    _lj = json.loads(lock or "{}")
+    check("package-lock.json 根版本", _lj.get("version"), mgr)
+    check("package-lock.json packages[''] 版本",
+          ((_lj.get("packages") or {}).get("") or {}).get("version"), mgr)
+except Exception:
+    fail_list.append(("package-lock.json", "解析失败", mgr, ""))
 check_text("README.md", r"\| 管理器 ModManager \| v?([0-9.]+) \|", mgr, "README 版本表（管理器）")
 check_text("docs/使用说明.md", r"管理器 ModManager \*\*v?([0-9.]+)\*\*", mgr, "使用说明（管理器）")
 check_text("docs/使用说明.md", r"侧栏页脚 `v?([0-9.]+)", mgr, "使用说明页脚示例")
