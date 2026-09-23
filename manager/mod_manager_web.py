@@ -2592,6 +2592,47 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         self._send(200, path.read_bytes(), ctype)
 
+    def api_mod_download(self, q):
+        """下载 Mod 文件夹里的某个文件（浏览器直接存盘）。
+
+        流式写盘，不把大文件整读进内存（Mod 载荷动辄上百 MB）；
+        带防目录穿越校验：解析后的路径必须仍在 Mod 文件夹里。
+        """
+        folder = (q.get("folder") or [""])[0]
+        name = (q.get("name") or [""])[0]
+        cfg = cfg_now()
+        if not inside_root(folder, cfg.get("root") or ""):
+            return self._json({"error": "路径不在 Mod 目录里"}, 403)
+        base = Path(folder).resolve()
+        try:
+            p = (base / name).resolve()
+        except Exception:
+            return self._json({"error": "文件名不合法"}, 400)
+        if p != base and base not in p.parents:
+            return self._json({"error": "文件名不合法"}, 400)
+        if not p.is_file():
+            return self._json({"error": "找不到 %s" % name}, 404)
+        size = p.stat().st_size
+        ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition",
+                         "attachment; filename*=UTF-8''%s" % urllib.parse.quote(p.name))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            with open(p, "rb") as fh:
+                while True:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
+        mm.log("下载：%s（%.1f MB）" % (p.name, size / 1048576.0))
+
     # ---------- GET ----------
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
@@ -2636,6 +2677,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_mod_files(q))
                 if u.path == "/api/mod/history":
                     return self._json(api_mod_history(q))
+                if u.path == "/api/mod/download":
+                    return self.api_mod_download(q)
                 if u.path == "/api/bridge/requests":
                     return self._json(api_bridge_requests())
                 if u.path == "/api/images":

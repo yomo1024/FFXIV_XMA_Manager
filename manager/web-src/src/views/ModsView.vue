@@ -1211,14 +1211,25 @@ async function copyPath() {
               <template v-else-if="cur && filesMap[cur.folder]">
                 <template v-if="filesMap[cur.folder].ok">
                   <div class="flist">
-                    <div v-for="f in filesMap[cur.folder].items" :key="f.name" class="frow">
-                      <span class="fname" :title="f.name">{{ f.name }}</span>
-                      <span class="fsize">{{ f.dir ? '文件夹' : humanSize(f.size) }}</span>
-                      <span class="ftime">{{ f.mtime }}</span>
-                    </div>
+                    <template v-for="f in filesMap[cur.folder].items" :key="f.name">
+                      <!-- 文件：整行就是下载链接（点文件名直接存盘） -->
+                      <a v-if="!f.dir" class="frow link" :href="api.modFileUrl(cur.folder, f.name)"
+                         :download="f.name" :title="'下载 ' + f.name">
+                        <span class="fname">{{ f.name }}</span>
+                        <span class="fsize">{{ humanSize(f.size) }}</span>
+                        <span class="ftime">{{ f.mtime }}</span>
+                        <span class="fdl">⤓</span>
+                      </a>
+                      <div v-else class="frow">
+                        <span class="fname">{{ f.name }}</span>
+                        <span class="fsize">文件夹</span>
+                        <span class="ftime">{{ f.mtime }}</span>
+                      </div>
+                    </template>
                   </div>
                   <div class="ftotal">
                     共 {{ filesMap[cur.folder].count }} 项 ｜ 合计 {{ humanSize(filesMap[cur.folder].total) }}
+                    ｜ 点文件名就能下载
                   </div>
                 </template>
                 <div v-else class="descempty">{{ filesMap[cur.folder].error || '读不到文件清单' }}</div>
@@ -1363,13 +1374,6 @@ async function copyPath() {
               <a v-if="cur?.addr" class="addr" :href="cur.addr" target="_blank"
                  rel="noreferrer">{{ cur.addr }}</a>
               <span v-else>—</span>
-            </n-descriptions-item>
-            <n-descriptions-item label="预览图">
-              <span class="ellip" :title="cur?.img_name || ''">{{ cur?.img_name || '—' }}</span>
-            </n-descriptions-item>
-            <n-descriptions-item label="文件夹">
-              <span class="ellip" :title="cur?.folder || ''" style="cursor: pointer"
-                    @click="copyPath">{{ cur?.rel || cur?.folder || '—' }}</span>
             </n-descriptions-item>
           </n-descriptions>
         </n-card>
@@ -1692,7 +1696,7 @@ async function copyPath() {
 }
 /* ---- 详情展开：半屏 / 全屏。排布照 XMA mod 页的五个分区 ----
    左列 = ① 标题 ② 大图轮播 ③ 描述/文件/历史 ；右列 = ④ 操作 ⑤ 元信息
-   两列各自独立堆叠（列内不留空档）：半屏 3:1、全屏 2:1 ---- */
+   两列各自独立堆叠（列内不留空档），列宽比 5:2 ---- */
 .wrap.det-half {
   /* 半屏 = 列表让出大半，详情拿 60%：这样内部才排得下两列 */
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
@@ -1706,7 +1710,7 @@ async function copyPath() {
 .wrap.det-half .right,
 .wrap.det-full .right {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);   /* 全屏 2:1 */
+  grid-template-columns: minmax(0, 5fr) minmax(220px, 2fr);   /* 两列 5:2 */
   grid-template-areas:
     'bar bar'
     'main side';
@@ -1720,10 +1724,6 @@ async function copyPath() {
 .wrap.det-half .bridge-bar,
 .wrap.det-full .bridge-bar {
   grid-area: bar;
-}
-/* 半屏：列比 3:1（主人指定）—— 主区更大、侧栏更窄 */
-.wrap.det-half .right {
-  grid-template-columns: minmax(0, 3fr) minmax(180px, 1fr);
 }
 .wrap.det-half .col-main,
 .wrap.det-full .col-main {
@@ -1908,6 +1908,28 @@ async function copyPath() {
 }
 .frow:last-child {
   border-bottom: 0;
+}
+/* 可下载的文件行：整行可点，悬停高亮 + 右侧出现下载箭头 */
+.frow.link {
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.frow.link:hover {
+  background: rgba(128, 128, 128, 0.14);
+}
+.frow .fdl {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.35;
+}
+.frow.link:hover .fdl {
+  opacity: 1;
 }
 .fname {
   flex: 1 1 auto;

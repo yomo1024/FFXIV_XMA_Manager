@@ -66,6 +66,8 @@ export const api = {
     req('/api/mod/desc', { method: 'POST', body: JSON.stringify({ folder, desc }) }),
   setSiteMeta: (body) => req('/api/mod/site-meta', { method: 'POST', body: JSON.stringify(body) }),
   files: (folder) => req('/api/mod/files?folder=' + encodeURIComponent(folder)),
+  modFileUrl: (folder, name) => '/api/mod/download?folder=' + encodeURIComponent(folder)
+    + '&name=' + encodeURIComponent(name),
   history: (folder) => req('/api/mod/history?folder=' + encodeURIComponent(folder)),
 
   // ---- 检查更新 / 更新 Mod ----
