@@ -1028,29 +1028,39 @@ async function copyPath() {
         </n-button>
       </div>
 
-      <!-- 操作：放最上面（版本更新 + 常用动作） -->
+      <!-- 操作：放最上面。按钮两列等宽（block）→ 天然对齐，不会长短不齐 -->
       <n-card size="small" title="操作" class="act-card">
-        <div class="oprow">
-          <span class="lbl">更新</span>
-          <n-button size="small" type="primary" ghost :disabled="!cur || !cur.addr" @click="updateOne(cur)">
-            {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
-          </n-button>
-          <n-button size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
-          <span v-if="cur && !cur.addr" class="dim">（没有站点地址，只能手动替换）</span>
+        <div class="opsec">
+          <span class="seclbl">版本更新</span>
+          <div class="opgrid">
+            <n-button block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
+                      @click="updateOne(cur)">
+              {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
+            </n-button>
+            <n-button block size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
+          </div>
+          <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
         </div>
-        <n-space size="small" class="pane-actions" style="margin-top: 8px">
-          <n-button size="small" :disabled="!cur" @click="api.open('folder', cur.folder)">
-            打开文件夹
-          </n-button>
-          <n-button size="small" :disabled="!cur" @click="copyPath">复制路径</n-button>
-          <n-button size="small" type="primary" :disabled="!cur" :loading="installing"
-                    @click="installToGame(false)">安装到游戏</n-button>
-          <n-button size="small" :disabled="!cur" :loading="fixingCover" @click="fixCoverToGame">
-            补封面到游戏
-          </n-button>
-          <n-button v-if="cur?.has_img" size="small" tag="a" :href="api.raw(cur.folder)"
-                    target="_blank">查看原图</n-button>
-        </n-space>
+
+        <div class="opsec">
+          <span class="seclbl">游戏内</span>
+          <div class="opgrid">
+            <n-button block size="small" type="primary" :disabled="!cur" :loading="installing"
+                      @click="installToGame(false)">安装到游戏</n-button>
+            <n-button block size="small" :disabled="!cur" :loading="fixingCover"
+                      @click="fixCoverToGame">补封面到游戏</n-button>
+          </div>
+        </div>
+
+        <div class="opsec">
+          <span class="seclbl">文件</span>
+          <div class="opgrid">
+            <n-button block size="small" :disabled="!cur" @click="api.open('folder', cur.folder)">打开文件夹</n-button>
+            <n-button block size="small" :disabled="!cur" @click="copyPath">复制路径</n-button>
+            <n-button v-if="cur?.has_img" block size="small" tag="a" :href="api.raw(cur.folder)"
+                      target="_blank">查看原图</n-button>
+          </div>
+        </div>
       </n-card>
 
       <n-card size="small" :title="cur ? cur.name : '预览'" class="pv-card">
@@ -1696,17 +1706,39 @@ async function copyPath() {
   flex: 1 1 auto;
   min-height: 8px;
 }
-/* 操作卡片：按钮换行排布，窄面板也不挤 */
+/* 操作卡片：分区 + 两列等宽网格，按钮永远对齐 */
 .act-card {
   flex: 0 0 auto;
   margin-top: 2px;
 }
 .act-card :deep(.n-card__content) {
-  padding: 10px 12px 12px;
+  padding: 8px 12px 12px;
 }
-.act-card :deep(.n-space) {
-  flex-wrap: wrap;
-  row-gap: 6px;
+.opsec + .opsec {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(128, 128, 128, 0.2);
+}
+.opsec .seclbl {
+  display: block;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0.03em;
+  opacity: 0.5;
+  margin: 0 0 6px 1px;
+}
+.opgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.opgrid :deep(.n-button) {
+  justify-content: center;
+}
+.opnote {
+  margin-top: 5px;
+  font-size: 12px;
+  opacity: 0.55;
 }
 /* 动作按钮：固定高度，永远完整可见 */
 .secttl {
