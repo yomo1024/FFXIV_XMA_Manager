@@ -78,6 +78,24 @@ dotnet build -c Release -p:DalamudLibPath=<你的 Dalamud dev 目录>/
 
 ---
 
+## 游戏插件：用 Dalamud 自定义插件源安装（推荐，可自动更新）
+
+仓库里已经放好 **`pluginmaster.json`**，不用自己编译：
+
+1. 游戏内 `/xlsettings` → **Experimental** → **Custom Plugin Repositories**
+2. 把下面任意一个地址粘进去，点 `+` 添加（**国内一般选第二个更稳**）：
+   ```
+   https://raw.githubusercontent.com/yomo1024/FFXIV_XMA_Manager/main/pluginmaster.json
+   https://cdn.jsdelivr.net/gh/yomo1024/FFXIV_XMA_Manager@main/pluginmaster-cdn.json
+   ```
+3. 保存 → `/xlplugins` → 找到 **Mod Bridge** → 安装 → 启用
+4. 以后插件更新会自动出现在更新列表里（管理员点「安装到游戏」时会检查版本，插件太旧会明确拦住）
+
+> 插件包在 `plugin/release/ModBridge-<版本>.zip`；改了插件代码后跑一次
+> `python plugin/pack-release.py <编译输出目录> .` 就会重新打 zip 并刷新 pluginmaster.json。
+
+---
+
 ## 目录结构
 
 ```
@@ -90,6 +108,8 @@ manager/                 ModManager 管理器
 plugin/                  ModBridge 游戏内插件
   ModBridge/             插件源码（Plugin / PenumbraBridge / Http / CoverWriter / HelioNaming…）
   tests/                 自测（不需要游戏，覆盖 HTTP 层 / 封面 / 命名等）
+  release/               打包好的插件 zip（给 Dalamud 自定义源用）
+  pack-release.py        重新打 zip + 生成 pluginmaster.json
   技术方案.md            设计文档（含 Penumbra 与 Heliosphere 预览图机制的逆向结论）
   参考资料/              Penumbra 反编译参考
 browser-extension/       浏览器拓展（MV3）

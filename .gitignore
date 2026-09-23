@@ -21,8 +21,11 @@ venv/
 
 # ---- 可执行文件 / 打包产物 ----
 *.exe
-*.zip
 *.7z
+*.zip
+# 例外：插件发布包必须提交（Dalamud 自定义插件源要从仓库里下这个 zip）
+!plugin/release/
+!plugin/release/*.zip
 
 # ---- 前端 ----
 node_modules/
