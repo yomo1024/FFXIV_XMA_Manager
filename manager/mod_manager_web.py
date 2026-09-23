@@ -275,7 +275,9 @@ JOB_TITLES = {"scan": "扫描目录", "export": "生成 Excel", "run": "扫描�
               "backup": "打包备份", "restore": "导入备份", "import": "导入下载",
               "renumber": "重排序号", "download": "从页面下载", "watch": "监视下载",
               "fetch": "解析并下载入库",
-              "update_check": "检查更新", "mod_update": "更新 Mod（覆盖下载）"}
+              "update_check": "检查更新", "mod_update": "更新 Mod（覆盖下载）",
+              "cloud_archive": "归档到云盘", "cloud_restore": "从云盘取回",
+              "cloud_verify": "校验云端文件"}
 
 
 # --------------------------------------------------------------------- 各任务
@@ -1118,13 +1120,27 @@ def _site_download(cfg, addr, inbox, job=None):
 
 
 def _local_ref_time(folder) -> str:
-    """本地这份 Mod 的文件时间（老数据没有站点基线时，拿它当参照比一比）"""
+    """本地这份 Mod 的文件时间（老数据没有站点基线时，拿它当参照比一比）。
+
+    注意：载荷归档到云端后本地就没有载荷文件了 → 必须用归档时记下的 payload_mtime 顶替，
+    否则这条参照会变空、「检查更新」就失灵了（归档流程负责写这个字段）。
+    """
     try:
         ts = [f.stat().st_mtime for f in Path(folder).iterdir()
               if f.is_file() and f.suffix.lower() not in mm.PARTIAL_EXT]
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(max(ts))) if ts else ""
+        if ts:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(max(ts)))
     except Exception:
-        return ""
+        pass
+    try:
+        st = mm.Store()
+        row = st.cx.execute("SELECT payload_mtime FROM mods WHERE folder=?", (str(folder),)).fetchone()
+        st.cx.close()
+        if row and row["payload_mtime"]:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(row["payload_mtime"])))
+    except Exception:
+        mm.log(traceback.format_exc())
+    return ""
 
 
 def _job_update_check(job: Job):
@@ -1182,6 +1198,370 @@ def _job_update_check(job: Job):
            % (len(todo), len(has), cur, len(unknown)))
     return {"checked": len(todo), "has_update": has, "up_to_date": cur,
             "unknown": unknown, "total": len(todo)}
+
+
+# ------------------------------------------------------------------ 云存储（夸克归档）
+# 设计要点（2026-09 与主人确认）：
+#   · 云端 = 载荷的**唯一长期副本**，本地只留元数据 + 预览图/画廊图 + 地址.txt
+#   · 归档硬闸：**上传成功 + 逐文件校验通过**，才允许删本地载荷（删的是进回收站，可还原）
+#   · 校验口径：本地算 md5/sha1 → 上传（秒传命中即证明云端内容一致）；
+#     非秒传时比对云端回读的文件大小。**不重复下载整包**（主人认可的取舍）；
+#     要全量下载复核时用「校验」动作。
+PAYLOAD_EXT = (".pmp", ".ttmp2", ".pcp", ".zip", ".7z", ".rar")
+
+
+def _qd():
+    import quark_drive as qd
+    return qd
+
+
+def cloud_drive(cfg=None):
+    """拿到夸克适配器（Cookie/根目录从本机配置读；没启用就报中文原因）"""
+    cfg = cfg or cfg_now()
+    qd = _qd()
+    cookie = str(cfg.get("cloud_cookie") or "")
+    if not cookie:
+        raise RuntimeError("还没填夸克 Cookie（设置 → 云存储）")
+    if not str(cfg.get("cloud_backend") or ""):
+        raise RuntimeError("云存储没启用（设置 → 云存储 → 启用归档）")
+    return qd.QuarkDrive(cookie, root_path=str(cfg.get("cloud_root") or "/FFXIV/MOD"))
+
+
+def local_payloads(folder) -> list:
+    """递归收集载荷（实测一条 mod 最多 27 个包、多层子目录 → 必须递归）"""
+    out = []
+    for dp, dn, fn in os.walk(str(folder)):
+        for n in fn:
+            if os.path.splitext(n)[1].lower() not in PAYLOAD_EXT:
+                continue
+            p = Path(dp) / n
+            try:
+                stt = p.stat()
+            except OSError:
+                continue
+            out.append({"abs": str(p), "rel": os.path.relpath(str(p), str(folder)),
+                        "size": stt.st_size, "mtime": stt.st_mtime})
+    out.sort(key=lambda x: x["rel"].lower())
+    return out
+
+
+def mod_cloud_path(cfg, folder) -> str:
+    """本地 mod 文件夹 → 云端目录（镜像 Mod 根目录的结构，跟你手工传的那批一致）"""
+    base = "/" + str(cfg.get("cloud_root") or "/FFXIV/MOD").strip("/")
+    root = str(cfg.get("root") or "")
+    try:
+        rel = os.path.relpath(str(folder), root)
+    except Exception:
+        rel = ""
+    if not rel or rel.startswith(".."):
+        rel = os.path.basename(str(folder).rstrip("\\/"))
+    return base + "/" + rel.replace("\\", "/")
+
+
+def _cloud_index(drv, qd, fid, prefix="", depth=0) -> dict:
+    """递归列云端目录：{归一化相对路径: 条目}（最多 4 层，够用且防跑飞）"""
+    idx = {}
+    if depth > 4:
+        return idx
+    for it in drv.list_dir(fid):
+        nm = qd.norm(it.get("file_name"))
+        raw = __import__("html").unescape(str(it.get("file_name") or ""))
+        if it.get("dir"):
+            idx.update(_cloud_index(drv, qd, it.get("fid"), prefix + raw + "/", depth + 1))
+        else:
+            idx[qd.norm(prefix + raw)] = it
+    return idx
+
+
+def _cloud_upload_one(drv, qd, pay, fid_dir) -> dict:
+    """上传一个载荷文件并立刻校验（秒传命中 = 内容一致；否则比对云端大小）"""
+    try:
+        md5, sha1 = qd.file_hashes(pay["abs"])
+    except Exception as e:
+        return {"ok": False, "why": "算哈希失败：%s" % str(e)[:80]}
+    try:
+        r = drv.upload_file(pay["abs"], fid_dir, name=os.path.basename(pay["rel"]))
+    except Exception as e:
+        return {"ok": False, "why": str(e)[:160], "md5": md5, "sha1": sha1}
+    instant = bool(r.get("finish"))
+    csize = r.get("cloud_size")
+    ok = instant or (bool(r.get("arrived")) and csize is not None and int(csize) == int(pay["size"]))
+    return {"ok": ok, "fid": str(r.get("fid") or ""), "md5": md5, "sha1": sha1, "instant": instant,
+            "cloud_size": csize,
+            "why": "" if ok else "云端大小对不上（本地 %s / 云端 %s）" % (pay["size"], csize)}
+
+
+def _job_cloud_archive(job: Job):
+    """归档：整条 mod 的载荷树上传到夸克 → 逐文件校验 → 通过后才删本地载荷"""
+    cfg = cfg_now()
+    drv = cloud_drive(cfg)
+    qd = _qd()
+    folders = [str(f) for f in (job.params.get("folders") or [])]
+    delete_local = bool(job.params.get("delete_local", True))
+    st = mm.Store()
+    rows = {r["folder"]: r for r in st.all()}
+    plan = [(f, local_payloads(f)) for f in folders]
+    total = max(1, sum(len(p) for _, p in plan))
+    done, results = 0, []
+    for folder, pays in plan:
+        row = rows.get(folder) or {}
+        name = row.get("name") or Path(folder).name
+        if not pays:
+            st.set_cloud(folder, state="archived" if row.get("cloud_path") else "local")
+            results.append({"folder": folder, "name": name, "ok": True, "files": 0, "size": 0,
+                            "note": "本地已经没有载荷了"})
+            continue
+        cpath = mod_cloud_path(cfg, folder)
+        recs, failed = [], []
+        for pay in pays:
+            if job.cancelled():
+                break
+            job.set(done, total, "%s：%s" % (str(name)[:22], str(pay["rel"])[:46]))
+            sub_dir = os.path.dirname(pay["rel"].replace("\\", "/"))
+            fid_dir = drv.ensure_dir(cpath + ("/" + sub_dir if sub_dir else ""))
+            out = _cloud_upload_one(drv, qd, pay, fid_dir)
+            done += 1
+            if out["ok"]:
+                recs.append({"rel_path": pay["rel"], "size": pay["size"], "md5": out["md5"],
+                             "sha1": out["sha1"], "cloud_fid": out["fid"]})
+            else:
+                failed.append({"rel": pay["rel"], "why": out["why"]})
+        if failed:
+            results.append({"folder": folder, "name": name, "ok": False, "files": len(recs),
+                            "failed": failed[:5],
+                            "note": "%d 个文件没通过校验，本地不动" % len(failed)})
+            continue
+        st.set_payload_files(folder, recs, state="archived")
+        st.set_cloud(folder, backend="quark", path=cpath, state="archived",
+                     size=sum(p["size"] for p in pays), synced=now_str(),
+                     payload_mtime=max(p["mtime"] for p in pays))
+        deleted = 0
+        if delete_local:
+            for pay in pays:                       # 进回收站，随时能还原
+                try:
+                    if mm.send_to_recycle_bin(pay["abs"]):
+                        deleted += 1
+                except Exception:
+                    mm.log(traceback.format_exc())
+            for dp, dn, fn in os.walk(folder, topdown=False):
+                if os.path.abspath(dp) != os.path.abspath(folder) and not os.listdir(dp):
+                    try:
+                        os.rmdir(dp)
+                    except OSError:
+                        pass
+            mod_index(force=True)
+        results.append({"folder": folder, "name": name, "ok": True, "files": len(recs),
+                        "size": sum(p["size"] for p in pays), "deleted": deleted,
+                        "cloud": cpath, "seconds": round(time.time() - job.t0, 1)})
+    st.cx.close()
+    okn = sum(1 for r in results if r.get("ok"))
+    mm.log("归档：%d 条（成功 %d）、共 %.1f MB、删本地 %d 个文件"
+           % (len(results), okn, sum(r.get("size") or 0 for r in results) / 1048576.0,
+              sum(r.get("deleted") or 0 for r in results)))
+    return {"done": len(results), "ok": okn, "items": results,
+            "bytes": sum(r.get("size") or 0 for r in results),
+            "deleted": sum(r.get("deleted") or 0 for r in results)}
+
+
+def _cloud_download(drv, cfg, fid) -> bytes:
+    """下载云端文件（**必须带 Cookie**，否则 403 —— 实测）"""
+    import urllib.request
+    qd = _qd()
+    url = drv.download_url(fid)
+    if not url:
+        raise RuntimeError("取不到下载直链")
+    req = urllib.request.Request(url, headers={
+        "user-agent": qd.UA, "cookie": drv.cookie,
+        "referer": "https://pan.quark.cn/", "origin": "https://pan.quark.cn"})
+    with urllib.request.urlopen(req, timeout=1800) as r:
+        return r.read()
+
+
+def _cloud_restore_files(cfg, folder, rows, dest_root=None, on_step=None) -> dict:
+    """把某条 mod 的载荷从云端取回到 dest_root（默认就是 Mod 文件夹本身）。
+
+    逐文件校验：大小必须一致，记过 sha1 的再比 sha1（取回链路的安全阀）。
+    返回 {ok, files, failed[], bytes}
+    """
+    import hashlib
+    drv = cloud_drive(cfg)
+    qd = _qd()
+    st = mm.Store()
+    dir_row = st.cx.execute("SELECT cloud_path FROM mods WHERE folder=?", (str(folder),)).fetchone()
+    st.cx.close()
+    cpath = (dir_row["cloud_path"] if dir_row else "") or mod_cloud_path(cfg, folder)
+    fid_dir = drv.resolve(cpath)
+    if not fid_dir:
+        raise RuntimeError("云端目录找不到：%s" % cpath)
+    idx = _cloud_index(drv, qd, fid_dir)
+    root = Path(dest_root) if dest_root else Path(folder)
+    done_files, failed, nbytes = 0, [], 0
+    for pf in rows:
+        rel = str(pf["rel_path"])
+        if on_step:
+            on_step(done_files, len(rows), rel)
+        dest = root / rel
+        try:
+            want = qd.norm(rel.replace("\\", "/"))
+            it = idx.get(want)
+            if it is None:                      # 云端层级可能不同（手工传的那批）→ 按文件名兜底
+                base = qd.norm(os.path.basename(rel))
+                cands = [v for k, v in idx.items() if k.endswith(base)]
+                it = cands[0] if len(cands) == 1 else None
+            if it is None:
+                raise RuntimeError("云端找不到这个文件")
+            data = _cloud_download(drv, cfg, it.get("fid"))
+            if int(pf.get("size") or -1) >= 0 and len(data) != int(pf["size"]):
+                raise RuntimeError("大小对不上（云端 %d / 记录 %s）" % (len(data), pf.get("size")))
+            if pf.get("sha1") and hashlib.sha1(data).hexdigest() != str(pf["sha1"]):
+                raise RuntimeError("sha1 对不上（云端内容与记录不一致）")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            nbytes += len(data)
+            done_files += 1
+        except Exception as e:
+            mm.log("取回失败 %s / %s：%s" % (Path(str(folder)).name, rel, e))
+            failed.append({"rel": rel, "why": str(e)[:140]})
+    return {"ok": not failed, "files": done_files, "failed": failed, "bytes": nbytes}
+
+
+def _ensure_payload_for_install(cfg, folder) -> str:
+    """装进游戏前确保本地有载荷：已归档的**自动从云端取回**到暂存目录（不动 Mod 库）。
+
+    返回可以交给插件的包路径（本地原有 → 直接用；云端取回 → 返回暂存目录里那个）。
+    """
+    pkg = _bridge_find_package(folder)
+    if pkg:
+        return str(pkg)
+    st = mm.Store()
+    rows = st.payload_files_of(folder, ["archived", "missing"])
+    st.cx.close()
+    if not rows:
+        raise SystemExit("这条 Mod 本地没有载荷，也没有云端归档记录——没法装（可以先「从站点更新」重新下一份）")
+    dest = Path(mm.resolve_dirs(cfg)[1]) / "_云端取回" / Path(str(folder)).name
+    if dest.is_dir():                                   # 先清掉上一次取回的残留
+        import shutil as _sh
+        _sh.rmtree(dest, ignore_errors=True)
+    mm.log("安装前自动取回：%s（%d 个文件 → %s）" % (Path(str(folder)).name, len(rows), dest))
+    r = _cloud_restore_files(cfg, folder, rows, dest_root=dest)
+    if not r["ok"]:
+        raise SystemExit("从云端取回失败：%s" % (r["failed"][0].get("why") if r["failed"] else "未知原因"))
+    pkg2 = _bridge_find_package(dest)
+    if not pkg2:
+        raise SystemExit("取回成功但没在暂存目录里找到可安装的包：%s" % dest)
+    return str(pkg2)
+
+
+def _job_cloud_restore(job: Job):
+    """取回：把云端载荷下载回本地（逐文件校验大小 + sha1）"""
+    cfg = cfg_now()
+    drv = cloud_drive(cfg)
+    qd = _qd()
+    import hashlib
+    folders = [str(f) for f in (job.params.get("folders") or [])]
+    st = mm.Store()
+    rows = {r["folder"]: r for r in st.all()}
+    todo = []
+    for f in folders:
+        pf = st.payload_files_of(f, ["archived", "missing"])
+        for x in pf:
+            todo.append((f, x))
+    total = max(1, len(todo))
+    results, done = [], 0
+    by_folder = {}
+    for folder, pf in todo:
+        by_folder.setdefault(folder, []).append(pf)
+    for folder, pfs in by_folder.items():
+        if job.cancelled():
+            break
+        row = rows.get(folder) or {}
+        name = row.get("name") or Path(folder).name
+
+        def step(i, n, rel, _n=name, _d=done):
+            job.set(_d + i, total, "%s：%s" % (str(_n)[:22], str(rel)[:46]))
+
+        try:
+            r = _cloud_restore_files(cfg, folder, pfs, on_step=step)
+        except Exception as e:
+            r = {"ok": False, "files": 0, "failed": [{"rel": "-", "why": str(e)[:140]}], "bytes": 0}
+        good = [x for x in pfs if x["rel_path"] not in {f["rel"] for f in r["failed"]}]
+        if good:
+            st.set_payload_files(folder, [{"rel_path": x["rel_path"], "size": x["size"],
+                                           "md5": x.get("md5") or "", "sha1": x.get("sha1") or "",
+                                           "cloud_fid": x.get("cloud_fid") or ""} for x in good], state="local")
+        for bad in r["failed"]:
+            rel = bad["rel"]
+            src = next((x for x in pfs if x["rel_path"] == rel), None)
+            if src:
+                st.set_payload_files(folder, [{"rel_path": rel, "size": src.get("size") or 0,
+                                               "md5": src.get("md5") or "", "sha1": src.get("sha1") or "",
+                                               "cloud_fid": src.get("cloud_fid") or ""}], state="missing")
+            results.append({"folder": folder, "name": name, "rel": rel, "ok": False, "why": bad["why"]})
+        for x in good:
+            results.append({"folder": folder, "name": name, "rel": x["rel_path"], "ok": True,
+                            "size": x["size"]})
+        left = st.payload_files_of(folder, ["archived", "missing"])
+        st.set_cloud(folder, state="archived" if left else "local", synced=now_str())
+        done += len(pfs)
+    st.cx.close()
+    mod_index(force=True)
+    okn = sum(1 for r in results if r.get("ok"))
+    mm.log("取回：%d 个文件（成功 %d）" % (len(results), okn))
+    return {"done": len(results), "ok": okn, "items": results,
+            "bytes": sum(r.get("size") or 0 for r in results if r.get("ok"))}
+
+
+def _job_cloud_verify(job: Job):
+    """校验：把云端那份**下载回来**逐文件比大小 + sha1（只在临时目录里，不动 Mod 库）。
+
+    归档流程本身不做全量下载复核（上传时用「秒传命中 / 云端大小一致」判定，主人认可的取舍），
+    想彻底体检时点这个。
+    """
+    import shutil as _sh
+    cfg = cfg_now()
+    cloud_drive(cfg)                      # 先确认凭据/启用状态（失败直接报中文原因）
+    folders = [str(f) for f in (job.params.get("folders") or [])]
+    st = mm.Store()
+    rows = {r["folder"]: r for r in st.all()}
+    pairs = [(f, st.payload_files_of(f, ["archived", "missing"])) for f in folders]
+    total = max(1, sum(len(x) for _, x in pairs))
+    tmp_root = Path(os.environ.get("TEMP") or ".") / "_mm_cloud_verify"
+    _sh.rmtree(tmp_root, ignore_errors=True)
+    done, results = 0, []
+    for folder, pfs in pairs:
+        if job.cancelled():
+            break
+        name = (rows.get(folder) or {}).get("name") or Path(folder).name
+        if not pfs:
+            results.append({"folder": folder, "name": name, "ok": True, "files": 0,
+                            "note": "没有归档记录"})
+            continue
+
+        def step(i, n, rel, _n=name, _d=done):
+            job.set(_d + i, total, "%s：%s" % (str(_n)[:22], str(rel)[:46]))
+
+        try:
+            r = _cloud_restore_files(cfg, folder, pfs, dest_root=tmp_root / Path(folder).name,
+                                     on_step=step)
+        except Exception as e:
+            r = {"ok": False, "files": 0, "failed": [{"rel": "-", "why": str(e)[:140]}], "bytes": 0}
+        done += len(pfs)
+        if r["ok"]:
+            st.set_cloud(folder, synced=now_str())
+        else:
+            for bad in r["failed"]:
+                st.set_payload_files(folder, [{"rel_path": bad["rel"], "size": 0, "md5": "",
+                                               "sha1": "", "cloud_fid": ""}], state="missing")
+        results.append({"folder": folder, "name": name, "ok": r["ok"], "files": r["files"],
+                        "failed": r["failed"][:5], "bytes": r["bytes"],
+                        "note": "" if r["ok"] else "%d 个文件校验不过" % len(r["failed"])})
+    st.cx.close()
+    _sh.rmtree(tmp_root, ignore_errors=True)
+    mod_index(force=True)
+    okn = sum(1 for x in results if x.get("ok"))
+    mm.log("云端校验：%d 条（通过 %d）" % (len(results), okn))
+    return {"done": len(results), "ok": okn,
+            "bytes": sum(x.get("bytes") or 0 for x in results), "items": results}
 
 
 def _job_mod_update(job: Job):
@@ -1324,7 +1704,9 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "download": _job_download, "watch": _job_watch,
              "selfdownload": _job_selfdownload, "importfile": _job_import_file,
              "fetch": _job_fetch,
-             "update_check": _job_update_check, "mod_update": _job_mod_update}
+             "update_check": _job_update_check, "mod_update": _job_mod_update,
+             "cloud_archive": _job_cloud_archive, "cloud_restore": _job_cloud_restore,
+             "cloud_verify": _job_cloud_verify}
 
 
 def start_job(kind: str, params: dict | None = None):
@@ -1395,6 +1777,14 @@ def api_mods():
         except Exception:
             mm.log(traceback.format_exc())
     root = cfg.get("root") or ""
+    payload_counts = {}                      # folder -> 已归档的载荷文件数
+    try:
+        _st2 = mm.Store()
+        for r in _st2.cx.execute("SELECT folder, COUNT(*) AS n FROM payload_files GROUP BY folder"):
+            payload_counts[r["folder"]] = r["n"]
+        _st2.cx.close()
+    except Exception:
+        mm.log(traceback.format_exc())
     out = []
     for m in mods:
         out.append({
@@ -1409,6 +1799,11 @@ def api_mods():
             "affects": m.get("affects") or "",
             "payload_size": _payload_stat(m["folder"])[0],
             "payload_files": _payload_stat(m["folder"])[1],
+            "cloud_state": m.get("cloud_state") or "",
+            "cloud_path": m.get("cloud_path") or "",
+            "cloud_size": m.get("cloud_size") or 0,
+            "cloud_synced": m.get("cloud_synced") or "",
+            "archived_files": payload_counts.get(m["folder"], 0),
             "races": m.get("races") or "",
             "genders": m.get("genders") or "",
             "released": m.get("released") or "",
@@ -1461,13 +1856,21 @@ def api_mod_set_affects(b):
 
 
 def _payload_stat(folder) -> tuple:
-    """Mod 载荷大小 / 文件数（只算 pmp/ttmp2/zip 这类，图片和 地址.txt 不算）——XMA 侧栏也显示这个"""
+    """Mod 载荷大小 / 文件数（pmp/ttmp2/zip 这类；图片和 地址.txt 不算）。
+
+    **必须递归**：一条 mod 可能把变体包放在多层子目录里（实测最多 27 个包、
+    `ver. 1/aerin/xxx.pmp` 这种），只扫顶层会得出 0，界面上「归档」按钮就被误禁用了。
+    """
     try:
         size, n = 0, 0
-        for e in Path(folder).iterdir():
-            if e.is_file() and e.suffix.lower() in (".pmp", ".ttmp2", ".pcp", ".zip", ".7z", ".rar"):
-                size += e.stat().st_size
-                n += 1
+        for dp, dn, fn in os.walk(str(folder)):
+            for name in fn:
+                if os.path.splitext(name)[1].lower() in (".pmp", ".ttmp2", ".pcp", ".zip", ".7z", ".rar"):
+                    try:
+                        size += os.path.getsize(os.path.join(dp, name))
+                        n += 1
+                    except OSError:
+                        pass
         return size, n
     except Exception:
         return 0, 0
@@ -2023,6 +2426,77 @@ def api_check():
             "clean": not problems and not dups}
 
 
+def _cloud_folders(b) -> list:
+    fs = b.get("folders")
+    if isinstance(fs, list) and fs:
+        return [str(x) for x in fs]
+    f = b.get("folder")
+    return [str(f)] if f else []
+
+
+def api_cloud_state():
+    """云存储汇总：归档统计 + 那条 mod 的载荷清单（界面用）"""
+    st = mm.Store()
+    counts = st.cloud_counts()
+    folder = ""
+    pf = []
+    st.cx.close()
+    return {"ok": True, "counts": counts}
+
+
+def api_cloud_archive(body):
+    """开始归档任务（folders 为空 = 全部有载荷的 mod）"""
+    cfg = cfg_now()
+    if not str(cfg.get("cloud_backend") or ""):
+        return {"error": "云存储没启用（设置 → 云存储 → 启用归档）"}
+    if not str(cfg.get("cloud_cookie") or ""):
+        return {"error": "还没填夸克 Cookie（设置 → 云存储）"}
+    folders = _cloud_folders(body)
+    if not folders:
+        folders = [r["folder"] for r in mm.Store().all() if local_payloads(r["folder"])]
+    if not folders:
+        return {"error": "没有需要归档的（本地都已经没有载荷了）"}
+    return {"folders": folders, "delete_local": bool(body.get("delete_local", True))}
+
+
+def api_cloud_restore(body):
+    """开始取回任务（folders 为空 = 所有已归档的 mod）"""
+    cfg = cfg_now()
+    if not str(cfg.get("cloud_cookie") or ""):
+        return {"error": "还没填夸克 Cookie（设置 → 云存储）"}
+    folders = _cloud_folders(body)
+    if not folders:
+        st = mm.Store()
+        folders = [r["folder"] for r in st.all()
+                   if (r.get("cloud_state") or "") == "archived"]
+        st.cx.close()
+    if not folders:
+        return {"error": "没有已归档的 mod 需要取回"}
+    return {"folders": folders}
+
+
+def api_cloud_check():
+    """夸克连通性自检（设置页「测试连接」用）：账号 / 根目录 / 列目录 / 取直链。
+
+    只读，不改任何东西；Cookie 从本机配置读，绝不回显给前端。
+    """
+    cfg = cfg_now()
+    cookie = str(cfg.get("cloud_cookie") or "")
+    root = str(cfg.get("cloud_root") or "/MOD").strip() or "/MOD"
+    try:
+        import quark_drive as qd
+    except Exception as e:
+        return {"ok": False, "error": "夸克适配器加载失败：%s" % str(e)[:120]}
+    if not cookie:
+        return {"ok": False, "error": "还没填夸克 Cookie（下面那个输入框）"}
+    try:
+        st = qd.QuarkDrive(cookie, root_path=root).selftest()
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    st["backend"] = str(cfg.get("cloud_backend") or "")
+    return st
+
+
 def api_settings():
     cfg = cfg_now()
     dl, ib = mm.resolve_dirs(cfg) if cfg.get("root") else ("", "")
@@ -2197,7 +2671,8 @@ def _bridge_payload(folder):
     m = one_mod(cfg_now(), folder)
     if not m:
         raise SystemExit("找不到这条 Mod（先点一下「重新扫描」）")
-    pkg = _bridge_find_package(m["folder"])
+    cfg0 = cfg_now()
+    pkg = _ensure_payload_for_install(cfg0, m["folder"])   # 已归档的会自动从云端取回到暂存
     cover = _bridge_find_cover(Path(m["folder"]))
     cover_webp = cover_to_webp(cover) if cover else None
     cover_draw = cover_to_decodable(cover) if cover else None
@@ -2671,6 +3146,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_bridge())
                 if u.path == "/api/tags":
                     return self._json(api_tags())
+                if u.path == "/api/cloud/check":
+                    return self._json(api_cloud_check())
+                if u.path == "/api/cloud/state":
+                    return self._json(api_cloud_state())
                 if u.path == "/api/affects":
                     return self._json(api_affects())
                 if u.path == "/api/mod/files":
@@ -2777,6 +3256,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api_mod_set_desc(body))
             if u.path == "/api/mod/site-meta":
                 return self._json(api_mod_set_site_meta(body))
+            if u.path == "/api/cloud/archive":
+                a = api_cloud_archive(body)
+                if a.get("error"):
+                    return self._json(a, 400)
+                job, err = start_job("cloud_archive", a)
+                if job is None:
+                    return self._json({"error": err}, 409)
+                return self._json({"ok": True, "kind": "cloud_archive", "folders": len(a["folders"]),
+                                   "title": JOB_TITLES.get("cloud_archive")})
+            if u.path == "/api/cloud/verify":
+                a = api_cloud_restore(body)          # 校验的对象跟取回同一批（已归档的）
+                if a.get("error"):
+                    return self._json(a, 400)
+                job, err = start_job("cloud_verify", a)
+                if job is None:
+                    return self._json({"error": err}, 409)
+                return self._json({"ok": True, "kind": "cloud_verify", "folders": len(a["folders"]),
+                                   "title": JOB_TITLES.get("cloud_verify")})
+            if u.path == "/api/cloud/restore":
+                a = api_cloud_restore(body)
+                if a.get("error"):
+                    return self._json(a, 400)
+                job, err = start_job("cloud_restore", a)
+                if job is None:
+                    return self._json({"error": err}, 409)
+                return self._json({"ok": True, "kind": "cloud_restore", "folders": len(a["folders"]),
+                                   "title": JOB_TITLES.get("cloud_restore")})
             if u.path == "/api/mod/tags/add":
                 return self._json(api_mod_add_tags(body))
             if u.path == "/api/mod/tags/remove":
@@ -3184,7 +3690,9 @@ class Handler(BaseHTTPRequestHandler):
         allow = ("root", "excel", "download_dir", "inbox_dir", "install_dir", "backup_dir",
                  "browser_path", "browser_dir", "browser_port", "thumb_width",
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
-                 "auto_open_browser")
+                 "auto_open_browser",
+                 # ---- 云存储（夸克归档）----
+                 "cloud_backend", "cloud_cookie", "cloud_root")
         changed = {}
         for k in allow:
             if k in b:

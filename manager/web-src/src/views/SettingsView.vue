@@ -1,5 +1,5 @@
 <script setup>
-import { ref, inject, onMounted } from 'vue'
+import { ref, computed, inject, onMounted } from 'vue'
 import {
   NButton, NCard, NSpace, NForm, NFormItem, NInput, NInputNumber, NSwitch, NAlert,
   NDivider, useMessage,
@@ -135,6 +135,59 @@ async function load() {
 bus.refresh = load
 onMounted(() => { load(); loadVersions() })
 
+// ---------------- 云存储（夸克归档）----------------
+const cloudBusy = ref(false)
+const cloudRes = ref(null)
+const cloudOn = computed({
+  get: () => String(s.value.cloud_backend || '') === 'quark',
+  set: (v) => { s.value.cloud_backend = v ? 'quark' : '' },
+})
+const cloudText = computed(() => {
+  const r = cloudRes.value
+  if (!r) return ''
+  const ck = r.cookie || {}
+  const lines = []
+  if (!r.ok) lines.push('✗ ' + (r.error || '自检没通过'))
+  if (ck.length) {
+    lines.push('Cookie 体检：' + ck.length + ' 字符 / ' + (ck.total_keys || 0) + ' 个字段'
+      + (ck.had_prefix ? '（带了 "Cookie:" 前缀，已自动去掉）' : ''))
+    lines.push('关键字段：' + ((ck.present || []).join('、') || '一个都没有')
+      + (((ck.missing || []).length) ? '　缺：' + ck.missing.join('、') : '　齐全 ✓'))
+  } else if (!r.ok) {
+    lines.push('Cookie 体检：没读到任何内容（输入框是空的？）')
+  }
+  if (!r.ok) return lines.join('\n')
+  lines.push('✓ 连通：' + (r.user || '(未返回昵称)') + (r.member ? '（' + r.member + '）' : ''))
+  lines.push('云端根目录：' + r.root + (r.root_fid ? '（fid ' + r.root_fid.slice(0, 10) + '…）' : ''))
+  lines.push('根下：' + (r.root_dirs || 0) + ' 个目录 /' + (r.root_children || 0) + ' 个条目')
+  if ((r.sample || []).length) {
+    lines.push('样例：' + r.sample.map((x) => x.name + (x.dir ? '/' : '')).join('、'))
+  }
+  if (r.download_test) lines.push('取直链测试：' + r.download_test)
+  return lines.join('\n')
+})
+
+
+async function testCloud() {
+  cloudBusy.value = true
+  cloudRes.value = null
+  try {
+    // 先把输入框里的这三个字段存下来再自检 —— 否则读的还是上一次保存的值，
+    // 主人「填了就点测试」会得到「还没填 Cookie」这种莫名其妙的提示（踩过）。
+    const root = String(s.value.cloud_root || '/MOD').trim() || '/MOD'
+    await api.saveSettings({
+      cloud_backend: s.value.cloud_backend || '',
+      cloud_cookie: s.value.cloud_cookie || '',
+      cloud_root: root,
+    })
+    cloudRes.value = await api.cloudCheck()
+  } catch (e) {
+    cloudRes.value = { ok: false, error: e.message }
+  } finally {
+    cloudBusy.value = false
+  }
+}
+
 async function save() {
   busy.value = true
   try {
@@ -147,6 +200,8 @@ async function save() {
       bridge_url: s.value.bridge_url, bridge_token: s.value.bridge_token,
       thumb_width: s.value.thumb_width,
       embed_images: s.value.embed_images, autofilter: s.value.autofilter,
+      cloud_backend: s.value.cloud_backend || '', cloud_cookie: s.value.cloud_cookie || '',
+      cloud_root: s.value.cloud_root || '/MOD',
     }
     const r = await api.saveSettings(body)
     msg.success('已保存：' + (r.changed || []).join('、'))
@@ -283,7 +338,43 @@ async function save() {
         </n-form>
       </n-card>
 
-      <!-- ④ 内置浏览器 -->
+      <!-- ④ 云存储（夸克网盘）：载荷归档，本地只留元数据 + 图 -->
+      <n-card size="small" class="sec" title="云存储（夸克网盘）">
+        <template #header-extra>
+          <n-button size="tiny" :loading="cloudBusy" @click="testCloud">测试连接</n-button>
+        </template>
+        <div class="opts">
+          <div class="opt">
+            <span class="opt-lbl">启用归档</span>
+            <n-switch v-model:value="cloudOn" size="small" />
+            <span class="hint">
+              开启后 Mod 载荷（.pmp / .zip 等）归档到夸克，本地只留元数据 + 预览图
+            </span>
+          </div>
+          <div class="opt">
+            <span class="opt-lbl">云端根目录</span>
+            <n-input v-model:value="s.cloud_root" size="small" style="width: 200px"
+                     placeholder="/MOD" />
+            <span class="hint">夸克里的目录路径（你之前那批就传在 /MOD）</span>
+          </div>
+        </div>
+        <div class="opt" style="align-items: flex-start; margin-top: 8px">
+          <span class="opt-lbl" style="padding-top: 4px">Cookie</span>
+          <n-input v-model:value="s.cloud_cookie" type="textarea" :rows="3" size="small"
+                   style="max-width: 660px"
+                   placeholder="浏览器登录 pan.quark.cn 后，把整条 Cookie 粘进来（含 __kps / __uid / __pus / sign 等字段）" />
+        </div>
+        <div class="hint" style="margin-top: 6px">
+          夸克没有公开的官方接口，这里走的是它 PC 端接口（<b>非官方，夸克改版可能失效</b>）。
+          Cookie 只写在本机 <code>mod_manager.json</code>，不会外发；失效时点「测试连接」会提示重新粘贴。
+        </div>
+        <n-alert v-if="cloudRes" :type="cloudRes.ok ? 'success' : 'error'" :show-icon="false"
+                 style="margin-top: 8px; white-space: pre-wrap; font-size: 12px">
+          {{ cloudText }}
+        </n-alert>
+      </n-card>
+
+      <!-- ⑤ 内置浏览器 -->
       <n-card size="small" class="sec" title="内置浏览器">
         <n-form label-placement="left" label-width="108" size="small">
           <n-form-item label="浏览器程序">
@@ -305,7 +396,7 @@ async function save() {
         </n-form>
       </n-card>
 
-      <!-- ⑤ Excel 导出 -->
+      <!-- ⑥ Excel 导出 -->
       <n-card size="small" class="sec" title="Excel 导出">
         <div class="opts">
           <div class="opt">

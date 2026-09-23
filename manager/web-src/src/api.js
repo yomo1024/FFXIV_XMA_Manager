@@ -66,6 +66,11 @@ export const api = {
     req('/api/mod/desc', { method: 'POST', body: JSON.stringify({ folder, desc }) }),
   setSiteMeta: (body) => req('/api/mod/site-meta', { method: 'POST', body: JSON.stringify(body) }),
   files: (folder) => req('/api/mod/files?folder=' + encodeURIComponent(folder)),
+  cloudCheck: () => req('/api/cloud/check'),
+  cloudState: () => req('/api/cloud/state'),
+  cloudArchive: (body) => req('/api/cloud/archive', { method: 'POST', body: JSON.stringify(body || {}) }),
+  cloudRestore: (body) => req('/api/cloud/restore', { method: 'POST', body: JSON.stringify(body || {}) }),
+  cloudVerify: (body) => req('/api/cloud/verify', { method: 'POST', body: JSON.stringify(body || {}) }),
   modFileUrl: (folder, name) => '/api/mod/download?folder=' + encodeURIComponent(folder)
     + '&name=' + encodeURIComponent(name),
   history: (folder) => req('/api/mod/history?folder=' + encodeURIComponent(folder)),

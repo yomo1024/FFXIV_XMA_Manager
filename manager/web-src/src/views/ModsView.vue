@@ -326,6 +326,86 @@ async function checkUpdates() {
   }
 }
 
+// ---------------- 云盘归档 / 取回 ----------------
+const cloudBusy = ref(false)
+function cloudTargets() {
+  return checked.value.length ? [...checked.value] : (cur.value ? [cur.value.folder] : [])
+}
+function humanMB(n) {
+  const v = Number(n || 0)
+  return v >= 1048576 ? (v / 1048576).toFixed(1) + ' MB' : (v / 1024).toFixed(0) + ' KB'
+}
+/** 归档：上传到夸克 → 逐文件校验 → 通过才删本地载荷（所以要先确认一次） */
+async function archiveCloud(folders) {
+  const list = (folders && folders.length) ? folders : cloudTargets()
+  if (!list.length) return msg.warning('先勾选（或点一条）要归档的 Mod')
+  const rows = props.mods.filter((m) => list.includes(m.folder))
+  const total = rows.reduce((s2, m) => s2 + (m.payload_size || 0), 0)
+  const already = rows.filter((m) => (m.archived_files || 0) && !(m.payload_size || 0)).length
+  dialog.warning({
+    title: '归档到云盘',
+    content: `把 ${list.length} 条 Mod 的载荷（约 ${humanMB(total)}）上传到夸克；`
+      + `上传并逐个校验通过后，会删掉本地载荷（进回收站，可还原）。`
+      + `预览图、地址.txt、元信息都留在本地。`
+      + (already ? `\n其中 ${already} 条已经在云端了，会自动走秒传、不用重传。` : ''),
+    positiveText: '开始归档',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      cloudBusy.value = true
+      try {
+        await startJob('cloud_archive', { folders: list, delete_local: true })
+        msg.info('已开始归档，进度看上面的任务条')
+      } catch (e) {
+        msg.error('启动归档失败：' + e.message)
+      } finally {
+        cloudBusy.value = false
+      }
+    },
+  })
+}
+/** 校验：把云端那份下载回来逐文件比 sha1（只下载体检，不动本地 Mod 库） */
+async function verifyCloud(folders) {
+  const list = (folders && folders.length) ? folders : cloudTargets()
+  const rows = props.mods.filter((m) => list.includes(m.folder) && (m.archived_files || 0))
+  if (!rows.length) return msg.warning('选中的里面没有「已归档」的 Mod')
+  const total = rows.reduce((s2, m) => s2 + (m.cloud_size || 0), 0)
+  dialog.info({
+    title: '校验云端文件',
+    content: `会把云端这 ${rows.length} 条（约 ${humanMB(total)}）下载回来逐个比对 sha1 ——`
+      + `只做体检，不动本地的东西，但**要花时间和流量**。`,
+    positiveText: '开始校验',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      cloudBusy.value = true
+      try {
+        await startJob('cloud_verify', { folders: rows.map((m) => m.folder) })
+        msg.info('已开始校验，进度看上面的任务条')
+      } catch (e) {
+        msg.error('启动校验失败：' + e.message)
+      } finally {
+        cloudBusy.value = false
+      }
+    },
+  })
+}
+
+/** 取回：把云端载荷下载回本地（逐文件校验大小 + sha1） */
+async function restoreCloud(folders) {
+  const list = (folders && folders.length) ? folders : cloudTargets()
+  if (!list.length) return msg.warning('先勾选（或点一条）要取回的 Mod')
+  const rows = props.mods.filter((m) => list.includes(m.folder) && (m.archived_files || 0))
+  if (!rows.length) return msg.warning('选中的里面没有「已归档」的 Mod')
+  cloudBusy.value = true
+  try {
+    await startJob('cloud_restore', { folders: rows.map((m) => m.folder) })
+    msg.info(`开始从云盘取回 ${rows.length} 条…`)
+  } catch (e) {
+    msg.error('启动取回失败：' + e.message)
+  } finally {
+    cloudBusy.value = false
+  }
+}
+
 // heliosphere 的下载是页面上的按钮（接口没公开）→ 打开页面让他自己点，再上传替换
 function isHelio(m) {
   return !!(m && /heliosphere\.app/i.test(String(m.addr || '')))
@@ -824,7 +904,21 @@ const columns = computed(() => [
       })
     },
   },
-  { title: 'Mod 名称', key: 'name', minWidth: 260, ellipsis: { tooltip: true }, resizable: true },
+  {
+    title: 'Mod 名称', key: 'name', minWidth: 260, resizable: true,
+    render: (r) => {
+      const kids = []
+      if (r.cloud_state === 'archived') {
+        kids.push(h(NTag, { size: 'tiny', bordered: false, type: 'info',
+                            style: 'margin-right:5px;flex:0 0 auto' }, { default: () => '云' }))
+      } else if (r.cloud_state === 'missing') {
+        kids.push(h(NTag, { size: 'tiny', bordered: false, type: 'error',
+                            style: 'margin-right:5px;flex:0 0 auto' }, { default: () => '云端缺失' }))
+      }
+      kids.push(h('span', { class: 'cell-name', title: r.name }, r.name))
+      return h('div', { style: 'display:flex;align-items:center;min-width:0' }, kids)
+    },
+  },
   {
     title: '是否安装', key: 'installed', width: 96, align: 'center',
     render: (r) => r.installed === null
@@ -1055,6 +1149,8 @@ async function copyPath() {
       </div>
       <div class="bar row2">
         <n-button size="small" :loading="updateChecking" @click="checkUpdates">检查更新</n-button>
+        <n-button size="small" :loading="cloudBusy" @click="archiveCloud()">归档到云盘</n-button>
+        <n-button size="small" :loading="cloudBusy" @click="restoreCloud()">从云盘取回</n-button>
         <template v-if="updCount">
           <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
                     @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>
@@ -1307,7 +1403,29 @@ async function copyPath() {
             </template>
           </div>
 
-          <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
+          <div v-if="cur" class="opcloud">
+          <n-button size="tiny" :loading="cloudBusy" :disabled="!cur.payload_size"
+                    @click="archiveCloud([cur.folder])">归档到云盘</n-button>
+          <n-button size="tiny" :loading="cloudBusy" :disabled="!cur.archived_files"
+                    @click="restoreCloud([cur.folder])">从云盘取回</n-button>
+          <n-button size="tiny" quaternary :loading="cloudBusy" :disabled="!cur.archived_files"
+                    @click="verifyCloud([cur.folder])">校验</n-button>
+          <span class="cl" :title="cur.cloud_path || ''">
+            <template v-if="cur.cloud_state === 'archived'">
+              已归档 {{ cur.archived_files }} 个文件 ｜ {{ humanMB(cur.cloud_size) }}
+              <template v-if="cur.cloud_synced"> ｜ {{ cur.cloud_synced.slice(5, 16) }}</template>
+            </template>
+            <template v-else-if="cur.cloud_state === 'missing'">
+              ⚠ 云端有文件找不到，取回可能失败
+            </template>
+            <template v-else-if="cur.payload_size">
+              本地载荷 {{ humanMB(cur.payload_size) }}（未归档）
+            </template>
+            <template v-else>本地没有载荷</template>
+          </span>
+        </div>
+
+        <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
 
           <div v-if="cur" class="stats" :class="{ compact: detmode !== 'full' }">
             <div class="st"><b>{{ shots.length }}</b><span>张图</span></div>
@@ -1976,6 +2094,26 @@ async function copyPath() {
   opacity: 0.72;
   white-space: pre-wrap;
   line-height: 1.5;
+}
+
+/* ---- 云状态一行 ---- */
+.opcloud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px dashed rgba(128, 128, 128, 0.2);
+}
+.opcloud .cl {
+  font-size: 11.5px;
+  opacity: 0.62;
+}
+.cell-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- ④ 操作区：作者行 + 统计格 ---- */

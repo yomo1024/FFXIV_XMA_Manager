@@ -132,6 +132,13 @@ CREATE TABLE IF NOT EXISTS mods (
     file_size   INTEGER,
     updated_at  TEXT,
     affects     TEXT,
+    -- ---- 云存储（夸克归档，2026-09 加）----
+    cloud_backend TEXT,       -- 'quark' / ''（没启用）
+    cloud_path    TEXT,       -- 云端目录（相对 root 的镜像路径，如 皮肤/NSFW/纹身/7.xxx）
+    cloud_state   TEXT,       -- ''(未归档) / archived(本地无载荷、云端有) / uploading / missing(云端找不到)
+    cloud_size    INTEGER,    -- 载荷合计字节
+    cloud_synced  TEXT,       -- 最近一次归档/校验时间
+    payload_mtime REAL,       -- 归档前的载荷最新时间（顶替「本地文件时间」当更新基线）
     -- ---- 站点元信息 / 本地描述（2026-09 加）----
     races       TEXT,         -- 站点上的 Races（种族）
     genders     TEXT,         -- 站点上的 Genders（性别）
@@ -152,6 +159,18 @@ CREATE TABLE IF NOT EXISTS mod_tags (
     PRIMARY KEY (folder, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_mod_tags_tag ON mod_tags(tag);
+-- 载荷清单：一条 mod 可能有几十个包、多层子目录（实测最多 27 个），逐文件记账
+CREATE TABLE IF NOT EXISTS payload_files (
+    folder    TEXT NOT NULL,   -- mod 文件夹（与 mods.folder 同一个键）
+    rel_path  TEXT NOT NULL,   -- 相对 mod 文件夹的路径（含子目录）
+    size      INTEGER,
+    md5       TEXT,
+    sha1      TEXT,
+    cloud_fid TEXT,
+    state     TEXT,            -- local(本地有) / archived(已上传、本地已删) / missing
+    checked   TEXT,
+    PRIMARY KEY (folder, rel_path)
+);
 """
 
 
@@ -1943,7 +1962,9 @@ class Store:
         for col, typ in (("img_source", "TEXT"), ("subcat", "TEXT"), ("affects", "TEXT"),
                          ("site_updated", "TEXT"), ("site_latest", "TEXT"), ("site_version", "TEXT"),
                          ("site_checked", "TEXT"), ("update_avail", "INTEGER"),
-                         ("races", "TEXT"), ("genders", "TEXT"), ("released", "TEXT"), ("desc", "TEXT")):
+                         ("races", "TEXT"), ("genders", "TEXT"), ("released", "TEXT"), ("desc", "TEXT"),
+                         ("cloud_backend", "TEXT"), ("cloud_path", "TEXT"), ("cloud_state", "TEXT"),
+                         ("cloud_size", "INTEGER"), ("cloud_synced", "TEXT"), ("payload_mtime", "REAL")):
             if col not in have:
                 self.cx.execute("ALTER TABLE mods ADD COLUMN %s %s" % (col, typ))
         self.cx.commit()
@@ -2058,6 +2079,76 @@ class Store:
         self.cx.execute("UPDATE mods SET desc=? WHERE folder=?", (val, str(folder)))
         self.cx.commit()
         return val
+
+    # ------------------------------------------------- 云存储（归档）
+    def set_cloud(self, folder, backend=None, path=None, state=None, size=None,
+                  synced=None, payload_mtime=None) -> dict:
+        """写云存储相关字段（None = 这一项不动）"""
+        pairs = (("cloud_backend", backend), ("cloud_path", path), ("cloud_state", state),
+                 ("cloud_size", size), ("cloud_synced", synced), ("payload_mtime", payload_mtime))
+        sets = [(c, v) for c, v in pairs if v is not None]
+        if sets:
+            self.cx.execute("UPDATE mods SET %s WHERE folder=?"
+                            % ", ".join("%s=?" % c for c, _ in sets),
+                            [v for _, v in sets] + [str(folder)])
+            self.cx.commit()
+        return dict(sets)
+
+    def set_payload_files(self, folder, items, state="archived") -> int:
+        """整批写入载荷清单（items: [{rel_path,size,md5,sha1,cloud_fid}]）"""
+        f = str(folder)
+        now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        n = 0
+        for it in items:
+            self.cx.execute(
+                "INSERT INTO payload_files(folder,rel_path,size,md5,sha1,cloud_fid,state,checked) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(folder,rel_path) DO UPDATE SET "
+                "size=excluded.size, md5=excluded.md5, sha1=excluded.sha1, "
+                "cloud_fid=excluded.cloud_fid, state=excluded.state, checked=excluded.checked",
+                (f, str(it.get("rel_path")), int(it.get("size") or 0), str(it.get("md5") or ""),
+                 str(it.get("sha1") or ""), str(it.get("cloud_fid") or ""), str(state), now))
+            n += 1
+        self.cx.commit()
+        return n
+
+    def payload_files_of(self, folder, states=None) -> list:
+        """某条 mod 的载荷清单（可按状态过滤）"""
+        sql = "SELECT * FROM payload_files WHERE folder=?"
+        args = [str(folder)]
+        if states:
+            sql += " AND state IN (%s)" % ",".join("?" * len(states))
+            args += [str(x) for x in states]
+        return [dict(r) for r in self.cx.execute(sql + " ORDER BY rel_path", args)]
+
+    def payload_files_map(self, states=None) -> dict:
+        """全部载荷清单：folder -> [rows]（列表页做状态标记用）"""
+        sql = "SELECT * FROM payload_files"
+        args = []
+        if states:
+            sql += " WHERE state IN (%s)" % ",".join("?" * len(states))
+            args = [str(x) for x in states]
+        out = {}
+        for r in self.cx.execute(sql, args):
+            out.setdefault(r["folder"], []).append(dict(r))
+        return out
+
+    def clear_payload_files(self, folder, state=None) -> int:
+        """删掉某条 mod 的载荷清单（可按状态）"""
+        if state:
+            n = self.cx.execute("DELETE FROM payload_files WHERE folder=? AND state=?",
+                                (str(folder), str(state))).rowcount
+        else:
+            n = self.cx.execute("DELETE FROM payload_files WHERE folder=?", (str(folder),)).rowcount
+        self.cx.commit()
+        return n
+
+    def cloud_counts(self) -> dict:
+        """归档状态统计（界面顶部显示）"""
+        d = {"archived": 0, "local": 0, "missing": 0, "uploading": 0, "none": 0}
+        for r in self.cx.execute("SELECT COALESCE(cloud_state,'') AS s, COUNT(*) AS n FROM mods GROUP BY s"):
+            k = r["s"] or "none"
+            d[k if k in d else "none"] = r["n"]
+        return d
 
     def affects_all(self) -> list:
         """已有取值 + 条数（给界面做建议/筛选）"""
