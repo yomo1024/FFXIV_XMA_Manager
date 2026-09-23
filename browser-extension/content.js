@@ -198,6 +198,7 @@
         (t.subdir ? '<i> · ' + esc(t.subdir) + '</i>' : '') + '</span>' + right + '</div>' +
         '<div class="mm-qbar"><i style="width:' + pct + '%"></i></div>' +
         '<div class="mm-qinfo">' + STATE_TXT[t.state] + ' ' + pct + '%' +
+        (t.state === 'done' && t.result && t.result.updated_existing ? ' · 已覆盖更新已有版本' : '') +
         (t.state === 'done' && t.result && (t.result.rel || t.result.inbox)
           ? ' · ' + esc(t.result.rel || t.result.inbox) : '') +
         (t.state === 'error' && t.error ? ' · ' + esc(String(t.error).slice(0, 70)) : '') +

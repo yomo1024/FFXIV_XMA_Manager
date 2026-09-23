@@ -1026,6 +1026,83 @@ def site_time_iso(text) -> str:
         return ""
 
 
+def site_key(addr, modid="") -> str:
+    """把 Mod 地址归一成可比对的键：'xma:<modid>' / 'helio:<shortId>' / ''（认不出来）。
+
+    用它来判断「这次下载的是不是库里已有的那条」——识别到就覆盖更新，不再新建一条。
+    """
+    a = str(addr or "").strip()
+    mid = str(modid or "").strip()
+    if "xivmodarchive" in a:
+        m = re.search(r"/modid/(\d+)", a)
+        return "xma:" + (m.group(1) if m else mid)
+    if "heliosphere" in a:
+        m = re.search(r"/mod/([A-Za-z0-9]+)", a)
+        return "helio:" + (m.group(1) if m else mid)
+    if mid and mid.isdigit():
+        return "xma:" + mid
+    if a.isdigit():
+        return "xma:" + a
+    return ""
+
+
+def _helio_iso(text) -> str:
+    """heliosphere 的 ISO 时间（2026-09-21T05:36:25.342711+00:00）→ 本机时区字符串"""
+    s = str(text or "").strip()
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})", s)
+    if not m:
+        return ""
+    try:
+        t = _dt.datetime(*[int(x) for x in m.groups()])
+    except ValueError:
+        return ""
+    off = _dt.timedelta(0)
+    mm2 = re.search(r"([+-])(\d{2}):(\d{2})$", s)
+    if mm2:
+        d = _dt.timedelta(hours=int(mm2.group(2)), minutes=int(mm2.group(3)))
+        off = d if mm2.group(1) == "+" else -d
+    return (t - off + _local_offset()).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fetch_helio_update(cfg, addr, cookies="") -> dict:
+    """读 heliosphere 的版本信息（页面 SSR 数据里就带 version / updatedAt / downloadSize）。
+
+    注意：它的「下载」是页面上的按钮（点了才调接口，接口没公开），所以这里只做版本检测，
+    更新要靠「打开页面手动下载 → 上传新文件替换」。
+    """
+    out = {"ok": False, "modid": "", "updated": "", "version": "", "patch": "",
+           "source": "", "error": "", "kind": "helio"}
+    m = re.search(r"/mod/([A-Za-z0-9]+)", str(addr or ""))
+    if not m:
+        out["error"] = "不是 heliosphere 的 Mod 链接"
+        return out
+    out["modid"] = m.group(1)
+    page = "https://heliosphere.app/mod/%s" % out["modid"]
+    try:
+        html = _site_get(page, cookies).decode("utf-8", "replace")
+    except Exception as e:
+        out["error"] = "页面读取失败：%s" % str(e)[:80]
+        return out
+    flat = html.replace('\\"', '"').replace("\\/", "/")      # SSR 数据里的 JSON 是转义的
+    v = re.search(r'"version"\s*:\s*"([^"]+)"', flat)
+    up = re.search(r'"updatedAt"\s*:\s*"([^"]+)"', flat)
+    rel = re.search(r'"releasedAt"\s*:\s*"([^"]+)"', flat)
+    dl = re.search(r'"downloadSize"\s*:\s*(\d+)', flat)
+    if v:
+        out["version"] = v.group(1)
+    iso = (up.group(1) if up else (rel.group(1) if rel else ""))
+    if iso:
+        out["updated"] = _helio_iso(iso)
+    if dl and dl.group(1).isdigit():
+        out["size_mb"] = round(int(dl.group(1)) / 1048576.0, 1)
+    out["ok"] = bool(out["version"] or out["updated"])
+    if not out["ok"]:
+        out["error"] = "页面里没找到版本信息"
+    else:
+        out["source"] = "helio-page"
+    return out
+
+
 def _site_get(url, cookies="", timeout=25) -> bytes:
     req = urllib.request.Request(url, headers={
         "User-Agent": SITE_UA, "Referer": BROWSER_HOME,
@@ -1046,6 +1123,8 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
     """
     out = {"ok": False, "modid": "", "updated": "", "version": "", "patch": "",
            "source": "", "error": ""}
+    if "heliosphere" in str(addr or ""):
+        return fetch_helio_update(cfg, addr, cookies)
     m = re.search(r"/modid/(\d+)", str(addr or ""))
     if not m:
         out["error"] = "这条 Mod 没有站点地址（缺 modid）"
@@ -1067,6 +1146,7 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
             return out
     except Exception as e:
         errs.append("版本接口：%s" % str(e)[:60])
+    api_ok_no_hist = not errs          # 接口读通了、只是这条没有版本历史
     try:
         html = _site_get(page, cookies).decode("utf-8", "replace")
         for m2 in re.finditer(r'<div[^>]*class="[^"]*mod-meta-block[^"]*"[^>]*>([\s\S]*?)</div>', html):
@@ -1081,7 +1161,11 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
                     return out
         errs.append("页面里没找到「Last Version Update」")
     except Exception as e:
-        errs.append("页面：%s" % str(e)[:60])
+        if api_ok_no_hist:
+            errs.append("这条没有版本历史，页面又需要登录（多半是 NSFW）："
+                        "到「设置 → 打开内置浏览器」登录一次 XIVModArchive，之后就能查能更新")
+        else:
+            errs.append("页面：%s" % str(e)[:60])
     out["error"] = "；".join(errs)
     return out
 
@@ -1106,6 +1190,12 @@ def replace_mod_payload(cfg, folder, new_file, mode="same_name", to_recycle=True
     else:
         stem = new_file.stem.lower()
         targets = [f for f in olds if f.name.lower() == new_file.name.lower() or f.stem.lower() == stem]
+        if mode == "auto" and not targets and olds:
+            # 自动模式：名字对不上（作者改了文件名）就当整份替换，免得库里留两个版本
+            targets = olds
+            mode = "all_payload"
+        elif mode == "auto":
+            mode = "same_name"
     removed, kept = [], []
     for f in targets:
         try:

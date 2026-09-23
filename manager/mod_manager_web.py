@@ -638,9 +638,9 @@ def _job_fetch(job: Job):
     if not addr and info.get("modid"):
         addr = "https://www.xivmodarchive.com/modid/%s" % info["modid"]
     seq = int(q["seq"]) if str(q.get("seq") or "").strip().isdigit() else None
-    target = mm.import_mod(cfg, str(path), cat, str(q.get("zone") or "SFW"),
-                           str(q.get("subdir") or ""), author or None, name or None,
-                           seq, mm.norm_addr(addr), True)
+    target, _exist, _removed = import_or_update(
+        cfg, path, cat, str(q.get("zone") or "SFW"), str(q.get("subdir") or ""),
+        author or None, name or None, seq, addr, info, job)
 
     got = ""
     if q.get("cover", True) and info.get("cover"):
@@ -668,6 +668,7 @@ def _job_fetch(job: Job):
     if q.get("export", True):
         _job_export(job)
     return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
+            "updated_existing": bool(_exist), "removed": _removed,
             "tags": _meta.get("tags") or [], "affects": _meta.get("affects") or "",
             "file": Path(path).name, "cover": bool(got),
             "size": _size, "human": mm.fmt_size(_size),
@@ -763,8 +764,8 @@ def _job_selfdownload(job: Job):
 
     job.set(2, 4, "入库（写 地址.txt、自动编号）…")
     if cat:
-        target = mm.import_mod(cfg, str(hit), cat, zone, subdir, author or None, name or None,
-                               None, addr, True)
+        target, _exist, _removed = import_or_update(cfg, hit, cat, zone, subdir,
+                                                    author or None, name or None, None, addr, info, job)
         got = ""
         if q.get("cover", True) and cover.lower().startswith("http"):
             job.set(3, 4, "抓封面当预览图…")
@@ -791,6 +792,7 @@ def _job_selfdownload(job: Job):
         if q.get("export", True):
             _job_export(job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
+                "updated_existing": bool(_exist), "removed": _removed,
                 "file": hit.name, "cover": bool(got), "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "",
                 "target": str(target), "dir": str(dl_dir)}
@@ -952,6 +954,51 @@ def apply_tags_after_import(cfg, target, tags):
 
 
 # ------------------------------------------------------- 检查更新 / 更新 Mod
+def find_existing_by_addr(addr, modid=""):
+    """按站点地址找库里已有的 Mod（同一个 modid / shortId 就算同一条）。
+
+    用它把「又下载了一次」认成「更新」，不再新建一条重复的。
+    """
+    key = mm.site_key(addr, modid)
+    if not key:
+        return None
+    st = mm.Store()
+    hit = None
+    for m in st.all():
+        if mm.site_key(m.get("addr") or "", "") == key:
+            hit = m
+            break
+    st.cx.close()
+    return hit
+
+
+def import_or_update(cfg, src, cat, zone="SFW", subdir="", author=None, name=None,
+                     seq=None, addr="", info=None, job=None):
+    """入库：库里没有就新建一条；**同一站点地址已有**就覆盖那条（保留元数据）。
+
+    返回 (target Path, 已有的那条记录 or None, 被换掉的旧文件名列表)
+    """
+    hit = find_existing_by_addr(addr, (info or {}).get("modid") or "")
+    if hit is not None and Path(str(hit.get("folder") or "")).is_dir():
+        if job:
+            job.set(job.done, job.total, "识别为已有 Mod 的新版本 → 覆盖更新…")
+        rep = mm.replace_mod_payload(cfg, hit["folder"], src, mode="auto")
+        try:                          # 原语义是「把文件收进库里」→ 替换完不留来源副本
+            p = Path(src)
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(str(p), ignore_errors=True)
+        except OSError:
+            pass
+        mm.log("按站点地址认成已有 Mod：%s → 覆盖更新（换掉 %s，放入 %s）"
+               % (str(hit.get("name"))[:40], "、".join(rep["removed"]) or "无同名旧文件",
+                  "、".join(rep["added"])))
+        return Path(hit["folder"]), hit, rep["removed"]
+    return mm.import_mod(cfg, str(src), cat, zone, subdir, author, name, seq,
+                         mm.norm_addr(addr), True), None, []
+
+
 def _pick_download_link(html: str) -> str:
     """从 Mod 页 HTML 里挑主下载直链（#mod-download-link 优先，其次任意 /files/ 链接）"""
     m = (re.search(r'id="mod-download-link"[^>]*href="([^"]+)"', html)
@@ -1081,6 +1128,10 @@ def _job_mod_update(job: Job):
         if not addr:
             failed.append("%s：没有站点地址，无法从站点更新（可以手动上传替换）" % m["name"])
             continue
+        if "heliosphere" in addr:
+            failed.append("%s：heliosphere 的下载是页面上那个按钮（接口没公开）——"
+                          "点「打开页面下载」，下好后用「上传新文件替换」" % m["name"])
+            continue
         try:
             job.set(i - 1, len(folders), "下载最新版：%s" % m["name"][:34])
             path, info = _site_download(cfg, addr, inbox, job=job)
@@ -1138,8 +1189,8 @@ def _job_import_file(job: Job):
 
     if cat:
         job.set(1, 3, "入库（写 地址.txt、自动编号）…")
-        target = mm.import_mod(cfg, str(src), cat, zone, subdir, author or None, name or None,
-                               None, addr, True)
+        target, _exist, _removed = import_or_update(cfg, src, cat, zone, subdir,
+                                                    author or None, name or None, None, addr, info, job)
         got = ""
         if q.get("cover", True) and cover.lower().startswith("http"):
             job.set(2, 3, "抓封面当预览图…")
@@ -1165,6 +1216,7 @@ def _job_import_file(job: Job):
         if q.get("export", True):
             _job_export(job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
+                "updated_existing": bool(_exist), "removed": _removed,
                 "file": src.name, "cover": bool(got), "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "", "size": size,
                 "human": mm.fmt_size(size), "target": str(target)}

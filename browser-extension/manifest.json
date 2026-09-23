@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FFXIV Mod 管理器助手",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "在 XIVModArchive 的 Mod 页面上：一键把 Mod 送到本地「FFXIV Mod 管理器」—— 用你自己的浏览器（已登录）下载，管理器自动接住并入库。",
   "permissions": [
     "downloads",

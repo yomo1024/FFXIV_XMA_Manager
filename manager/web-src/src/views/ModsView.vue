@@ -239,6 +239,23 @@ async function checkUpdates() {
   }
 }
 
+// heliosphere 的下载是页面上的按钮（接口没公开）→ 打开页面让他自己点，再上传替换
+function isHelio(m) {
+  return !!(m && /heliosphere\.app/i.test(String(m.addr || '')))
+}
+async function updateOne(m) {
+  if (!m) return msg.warning('先在左边选一条 Mod')
+  if (!isHelio(m)) return doUpdate([m.folder])
+  try {
+    await api.open('addr', m.folder)
+    msg.info('已用你的浏览器打开 heliosphere 页面：点「Download as PMP」下好，' +
+      '回来用「上传新文件替换」覆盖这条（它的下载按钮调的是站内接口，管理器拿不到直链）',
+      { duration: 15000 })
+  } catch (e) {
+    msg.error(e.message)
+  }
+}
+
 function doUpdate(folders) {
   const list = (folders && folders.length) ? folders : updFolders.value
   if (!list.length) return msg.warning('先勾选「有新版」的 Mod，或点某条详情里的「从站点更新」')
@@ -1167,8 +1184,8 @@ async function copyPath() {
         </div>
         <div class="tagedit">
           <span class="lbl" title="从站点重新下载最新版覆盖，或自己上传新文件替换">更新</span>
-          <n-button size="tiny" :disabled="!cur || !cur.addr" @click="doUpdate([cur.folder])">
-            从站点更新
+          <n-button size="tiny" :disabled="!cur || !cur.addr" @click="updateOne(cur)">
+            {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
           </n-button>
           <n-button size="tiny" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
           <span v-if="cur && !cur.addr" class="dim">（没有站点地址，只能手动替换）</span>

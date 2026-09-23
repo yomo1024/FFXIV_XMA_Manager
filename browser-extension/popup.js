@@ -24,6 +24,7 @@ async function render() {
       (t.state === 'error' ? '↻' : '✕') + '</span></div>' +
       '<div class="qb"><i style="width:' + pct + '%"></i></div>' +
       '<div class="qd">' + TXT[t.state] + ' ' + pct + '%' +
+      (t.state === 'done' && t.result && t.result.updated_existing ? ' · 已覆盖更新' : '') +
       (t.state === 'done' && t.result && t.result.rel ? ' · ' + esc(t.result.rel) : '') +
       (t.state === 'error' && t.error ? ' · ' + esc(String(t.error).slice(0, 80)) : '') +
       (t.detail && t.state !== 'done' ? ' · ' + esc(String(t.detail).slice(0, 70)) : '') +
