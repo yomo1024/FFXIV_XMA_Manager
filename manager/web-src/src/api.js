@@ -50,6 +50,8 @@ export const api = {
   bridgeDecide: (requestId, approve) =>
     req('/api/bridge/decide', { method: 'POST', body: JSON.stringify({ requestId, approve }) }),
   bridgeAutopair: () => req('/api/bridge/autopair', { method: 'POST', body: '{}' }),
+  bridgeCoverCheck: (folder) => req('/api/bridge/cover-check',
+    { method: 'POST', body: JSON.stringify({ folder }) }),
   bridgeFixCover: (folder) =>
     req('/api/bridge/fix-cover', { method: 'POST', body: JSON.stringify({ folder }) }),
   bridgeSyncCovers: (dryRun) =>

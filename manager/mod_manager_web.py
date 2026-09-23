@@ -3231,6 +3231,65 @@ def api_bridge_autopair(b=None):
     }
 
 
+def _bridge_get(path_qs, timeout=25):
+    """插件有几个只读接口是 GET（/cover-check、/status），bridge_call 只发 POST → 单独走这条"""
+    cfg = cfg_now()
+    base = (cfg.get("bridge_url") or "http://127.0.0.1:42100").rstrip("/")
+    req = urllib.request.Request(base + path_qs,
+                                 headers={"X-ModBridge-Token": cfg.get("bridge_token") or ""})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def api_bridge_cover_check(folder, dir_name=""):
+    """封面诊断：把整条链路的实况摆出来，一眼看出卡在哪一步。
+
+    链路：管理器找到的图 → 转好的 webp → 转好的可解码 jpg → 插件里这条 mod 的 cover.webp / meta.json.Image
+    """
+    folder = str(folder or "")
+    if not folder:
+        raise SystemExit("没指定 Mod")
+    m = one_mod(cfg_now(), folder)
+    if not m:
+        raise SystemExit("找不到这条 Mod（先点一下「重新扫描」）")
+    cover = _bridge_find_cover(Path(m["folder"]))
+    webp = cover_to_webp(cover) if cover else None
+    draw = cover_to_decodable(cover) if cover else None
+    out = {"ok": True, "mod": m.get("name"), "folder": folder,
+           "cover": str(cover) if cover else "",
+           "cover_exists": bool(cover and Path(cover).is_file()),
+           "webp": str(webp) if webp else "", "webp_exists": bool(webp and Path(webp).is_file()),
+           "draw": str(draw) if draw else "", "draw_exists": bool(draw and Path(draw).is_file()),
+           "installed_dirs": [], "checks": [], "hint": ""}
+    try:
+        plug = bridge_call("/mods", timeout=25) or {}
+    except SystemExit as e:
+        out["hint"] = "游戏内插件没连上：%s" % e
+        return out
+    plist = plug.get("mods") or []
+    if dir_name:
+        targets = [dir_name]
+    else:
+        want = _bridge_norm(m.get("name") or "")
+        targets = [p.get("dir") for p in plist
+                   if any(_bridge_name_match(a, c) for a in want
+                          for c in _bridge_norm(p.get("name"), p.get("dir")))]
+    out["installed_dirs"] = targets
+    if not targets:
+        out["hint"] = ("游戏里没找到同名的已装 mod（还没装进去？或目录名对不上）。"
+                       "游戏里现有：%s" % "、".join((p.get("name") or "")[:20] for p in plist[:12]))
+        return out
+    for d in targets:
+        try:
+            out["checks"].append({"dir": d, "plugin": _bridge_get(
+                "/cover-check?dir=" + urllib.parse.quote(str(d)))})
+        except Exception as e:
+            out["checks"].append({"dir": d, "error": str(e)[:160]})
+    mm.log("封面诊断「%s」：cover=%s webp=%s draw=%s dirs=%s"
+           % (m.get("name"), bool(cover), bool(webp), bool(draw), targets))
+    return out
+
+
 def api_bridge_fix_cover(folder, dir_name=""):
     """把某一条 mod 的封面补进游戏（写进它在 Penumbra 里的那个 mod 文件夹）。
     folder 是管理器里的 mod 路径；dir_name 可选，直接指定 Penumbra 里的目录名。"""
@@ -3823,6 +3882,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api_bridge_autopair(body))
             if u.path == "/api/bridge/sync-covers":
                 return self._json(api_bridge_sync_covers(body))
+            if u.path == "/api/bridge/cover-check":
+                return self._json(api_bridge_cover_check(body.get("folder") or "",
+                                                         body.get("dir") or ""))
             if u.path == "/api/bridge/fix-cover":
                 return self._json(api_bridge_fix_cover(body.get("folder"), body.get("dir") or body.get("dirName") or ""))
             if u.path == "/api/push/downloaded":

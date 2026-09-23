@@ -280,9 +280,22 @@ public sealed class JobManager : IDisposable
 
             if (string.IsNullOrWhiteSpace(coverPath))
             {
+                // 兜底 2：打开包本身，把里面的 cover.*（.pmp/.zip 常自带）抽出来当封面。
+                // 以前只找「包旁边同名图片」，包里自带的那份没利用 —— 这类包就会「没图、不重绘」。
+                try
+                {
+                    coverPath = CoverWriter.ExtractCoverFromPackage(job.LocalFile ?? "");
+                }
+                catch { coverPath = null; }
+                if (!string.IsNullOrWhiteSpace(coverPath))
+                    job.Step($"包内自带封面，已抽出来用：{Path.GetFileName(coverPath)}");
+            }
+
+            if (string.IsNullOrWhiteSpace(coverPath))
+            {
                 // 一定要留痕：否则"没这一步"和"这一步没跑"分不清
-                job.CoverResult = "未提供（管理器没发 coverPath，包旁边也没有同名图片）";
-                job.Step("预览图：没有可用的封面（管理器没发 coverPath，包旁边也没有同名图片），跳过");
+                job.CoverResult = "未提供（管理器没发 coverPath，包旁边/包内都没有封面）";
+                job.Step("预览图：没有可用的封面（管理器没发 coverPath，包旁边/包内都没有），跳过");
             }
             else
             {

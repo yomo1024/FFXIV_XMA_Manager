@@ -1166,6 +1166,36 @@ async function checkBridge() {
   }
 }
 
+/** 封面诊断：把「管理器找到图 → 转 webp/jpg → 插件里那条 mod 的 cover.webp」这一整条链路的
+ *  实况摆出来，一眼看出卡在哪一步（插件自带 /cover-check，以前管理器从没用过） */
+async function diagCover() {
+  if (!cur.value) return
+  try {
+    const r = await api.bridgeCoverCheck(cur.value.folder)
+    const f = (b, p, empty) => (b ? '✓ ' + p : '✗ ' + (p || empty))
+    const lines = [
+      `管理器找到的图 : ${f(r.cover_exists, r.cover, '没找到能当封面的图')}`,
+      `转好的 WebP   : ${f(r.webp_exists, r.webp, '没生成（多半是 Pillow 缺或转换报错）')}`,
+      `转好的 JPEG   : ${f(r.draw_exists, r.draw, '没生成（同上）')}`,
+      `游戏里同名 mod: ${(r.installed_dirs || []).join(' ｜ ') || '没找到（还没装？或名字对不上）'}`,
+    ]
+    for (const c of (r.checks || [])) {
+      lines.push(c.error ? `插件查询失败（${c.dir}）：${c.error}`
+                         : `插件里的实况（${c.dir}）：${JSON.stringify(c.plugin)}`)
+    }
+    if (r.hint) lines.push('提示：' + r.hint)
+    dialog.info({
+      title: '封面诊断：' + (r.mod || ''),
+      content: () => h('pre', {
+        style: 'white-space:pre-wrap;word-break:break-all;max-height:46vh;overflow:auto;font-size:12px;margin:0',
+      }, lines.join('\n')),
+      positiveText: '知道了',
+    })
+  } catch (e) {
+    msg.error('诊断失败：' + e.message)
+  }
+}
+
 async function fixCoverToGame() {
   if (!cur.value) return
   fixingCover.value = true
@@ -1556,6 +1586,7 @@ async function copyPath() {
             <n-button block size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
             <n-button block size="small" :disabled="!cur" :loading="fixingCover"
                       @click="fixCoverToGame">补封面到游戏</n-button>
+        <n-button size="tiny" quaternary :disabled="!cur" @click="diagCover">诊断封面</n-button>
           </div>
 
           <div class="oplinks">
