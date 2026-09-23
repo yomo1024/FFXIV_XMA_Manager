@@ -1274,7 +1274,13 @@ async function copyPath() {
             <img v-if="m.has_img" :src="api.thumb(m.folder, 320, m.ih)" loading="lazy" alt="" />
             <div v-else class="noimg">无预览图</div>
             <div class="cap">
-              <b>{{ m.seq }}. {{ m.name }}</b>
+              <b>{{ m.seq }}. {{ m.name }}
+                <span v-if="m.cloud_state === 'archived'" class="cchip"
+                      :title="'载荷已归档到云端：' + (m.archived_files || 0) + ' 个文件 ｜ '
+                              + humanMB(m.cloud_size || 0) + ' ｜ 本地没有载荷副本'">☁ 云</span>
+                <span v-else-if="m.cloud_state === 'missing'" class="cchip bad"
+                      title="本地和云端都找不到载荷">⚠ 缺失</span>
+              </b>
               <span class="dim">{{ m.author || '—' }} · {{ m.category }}{{ m.subcat ? ' / ' + m.subcat : '' }}</span>
             </div>
           </div>
@@ -1322,6 +1328,14 @@ async function copyPath() {
           </div>
           <div class="r2">
             <span v-if="cur?.nsfw" class="badge">{{ cur.nsfw }}</span>
+            <span v-if="cur?.cloud_state === 'archived'" class="badge cloud"
+                  :title="'载荷已归档到云端（本地没有文件）：' + (cur.archived_files || 0) + ' 个文件 ｜ '
+                          + humanMB(cur.cloud_size || 0)
+                          + (cur.cloud_synced ? ' ｜ ' + cur.cloud_synced : '')
+                          + (cur.cloud_path ? '\n' + cur.cloud_path : '')">
+              ☁ 载荷在云端</span>
+            <span v-else-if="cur?.cloud_state === 'missing'" class="badge bad"
+                  title="本地和云端都找不到载荷">⚠ 载荷缺失</span>
             <span class="cat">{{ cur?.category || '—' }}<template v-if="cur?.subcat"> · {{ cur.subcat }}</template></span>
             <span>by</span>
             <span class="au">{{ cur?.author || '—' }}</span>
@@ -1888,6 +1902,10 @@ async function copyPath() {
   overflow: auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  /* 关键：行高必须按内容撑开（max-content）。
+     只写 auto 时，一旦总数把容器撑满，行会被压到只有图片那么高(153px)，
+     而标题块有 52px，被 .cell 的 overflow:hidden 整块裁掉 —— mod 名就看不见了。 */
+  grid-auto-rows: max-content;
   gap: 10px;
   align-content: start;
   padding-right: 4px;
@@ -1932,6 +1950,20 @@ async function copyPath() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.wall .cap .cchip {
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 400;
+  background: rgba(32, 128, 240, 0.16);
+  color: #2080f0;
+  white-space: nowrap;
+}
+.wall .cap .cchip.bad {
+  background: rgba(208, 48, 80, 0.16);
+  color: #d03050;
 }
 .right {
   min-height: 0;
@@ -2085,6 +2117,16 @@ async function copyPath() {
   border-radius: 4px;
   font-size: 11px;
   background: rgba(128, 128, 128, 0.22);
+}
+.dtitle .r2 .badge.cloud {
+  background: rgba(32, 128, 240, 0.16);
+  color: #2080f0;
+  cursor: help;
+}
+.dtitle .r2 .badge.bad {
+  background: rgba(208, 48, 80, 0.16);
+  color: #d03050;
+  cursor: help;
 }
 
 /* ---- ② 大图轮播：‹ › 切图 + 右下角计数 ---- */

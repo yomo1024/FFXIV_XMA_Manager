@@ -145,8 +145,10 @@ export function jobResultText(s) {
     case 'update_check': {
       const n = (r.has_update || []).length
       const un = (r.unknown || []).length
-      return `检查更新：共 ${r.checked || 0} 条 ｜ 有新版 ${n} 条 ｜ 已是最新 ${r.up_to_date || 0} 条` +
+      const sk = (r.skipped || []).length
+      return `检查更新：共 ${r.checked || 0} 条（只查 XMA / heliosphere）｜ 有新版 ${n} 条 ｜ 已是最新 ${r.up_to_date || 0} 条` +
         (un ? ` ｜ ${un} 条读不到（可能被站点挡了）` : '') +
+        (sk ? ` ｜ 跳过 ${sk} 条（来源不是 XMA / heliosphere）` : '') +
         (n ? '（表格里带「有新版」标记，勾上点「更新选中」即可）' : '')
     }
     case 'mod_update': {

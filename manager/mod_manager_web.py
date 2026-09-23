@@ -1151,9 +1151,33 @@ def _job_update_check(job: Job):
     rows = st.all()
     st.cx.close()
     want = {str(f) for f in (job.params.get("folders") or [])}
-    todo = [m for m in rows if ((not want) or m["folder"] in want) and (m.get("addr") or "").strip()]
+
+    def _src_kind(addr):
+        """只认这两家（主人 2026-09 要求：其它来源不检查）"""
+        a = (addr or "").lower()
+        if "xivmodarchive" in a:
+            return "XMA"
+        if "heliosphere" in a:
+            return "heliosphere"
+        return ""
+
+    todo, skipped = [], []
+    for m in rows:
+        if want and m["folder"] not in want:
+            continue
+        a = (m.get("addr") or "").strip()
+        if not a:
+            skipped.append({"folder": m["folder"], "name": m["name"], "addr": "",
+                            "why": "没有站点地址"})
+            continue
+        if not _src_kind(a):
+            skipped.append({"folder": m["folder"], "name": m["name"], "addr": a,
+                            "why": "来源不是 XMA / heliosphere，已跳过"})
+            continue
+        todo.append(m)
     if not todo:
-        raise RuntimeError("没有可检查的 Mod（选中的这些没有站点地址）")
+        raise RuntimeError("没有可检查的 Mod（只检查 XMA / heliosphere 来源；已跳过 %d 条）"
+                           % len(skipped))
     has, cur, unknown = [], 0, []
     for i, m in enumerate(todo, 1):
         if job.cancelled():
@@ -1195,10 +1219,10 @@ def _job_update_check(job: Job):
         else:
             cur += 1
     mod_index(force=True)
-    mm.log("检查更新：%d 条里 %d 条有新版，%d 条最新，%d 条读不到"
-           % (len(todo), len(has), cur, len(unknown)))
+    mm.log("检查更新：%d 条里 %d 条有新版，%d 条最新，%d 条读不到，%d 条来源不支持已跳过"
+           % (len(todo), len(has), cur, len(unknown), len(skipped)))
     return {"checked": len(todo), "has_update": has, "up_to_date": cur,
-            "unknown": unknown, "total": len(todo)}
+            "unknown": unknown, "skipped": skipped, "total": len(todo)}
 
 
 # ------------------------------------------------------------------ 云存储（夸克归档）
