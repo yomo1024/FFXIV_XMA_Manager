@@ -467,9 +467,11 @@ function showCoverAudit(res) {
   }
   const lines = [`共 ${res.checked || 0} 条 ｜ 游戏里有图 ${res.ok || 0} 条 ｜ 缺图/伪图 ${bad.length} 条 ｜ 对不上目录 ${res.no_dir || 0} 条`, '']
   for (const x of rows) {
+    const pk = x.pkg_found ? (x.pkg_images ? `包内图${x.pkg_images}` : '包内零图') : '包不在本地'
     lines.push(String(x.name || '').slice(0, 24).padEnd(26, ' ')
-      + String(tag[x.status] || x.status).padEnd(16, ' ')
-      + (x.dir ? x.dir.slice(0, 30) : '—'))
+      + String(tag[x.status] || x.status).padEnd(18, ' ')
+      + String(pk).padEnd(12, ' ')
+      + (x.dir ? x.dir.slice(0, 26) : '—'))
     if (x.detail) lines.push('    └ ' + x.detail)
   }
   if (res.fixed_now) lines.push('', `本次补了 ${res.fixed || 0} 条` + (res.failed ? `，失败 ${res.failed} 条` : ''))
@@ -1256,6 +1258,9 @@ async function diagCover() {
       (cp.files ? `从云端取回封面 : ✓ ${cp.files} 张（库里原来没有，已从网盘取回）`
                 : (cp.ok === false ? `从云端取回封面 : ✗ ${cp.why || '没取到'}` : '')),
       `对上的游戏目录 : ${(r.installed_dirs || []).join(' ｜ ') || '没对上'}（${r.matched_by || '没匹上'}${r.remembered_dir ? ' ｜ 记住的是 ' + r.remembered_dir : ''}）`,
+      `包内自带封面   : ${!r.pkg_found ? '（包不在本地，还没取回，看不到）'
+        : (r.pkg_cover ? `✓ ${r.pkg_cover}${r.pkg_helio ? '（Heliosphere 包 → Penumbra 解包时自带进目录，所以它天然就有图）' : ''}`
+        : (r.pkg_images ? `✓ 包内有 ${r.pkg_images} 张图` : '✗ 包内零张图 → 只能靠插件写进目录；它没图就是这个原因'))}`,
       `管理器找到的图 : ${f(r.cover_exists, r.cover, '没找到能当封面的图')}`,
       `转好的 WebP   : ${f(r.webp_exists, r.webp, '没生成（多半是 Pillow 缺或转换报错）')}`,
       `转好的 JPEG   : ${f(r.draw_exists, r.draw, '没生成（同上）')}`,

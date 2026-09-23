@@ -272,7 +272,7 @@ class Job:
 
 JOB_LOCK = threading.Lock()
 JOBS = {"cur": None}
-JOB_TITLES = {"cover_audit": "封面体检", "scan": "扫描目录", "export": "生成 Excel", "run": "扫描并生成 Excel", "selfdownload": "在自己浏览器里下载 → 自动入库", "importfile": "入库（浏览器下好的文件）",
+JOB_TITLES = {"cover_audit": "封面体检", "cover_inject": "封面插包", "scan": "扫描目录", "export": "生成 Excel", "run": "扫描并生成 Excel", "selfdownload": "在自己浏览器里下载 → 自动入库", "importfile": "入库（浏览器下好的文件）",
               "backup": "打包备份", "restore": "导入备份", "import": "导入下载",
               "renumber": "重排序号", "download": "从页面下载", "watch": "监视下载",
               "fetch": "解析并下载入库",
@@ -1573,7 +1573,25 @@ def _job_cloud_archive(job: Job):
             ensure_cover_inside(f)
         except Exception:
             mm.log(traceback.format_exc())
-    plan = [(f, local_payloads(f), local_covers(f)) for f in folders]
+    plan = []
+    for f in folders:
+        pays = local_payloads(f)
+        # ★ 归档前自动插：拿"带封面的包"去上传 → 云端那份从此带图（换机/取回天然带图）
+        try:
+            lib_pkg = _find_package_quiet(f)
+            if pays and lib_pkg and not _zip_has_image(lib_pkg):
+                rr = inject_cover_into_package(f, default_cover_inject_dir(cfg))
+                if rr.get("ok"):
+                    for p in pays:
+                        if os.path.basename(p["abs"]) == os.path.basename(str(lib_pkg)):
+                            stt = os.stat(rr["dst"])
+                            p["abs"], p["size"], p["mtime"] = rr["dst"], stt.st_size, stt.st_mtime
+                            mm.log("归档前自动插封面：%s → %s（上传带图的包）"
+                                   % (Path(str(lib_pkg)).name, Path(rr["dst"]).name))
+                            break
+        except Exception:
+            mm.log(traceback.format_exc())
+        plan.append((f, pays, local_covers(f)))
     total = max(1, sum(len(p) + len(c) for _, p, c in plan))
     done, results = 0, []
     for folder, pays, covers in plan:
@@ -1763,12 +1781,9 @@ def _ensure_payload_for_install(cfg, folder) -> str:
             pull_cover_from_cloud(cfg, folder)
     except Exception:
         mm.log(traceback.format_exc())
-    try:
-        pkg = _bridge_find_package(folder)
-    except SystemExit:
-        pkg = None
+    pkg = _find_package_quiet(folder)
     if pkg:
-        return str(pkg)
+        return _ensure_package_has_cover(cfg, folder, pkg)      # ★ 自动插：包内没图就插上再推
     st = mm.Store()
     rows = st.payload_files_of(folder, ["archived", "missing", "cover"])
     st.cx.close()
@@ -1790,7 +1805,7 @@ def _ensure_payload_for_install(cfg, folder) -> str:
         raise SystemExit("云端取回了文件，但里面没有 .pmp/.zip 这种能直接装的包（%s）" % str(e)[:120])
     if not pkg2:
         raise SystemExit("取回成功但没在暂存目录里找到可安装的包：%s" % dest)
-    return str(pkg2)
+    return _ensure_package_has_cover(cfg, folder, pkg2)          # ★ 自动插：取回的包没图也插上
 
 
 def _job_cloud_restore(job: Job):
@@ -2049,6 +2064,48 @@ def _job_import_file(job: Job):
 LAST_COVER_AUDIT = {}          # 最近一次封面体检的结果（前端轮询用）
 
 
+def _job_cover_inject(job: Job):
+    """封面插包：给选中的（或全部）mod 各输出一个**带封面的包**，输出到 `_封面已注入`（原包不动）。
+
+    用途：不能/不想重装游戏时，用这些包手动导入 Penumbra；或者拷到别的机器上装。
+    """
+    cfg = cfg_now()
+    folders = [str(f) for f in (job.params.get("folders") or [])]
+    dest = str(job.params.get("dest") or "").strip() or default_cover_inject_dir(cfg)
+    st = mm.Store()
+    rows = [r for r in st.all() if (not folders or r["folder"] in set(folders))]
+    st.cx.close()
+
+    out, n_add = [], 0
+    total = max(1, len(rows))
+    for i, r in enumerate(rows, 1):
+        if job.cancelled():
+            raise mm.BackupCancelled()
+        job.set(i - 1, total, "插封面：" + str(r.get("name") or "")[:26])
+        try:
+            rr = inject_cover_into_package(r["folder"], dest, r)
+        except Exception as e:
+            mm.log(traceback.format_exc())
+            rr = {"ok": False, "why": str(e)[:140]}
+        rr["name"] = r.get("name") or Path(r["folder"]).name
+        if rr.get("ok"):
+            n_add += len(rr.get("added") or [])
+        out.append(rr)
+
+    okn = sum(1 for x in out if x.get("ok"))
+    skipped = len(out) - okn
+    mm.log("封面插包：%d 条 → 成功 %d 条（插了 %d 张图）、跳过 %d 条 ｜ 输出目录：%s"
+           % (len(out), okn, n_add, skipped, dest))
+    for x in out[:60]:
+        if x.get("ok"):
+            mm.log("    ✓ %s ← %s（%s）" % (x["name"], Path(str(x.get("src"))).name,
+                                            "、".join(x.get("added") or [])))
+        else:
+            mm.log("    ✗ %s（%s）" % (x["name"], x.get("why")))
+    return {"done": len(out), "ok": okn, "skipped": skipped, "added": n_add,
+            "dest": dest, "items": out}
+
+
 def _job_cover_audit(job: Job):
     """封面体检：逐条摆出「库里有图 / 云端有图 / **Penumbra 那条目录里有没有图**」，可选一键补上。
 
@@ -2083,8 +2140,11 @@ def _job_cover_audit(job: Job):
         st = mm.Store()
         crows = st.payload_files_of(folder, ["cover"])
         st.cx.close()
+        pkg = package_cover_info(folder)
         item = {"folder": folder, "name": r.get("name") or Path(folder).name,
                 "lib": len(lib), "cloud": len(crows), "dir": "", "matched_by": "",
+                "pkg_cover": pkg["cover"], "pkg_images": len(pkg["images"]), "pkg_helio": pkg["helio"],
+                "pkg_found": bool(pkg.get("found")),
                 "cover_webp": "", "has_cover_webp": False, "real_webp": False, "pics": 0,
                 "status": "", "detail": ""}
         if not plugin_ok:
@@ -2123,7 +2183,8 @@ def _job_cover_audit(job: Job):
             item["detail"] = "目录里有 %d 张图，但 meta.json 的 Image 没指向它们 → 建议补一次" % item["pics"]
         else:
             item["status"] = "noimg"
-            item["detail"] = "游戏里这条目录**一张图都没有**"
+            item["detail"] = ("游戏里这条目录**一张图都没有**"
+                              + ("（包里也没图 → 全靠插件写，这条就是需要补的）" if not pkg["images"] else ""))
         out.append(item)
 
     fixed = failed = 0
@@ -2170,7 +2231,7 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "update_check": _job_update_check, "mod_update": _job_mod_update,
              "cloud_reconcile": _job_cloud_reconcile,
              "cloud_archive": _job_cloud_archive, "cloud_restore": _job_cloud_restore,
-             "cloud_verify": _job_cloud_verify, "cover_audit": _job_cover_audit}
+             "cloud_verify": _job_cloud_verify, "cover_audit": _job_cover_audit, "cover_inject": _job_cover_inject}
 
 
 def start_job(kind: str, params: dict | None = None):
@@ -3342,6 +3403,139 @@ def cover_to_webp(src, quality=88, max_w=1920):
         return None
 
 
+def find_local_package(folder):
+    """找这条 mod 的本地包：先看库文件夹，再看「_云端取回」缓存（只看，不取回）"""
+    p = Path(str(folder))
+    cands = []
+    if p.is_dir():
+        for dp, dn, fn in os.walk(str(p)):
+            for n in fn:
+                if os.path.splitext(n)[1].lower() in PAYLOAD_EXT:
+                    cands.append(Path(dp) / n)
+    cache = Path(mm.resolve_dirs(cfg_now())[1]) / "_云端取回" / p.name
+    if cache.is_dir():
+        for dp, dn, fn in os.walk(str(cache)):
+            for n in fn:
+                if os.path.splitext(n)[1].lower() in PAYLOAD_EXT:
+                    cands.append(Path(dp) / n)
+    cands.sort(key=lambda x: (len(str(x)), str(x)))
+    return cands[0] if cands else None
+
+
+def package_cover_info(folder) -> dict:
+    """看一眼**包里自带不带图** —— 这是"有的 mod 有图、有的没图"的根源（2026-09 主人问出来的）。
+
+    实测两条真包：
+      · Trigun    = Heliosphere 包（包根有 heliosphere.json + cover.jpg）→ Penumbra 解包时
+                    就把图带进目录 ⇒ 游戏里自然有封面（不用我们写）
+      · Girly Pop = 普通包（包根只有 meta.json，**零张图**）⇒ 必须由插件把图塞进去/事后写
+    把这件事记进日志 + 诊断，就能一眼看出"它为什么有图/为什么没图"。
+    """
+    out = {"path": "", "files": 0, "images": [], "cover": "", "helio": False, "found": False}
+    pkg = find_local_package(folder)
+    if not pkg:
+        return out                       # 包不在本地（还没取回）→ found=False，别误报成"包内零图"
+    out["path"] = str(pkg)
+    out["found"] = True
+    try:
+        import zipfile as _zip
+        with _zip.ZipFile(str(pkg)) as z:
+            names = [n for n in z.namelist() if not n.endswith("/")]
+            out["files"] = len(names)
+            for n in names:
+                rel = n.replace("\\", "/")
+                root = "/" not in rel
+                if os.path.splitext(rel)[1].lower() in COVER_EXT:
+                    out["images"].append(rel)
+                if root and rel.lower().startswith("cover.") and not out["cover"]:
+                    out["cover"] = rel
+                if root and rel.lower() == "heliosphere.json":
+                    out["helio"] = True
+    except Exception as e:
+        out["why"] = str(e)[:120]
+    return out
+
+
+def default_cover_inject_dir(cfg) -> str:
+    """插好封面的包输出到哪：Mod 根目录**同级**的 `_封面已注入`（在 root 外面，不会被扫描到）"""
+    root = Path(str(cfg.get("root") or ""))
+    base = root.parent if str(root).strip() else Path.home()
+    return str(base / "_封面已注入")
+
+
+def inject_cover_into_package(folder, dest_dir, m=None) -> dict:
+    """把封面**插进包**，输出一个「带封面的包」（**原包一个字节都不动**）。
+
+    规则与插件 CoverWriter.InjectIntoPackage 完全一致：
+      · 加 `cover.webp`（**真 WebP**）+ `cover.<真扩展名>` + `images\\_MetaImage.<ext>`，
+        并把 `meta.json` 的 `Image` 指过去
+      · 包内自带的**真** `cover.webp` 原样保留（不覆盖作者的图）；伪 WebP 换掉
+      · 包内 payload 一个不动；没图可插时**不产出**（返回 ok=False + 原因）
+    返回 {ok, src, dst, added[], kept[], size, why}
+    """
+    import zipfile as _zip
+    f = str(folder)
+    pkg = find_local_package(f)
+    if not pkg:
+        return {"ok": False, "why": "本地没有包（还没取回？先在「与网盘对账/取回」或装一次让它取回）"}
+    lib = local_covers(f)
+    cover = Path(lib[0]["abs"]) if lib else None
+    if cover is None:
+        return {"ok": False, "why": "库里没有可用的图"}
+    webp = cover_to_webp(cover)
+    draw = cover_to_decodable(cover) or cover
+    draw_ext = os.path.splitext(str(draw))[1].lower()
+    if draw_ext not in COVER_EXT:
+        draw_ext = ".jpg"
+
+    dest_dir = Path(str(dest_dir))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dst = dest_dir / Path(str(pkg)).name
+    added, kept, meta_json = [], [], None
+    try:
+        with _zip.ZipFile(str(pkg)) as zsrc, _zip.ZipFile(str(dst), "w", _zip.ZIP_DEFLATED, compresslevel=6) as zdst:
+            for it in zsrc.infolist():
+                if it.is_dir():
+                    continue
+                rel = it.filename.replace("\\", "/")
+                rootlvl = "/" not in rel
+                low = rel.lower()
+                if rootlvl and low == "cover.webp":
+                    data = zsrc.read(it)
+                    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+                        zdst.writestr(rel, data)
+                        kept.append(rel)
+                    continue                                    # 伪 WebP：丢掉，换成我们的
+                if rootlvl and low.startswith("cover."):
+                    continue                                    # 其余 cover.<ext> 由我们统一写
+                if rel.startswith("images/") and os.path.basename(rel).lower().startswith("_metaimage."):
+                    continue                                    # _MetaImage 由我们统一写
+                if rootlvl and low == "meta.json":
+                    meta_json = zsrc.read(it).decode("utf-8-sig", "replace")
+                    continue                                    # meta.json 最后写回去
+                zdst.writestr(rel, zsrc.read(it))
+            if webp and not kept:
+                zdst.writestr("cover.webp", Path(str(webp)).read_bytes())
+                added.append("cover.webp")
+            if draw:
+                zdst.writestr("cover" + draw_ext, Path(str(draw)).read_bytes())
+                added.append("cover" + draw_ext)
+                zdst.writestr("images/_MetaImage" + draw_ext, Path(str(draw)).read_bytes())
+                added.append("images/_MetaImage" + draw_ext)
+            if meta_json is not None:
+                try:
+                    obj = json.loads(meta_json)
+                    obj["Image"] = "images\\_MetaImage" + draw_ext
+                    meta_json = json.dumps(obj, ensure_ascii=False)
+                except Exception:
+                    pass
+                zdst.writestr("meta.json", meta_json.encode("utf-8"))
+    except Exception as e:
+        return {"ok": False, "why": "插包失败：%s" % str(e)[:140], "src": str(pkg)}
+    return {"ok": True, "src": str(pkg), "dst": str(dst), "added": added, "kept": kept,
+            "size": dst.stat().st_size, "cover": str(cover)}
+
+
 def _bridge_cover_fields(folder):
     """只算封面相关的三个路径（**不取回载荷**）。
 
@@ -3356,12 +3550,63 @@ def _bridge_cover_fields(folder):
     cover = _bridge_find_cover(Path(m["folder"]))
     webp = cover_to_webp(cover) if cover else None
     draw = cover_to_decodable(cover) if cover else None
+    pkg = package_cover_info(m["folder"])           # 包里自带不带图（Heliosphere 包都自带）
+    mm.log("封面取材「%s」：库里图 %s ｜ 包内图 %d 张%s%s ｜ 要发的封面 %s"
+           % (Path(str(folder)).name,
+              (Path(str(cover)).name if cover else "**没有**"),
+              len(pkg["images"]),
+              ("（" + pkg["cover"] + "）" if pkg["cover"] else ""),
+              ("｜Heliosphere 包" if pkg["helio"] else ("｜包内零图 → 必须靠插件写进目录" if not pkg["images"] else "")),
+              (Path(str(webp)).name if webp else "**没转出 WebP**")))
     return m, {
         "name": m.get("name") or Path(m["folder"]).name,
         "coverPath": str(cover) if cover else "",
         "coverWebpPath": str(webp) if webp else "",
         "coverDrawPath": str(draw) if draw else "",
+        "pkg": pkg,
     }
+
+
+def _zip_has_image(pkg) -> bool:
+    """包里有没有任何图片（Heliosphere 包自带 cover.jpg → 有就不折腾了）"""
+    try:
+        import zipfile as _zip
+        with _zip.ZipFile(str(pkg)) as z:
+            for n in z.namelist():
+                if os.path.splitext(n)[1].lower() in COVER_EXT:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _ensure_package_has_cover(cfg, folder, pkg) -> str:
+    """**自动**：交给 Penumbra 的包必须自带封面 —— Penumbra 只吃包文件、包内没图就装不出图。
+
+    所以推送/安装前自动把封面插进包（原包不动，输出到 `_封面已注入`）。
+    好处：**即使游戏那边的插件是老版本/没更新，图也照样跟着包进游戏**。
+    包内本来就有图（Heliosphere 包自带 cover.jpg）→ 直接用原包，不折腾。
+    """
+    try:
+        if _zip_has_image(pkg):
+            return str(pkg)
+        rr = inject_cover_into_package(folder, default_cover_inject_dir(cfg))
+        if rr.get("ok"):
+            mm.log("推送前自动插封面：%s → %s（%s）"
+                   % (Path(str(pkg)).name, Path(rr["dst"]).name, "、".join(rr.get("added") or [])))
+            return rr["dst"]
+        mm.log("推送前自动插封面没成功（继续用原包）：%s（%s）" % (Path(str(pkg)).name, rr.get("why")))
+    except Exception:
+        mm.log(traceback.format_exc())
+    return str(pkg)
+
+
+def _find_package_quiet(folder):
+    """库里找包（找不到返回 None，不抛）"""
+    try:
+        return _bridge_find_package(folder)
+    except BaseException:
+        return None
 
 
 def _bridge_payload(folder):
@@ -3591,7 +3836,11 @@ def api_bridge_cover_check(folder, dir_name=""):
     cover = _bridge_find_cover(Path(m["folder"]))
     webp = cover_to_webp(cover) if cover else None
     draw = cover_to_decodable(cover) if cover else None
+    pkg = package_cover_info(m["folder"])
     out = {"ok": True, "mod": m.get("name"), "folder": folder, "cover_pull": cov_pull,
+           "pkg": pkg, "pkg_cover": pkg["cover"], "pkg_images": pkg["images"],
+           "pkg_helio": pkg["helio"], "pkg_files": pkg["files"],
+           "pkg_found": bool(pkg.get("found")),
            "cover": str(cover) if cover else "",
            "cover_exists": bool(cover and Path(cover).is_file()),
            "webp": str(webp) if webp else "", "webp_exists": bool(webp and Path(webp).is_file()),
@@ -4234,6 +4483,11 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/bridge/cover-check":
                 return self._json(api_bridge_cover_check(body.get("folder") or "",
                                                          body.get("dir") or ""))
+            if u.path == "/api/bridge/cover-inject":
+                jb, err = start_job("cover_inject", body or {})
+                if err:
+                    return self._json({"error": err})
+                return self._json({"ok": True, "kind": "cover_inject", "title": JOB_TITLES.get("cover_inject")})
             if u.path == "/api/bridge/cover-audit":
                 body = body or {}
                 rid = "%d" % int(time.time() * 1000)
@@ -4679,7 +4933,8 @@ class Handler(BaseHTTPRequestHandler):
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
                  "auto_open_browser",
                  # ---- 云存储（夸克归档）----
-                 "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
+                 "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url",
+                 "auto_cover_fix")
         changed = {}
         for k in allow:
             if k in b:
@@ -5142,6 +5397,39 @@ def pick_port(prefer):
     return None
 
 
+def _auto_cover_fix_on_start():
+    """启动后**自动**体检一遍：游戏里那条目录没图的，直接补进去（不用主人点，每天最多一次）。
+
+    插件没连上就静默跳过；结果写进日志，也能在「封面体检」里回看。
+    """
+    try:
+        time.sleep(25)                       # 等服务/浏览器/插件都就绪
+        cfg = cfg_now()
+        if not bool(cfg.get("auto_cover_fix", True)):
+            mm.log("自动封面体检：设置里关掉了，跳过")
+            return
+        today = time.strftime("%Y-%m-%d")
+        if str(cfg.get("auto_cover_fix_at") or "") == today:
+            return
+        try:
+            plug = bridge_call("/mods", timeout=15) or {}
+        except BaseException as e:
+            mm.log("自动封面体检：游戏内插件没连上（%s），这次跳过" % str(e)[:80])
+            return
+        if not isinstance(plug.get("mods"), list):
+            mm.log("自动封面体检：插件没返回已装列表，这次跳过")
+            return
+        _jb, err = start_job("cover_audit", {"fix": True, "auto": True})
+        if err:
+            mm.log("自动封面体检：这次没启动起来（%s），下次再试" % err)
+            return
+        cfg["auto_cover_fix_at"] = today
+        save_cfg(cfg)
+        mm.log("自动封面体检：已开始（每天最多一次）→ 没图的会直接补进游戏；结果看「封面体检」")
+    except Exception:
+        mm.log(traceback.format_exc())
+
+
 def main(argv=None):
     global ROOT_OVERRIDE
     ap = argparse.ArgumentParser(description="FFXIV Mod 管理工具 · 本地 Web 服务")
@@ -5193,6 +5481,7 @@ def main(argv=None):
     print("=" * 62)
 
     httpd = Server(("127.0.0.1", port), Handler)
+    threading.Thread(target=_auto_cover_fix_on_start, daemon=True).start()   # ★ 启动后自动体检+补
     if not a.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
