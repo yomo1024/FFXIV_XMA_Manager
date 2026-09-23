@@ -61,6 +61,13 @@ export const api = {
   removeTags: (folders, tags) =>
     req('/api/mod/tags/remove', { method: 'POST', body: JSON.stringify({ folders, tags }) }),
 
+  // ---- 详情：内容描述 / 种族性别 / 文件清单 / 版本历史 ----
+  setDesc: (folder, desc) =>
+    req('/api/mod/desc', { method: 'POST', body: JSON.stringify({ folder, desc }) }),
+  setSiteMeta: (body) => req('/api/mod/site-meta', { method: 'POST', body: JSON.stringify(body) }),
+  files: (folder) => req('/api/mod/files?folder=' + encodeURIComponent(folder)),
+  history: (folder) => req('/api/mod/history?folder=' + encodeURIComponent(folder)),
+
   // ---- 检查更新 / 更新 Mod ----
   replaceMod: (body) => req('/api/mod/replace', { method: 'POST', body: JSON.stringify(body) }),
   // 浏览器上传新文件替换：走 FormData，别手动设 Content-Type（要让浏览器自己带 boundary）

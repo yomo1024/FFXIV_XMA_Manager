@@ -5,7 +5,7 @@ import {
   NButton, NInput, NSelect, NDataTable, NTag, NCard, NDescriptions, NDescriptionsItem,
   NImage, NModal, NForm, NFormItem, NInputNumber, NSwitch, NRadioGroup, NRadioButton,
   NSpace, NAlert, NEmpty, NTooltip, NDivider, NButtonGroup, NDynamicTags,
-  NCheckboxGroup, NCheckbox, useMessage, useDialog,
+  NCheckboxGroup, NCheckbox, NTabs, NTabPane, NSpin, useMessage, useDialog,
 } from 'naive-ui'
 import { api } from '../api'
 
@@ -23,6 +23,92 @@ function setDetmode(m) {
 }
 function detBack() {
   detmode.value = detmode.value === 'full' ? 'half' : 'narrow'
+}
+
+// ---- 详情右下的「描述 / 文件 / 历史」页签（对应 XMA 的 Info / Files / History）----
+const dtabs = ref('desc')
+const filesMap = ref({})          // folder -> {ok, items, count, total, error}
+const histMap = ref({})           // folder -> {ok, items, error}
+const tabBusy = ref('')
+const descEdit = ref(false)
+const descText = ref('')
+
+function humanSize(n) {
+  const v = Number(n || 0)
+  if (v >= 1048576) return (v / 1048576).toFixed(2) + ' MB'
+  if (v >= 1024) return (v / 1024).toFixed(0) + ' KB'
+  return v + ' B'
+}
+
+async function loadFiles(folder) {
+  if (!folder || filesMap.value[folder]) return
+  tabBusy.value = 'files'
+  try {
+    const r = await api.files(folder)
+    filesMap.value = { ...filesMap.value, [folder]: r }
+  } catch (e) {
+    filesMap.value = { ...filesMap.value, [folder]: { ok: false, error: e.message } }
+  } finally {
+    tabBusy.value = ''
+  }
+}
+
+async function loadHistory(folder) {
+  if (!folder || histMap.value[folder]) return
+  tabBusy.value = 'hist'
+  try {
+    const r = await api.history(folder)
+    histMap.value = { ...histMap.value, [folder]: r }
+  } catch (e) {
+    histMap.value = { ...histMap.value, [folder]: { ok: false, error: e.message } }
+  } finally {
+    tabBusy.value = ''
+  }
+}
+
+function ensureTab() {
+  const f = cur.value && cur.value.folder
+  if (!f) return
+  if (dtabs.value === 'files') loadFiles(f)
+  else if (dtabs.value === 'hist') loadHistory(f)
+}
+
+watch([dtabs, () => (cur.value ? cur.value.folder : '')], ensureTab, { immediate: true })
+
+function openDescEdit() {
+  if (!cur.value) return
+  descText.value = cur.value.desc || ''
+  descEdit.value = true
+}
+
+async function saveDesc() {
+  if (!cur.value) return
+  try {
+    const r = await api.setDesc(cur.value.folder, descText.value)
+    cur.value.desc = r.desc
+    descEdit.value = false
+    msg.success(r.desc ? '内容描述已保存' : '已清空内容描述')
+    emit('changed')
+  } catch (e) {
+    msg.error('保存内容描述失败：' + e.message)
+  }
+}
+
+/** 种族 / 性别：手工改（站点读完也会自动带过来） */
+async function saveSiteMeta(kind, list) {
+  if (!cur.value) return
+  const txt = (list || []).map((x) => String(x).trim()).filter(Boolean).join(', ')
+  if (txt === String(cur.value[kind] || '').trim()) return
+  try {
+    const body = { folder: cur.value.folder }
+    body[kind] = txt
+    const r = await api.setSiteMeta(body)
+    cur.value[kind] = r[kind] || ''
+    msg.success((kind === 'races' ? '种族' : '性别') + '：' + (r[kind] || '（空）'))
+    emit('changed')
+  } catch (e) {
+    msg.error('保存失败：' + e.message)
+  }
 }
 const q = ref('')
 const cat = ref('')
@@ -1029,7 +1115,7 @@ async function copyPath() {
     </div>
 
     <aside class="right">
-      <!-- 游戏内插件状态：放最上面，一眼能看到 -->
+      <!-- 顶部通栏：游戏内插件状态（XMA 那条兼容性横幅的位置） -->
       <div class="bridge-bar"
            :class="bridgeOk === true ? 'ok' : (bridgeOk === false ? 'bad' : '')">
         <span class="dot"></span>
@@ -1047,145 +1133,259 @@ async function copyPath() {
         </n-button>
       </div>
 
-      <!-- 展开时的标题条：照 XMA mod 页的样子（大标题 + 版本，第二行 分类 by 作者 + 站点链接） -->
-      <div v-if="detmode !== 'narrow'" class="dtitle">
-        <div class="r1">
-          <h2>{{ cur?.name || '未选择 Mod' }}</h2>
-          <span class="ver">
-            {{ cur?.site_latest || cur?.site_updated
-               ? '更新于 ' + (cur.site_latest || cur.site_updated) : '' }}
-          </span>
+      <div class="col-main">
+        <!-- ① 标题区（XMA 左上）：Mod 名称 + 版本 / 分类说明 + 站点链接 -->
+        <div v-if="detmode !== 'narrow'" class="dtitle">
+          <div class="r1">
+            <h2>{{ cur?.name || '未选择 Mod' }}</h2>
+            <span class="ver">
+              {{ cur?.site_version ? 'v' + cur.site_version : '' }}
+              {{ cur?.site_latest || cur?.site_updated
+                 ? ' · 更新于 ' + (cur.site_latest || cur.site_updated) : '' }}
+            </span>
+          </div>
+          <div class="r2">
+            <span v-if="cur?.nsfw" class="badge">{{ cur.nsfw }}</span>
+            <span class="cat">{{ cur?.category || '—' }}<template v-if="cur?.subcat"> · {{ cur.subcat }}</template></span>
+            <span>by</span>
+            <span class="au">{{ cur?.author || '—' }}</span>
+            <span class="grow"></span>
+            <a v-if="cur?.addr" class="lnk" :href="cur.addr" target="_blank" rel="noreferrer">
+              [ 站点页面 ]
+            </a>
+          </div>
         </div>
-        <div class="r2">
-          <span class="cat">{{ cur?.category || '—' }}</span>
-          <span>by</span>
-          <span class="au">{{ cur?.author || '—' }}</span>
-          <span class="grow"></span>
-          <a v-if="cur?.addr" class="lnk" :href="cur.addr" target="_blank" rel="noreferrer">
-            [ 站点页面 ]
-          </a>
-        </div>
+
+        <!-- ② 大图轮播（XMA 左侧中部）：‹ › 切图 + 计数 + 缩略图条 -->
+        <n-card size="small" :title="detmode === 'narrow' && cur ? cur.name : '预览'" class="pv-card">
+          <template #header-extra>
+            <n-button size="tiny" :disabled="!cur" @click="showAddImg = true">添加图片…</n-button>
+          </template>
+          <input ref="fileEl" type="file" accept="image/*" multiple
+                 style="display: none" @change="onFiles" />
+          <div class="preview">
+            <n-image v-if="shotPath || (cur && cur.has_img)"
+                     :src="shotPath ? api.imgUrl(shotPath, 1000)
+                                   : api.thumb(cur.folder, 900, cur.ih)"
+                     object-fit="contain" class="pv-img"
+                     :img-props="{ style: 'width:100%;height:100%;object-fit:contain' }" />
+            <div v-else class="ph">← 左侧点一条看预览图</div>
+            <template v-if="shots.length > 1">
+              <button class="navbtn prev" title="上一张（← 键）" @click.stop="selectShot(shotIdx - 1)">‹</button>
+              <button class="navbtn next" title="下一张（→ 键）" @click.stop="selectShot(shotIdx + 1)">›</button>
+              <span class="navcnt">{{ shotIdx + 1 }} / {{ shots.length }}</span>
+            </template>
+          </div>
+          <div v-if="shots.length" class="shots" :class="{ kbfocus: focusArea === 'strip' }">
+            <div v-for="im in shots" :key="im.path" class="shot"
+                 :class="{ active: im.path === shotPath, current: im.is_current }"
+                 :title="im.rel + ' · ' + im.human" @click="selectShot(shots.indexOf(im))">
+              <img :src="im.thumb" loading="lazy" alt="" />
+              <button class="delbtn" title="删除这张图（进回收站）"
+                      @click.stop="delImage(im)">✕</button>
+              <span v-if="im.is_current" class="tag">当前</span>
+              <button v-else class="setbtn" @click.stop="useAsPreview(im)">设为预览图</button>
+            </div>
+            <span class="count">共 {{ shots.length }} 张</span>
+          </div>
+          <div v-if="shots.length" class="strip-hint">
+            {{ focusArea === 'strip' ? '← → 选图 ｜ Enter 设为预览图 ｜ Delete 删图 ｜ Esc 回到列表'
+                                     : '← → 选图后，Enter/Delete 就作用于图片' }}
+          </div>
+        </n-card>
+
+        <!-- ③ 内容描述区（XMA 左下）：描述 / 文件 / 历史 -->
+        <n-card size="small" class="descbox-card">
+          <n-tabs v-model:value="dtabs" size="small" type="line" animated>
+            <n-tab-pane name="desc" tab="描述">
+              <div v-if="cur?.desc" class="desctext">{{ cur.desc }}</div>
+              <div v-else class="descempty">
+                还没有内容描述。点下面「编辑描述…」自己写一段；以后从站点导入时会自动带过来。
+              </div>
+              <n-button size="tiny" quaternary :disabled="!cur" style="margin-top: 4px"
+                        @click="openDescEdit">编辑描述…</n-button>
+            </n-tab-pane>
+
+            <n-tab-pane name="files" tab="文件">
+              <n-spin v-if="tabBusy === 'files'" size="small" />
+              <template v-else-if="cur && filesMap[cur.folder]">
+                <template v-if="filesMap[cur.folder].ok">
+                  <div class="flist">
+                    <div v-for="f in filesMap[cur.folder].items" :key="f.name" class="frow">
+                      <span class="fname" :title="f.name">{{ f.name }}</span>
+                      <span class="fsize">{{ f.dir ? '文件夹' : humanSize(f.size) }}</span>
+                      <span class="ftime">{{ f.mtime }}</span>
+                    </div>
+                  </div>
+                  <div class="ftotal">
+                    共 {{ filesMap[cur.folder].count }} 项 ｜ 合计 {{ humanSize(filesMap[cur.folder].total) }}
+                  </div>
+                </template>
+                <div v-else class="descempty">{{ filesMap[cur.folder].error || '读不到文件清单' }}</div>
+              </template>
+              <div v-else class="descempty">选中一条 Mod 后，这里列出它文件夹里的文件。</div>
+            </n-tab-pane>
+
+            <n-tab-pane name="hist" tab="历史">
+              <n-spin v-if="tabBusy === 'hist'" size="small" />
+              <template v-else-if="cur && histMap[cur.folder]">
+                <template v-if="(histMap[cur.folder].items || []).length">
+                  <div v-for="(h, hi) in histMap[cur.folder].items" :key="hi" class="hrow">
+                    <div class="hline">
+                      <b>v{{ h.version }}</b>
+                      <span v-if="h.prev" class="dim">（上一版 v{{ h.prev }}）</span>
+                      <span class="grow"></span>
+                      <span class="ftime">{{ h.time }}</span>
+                    </div>
+                    <div v-if="h.notes" class="hnotes">{{ h.notes }}</div>
+                  </div>
+                </template>
+                <div v-else class="descempty">
+                  {{ histMap[cur.folder].error || '站点上没有版本历史' }}
+                  <a v-if="cur?.addr" :href="cur.addr" target="_blank" rel="noreferrer">去站点看更新记录</a>
+                </div>
+              </template>
+              <div v-else class="descempty">选中一条 Mod 后，这里显示它在站点上的版本更新记录。</div>
+            </n-tab-pane>
+          </n-tabs>
+        </n-card>
       </div>
 
-      <!-- 操作：放最上面。主动作两列等宽，文件类收成一行小字按钮 → 又矮又不挤 -->
-      <n-card size="small" title="操作" class="act-card">
-        <template #header-extra>
-          <n-button-group size="tiny">
-            <n-button :type="detmode === 'narrow' ? 'primary' : 'default'"
-                      title="窄栏：详情固定在右侧 400px" @click="setDetmode('narrow')">窄栏</n-button>
-            <n-button :type="detmode === 'half' ? 'primary' : 'default'"
-                      title="半屏：列表与详情各占一半（双击列表某一行也是这个）"
-                      @click="setDetmode('half')">半屏</n-button>
-            <n-button :type="detmode === 'full' ? 'primary' : 'default'"
-                      title="全屏：详情铺满窗口" @click="setDetmode('full')">全屏</n-button>
-          </n-button-group>
-        </template>
-
-        <div class="opgrid">
-          <n-button class="opmain" block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
-                    @click="updateOne(cur)">
-            {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
-          </n-button>
-          <n-button block size="small" type="primary" :disabled="!cur" :loading="installing"
-                    @click="installToGame(false)">安装到游戏</n-button>
-          <n-button block size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
-          <n-button block size="small" :disabled="!cur" :loading="fixingCover"
-                    @click="fixCoverToGame">补封面到游戏</n-button>
-        </div>
-
-        <div class="oplinks">
-          <n-button text size="tiny" :disabled="!cur" @click="cur && api.open('folder', cur.folder)">
-            打开文件夹
-          </n-button>
-          <span class="sep">·</span>
-          <n-button text size="tiny" :disabled="!cur" @click="copyPath">复制路径</n-button>
-          <template v-if="cur?.has_img">
-            <span class="sep">·</span>
-            <n-button text size="tiny" tag="a" :href="api.raw(cur.folder)" target="_blank">查看原图</n-button>
+      <div class="col-side">
+        <!-- ④ 操作区（XMA 右上）：作者 → 主按钮 → 次按钮 → 统计 -->
+        <n-card size="small" title="操作" class="act-card">
+          <template #header-extra>
+            <n-button-group size="tiny">
+              <n-button :type="detmode === 'narrow' ? 'primary' : 'default'"
+                        title="窄栏：详情固定在右侧 400px" @click="setDetmode('narrow')">窄栏</n-button>
+              <n-button :type="detmode === 'half' ? 'primary' : 'default'"
+                        title="半屏：详情占大半（双击列表某一行也是这个）"
+                        @click="setDetmode('half')">半屏</n-button>
+              <n-button :type="detmode === 'full' ? 'primary' : 'default'"
+                        title="全屏：详情铺满窗口" @click="setDetmode('full')">全屏</n-button>
+            </n-button-group>
           </template>
-        </div>
 
-        <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
-      </n-card>
-
-      <n-card size="small" :title="detmode === 'narrow' && cur ? cur.name : '预览'" class="pv-card">
-        <template #header-extra>
-          <n-button size="tiny" :disabled="!cur" @click="showAddImg = true">添加图片…</n-button>
-        </template>
-        <input ref="fileEl" type="file" accept="image/*" multiple
-               style="display: none" @change="onFiles" />
-        <div class="preview">
-          <n-image v-if="shotPath || (cur && cur.has_img)"
-                   :src="shotPath ? api.imgUrl(shotPath, 1000)
-                                 : api.thumb(cur.folder, 900, cur.ih)"
-                   object-fit="contain" class="pv-img"
-                   :img-props="{ style: 'width:100%;height:100%;object-fit:contain' }" />
-          <div v-else class="ph">← 左侧点一条看预览图</div>
-        </div>
-        <div v-if="shots.length" class="shots" :class="{ kbfocus: focusArea === 'strip' }">
-          <div v-for="im in shots" :key="im.path" class="shot"
-               :class="{ active: im.path === shotPath, current: im.is_current }"
-               :title="im.rel + ' · ' + im.human" @click="selectShot(shots.indexOf(im))">
-            <img :src="im.thumb" loading="lazy" alt="" />
-            <button class="delbtn" title="删除这张图（进回收站）"
-                    @click.stop="delImage(im)">✕</button>
-            <span v-if="im.is_current" class="tag">当前</span>
-            <button v-else class="setbtn" @click.stop="useAsPreview(im)">设为预览图</button>
+          <div class="who">
+            <span class="ava">{{ (cur?.author || '?').slice(0, 1) }}</span>
+            <span class="wname">{{ cur?.author || '未选择 Mod' }}</span>
+            <n-tag v-if="cur?.nsfw" size="tiny" :bordered="false">{{ cur.nsfw }}</n-tag>
           </div>
-          <span class="count">共 {{ shots.length }} 张</span>
-        </div>
-        <div v-if="shots.length" class="strip-hint">
-          {{ focusArea === 'strip' ? '← → 选图 ｜ Enter 设为预览图 ｜ Delete 删图 ｜ Esc 回到列表'
-                                   : '← → 选图后，Enter/Delete 就作用于图片' }}
-        </div>
-      </n-card>
 
-      <n-card size="small" class="desc-card">
-        <n-descriptions :column="detmode === 'narrow' ? 2 : 1"
-                        label-placement="left" size="small" label-width="52"
-                        style="margin-bottom: 2px">
-          <n-descriptions-item label="分类">{{ cur?.category || '—' }}</n-descriptions-item>
-          <n-descriptions-item label="序号">{{ cur?.seq ?? '—' }}</n-descriptions-item>
-          <n-descriptions-item label="子分类">{{ cur?.subcat || '—' }}</n-descriptions-item>
-        <n-descriptions-item label="更新时间" :span="2">
-          {{ cur?.site_latest || cur?.site_updated || '—' }}
-          <n-tag v-if="cur?.update_avail" size="tiny" type="warning" :bordered="false"
-                 style="margin-left:6px;cursor:pointer" @click="onlyUpd = true">有新版</n-tag>
-          <span v-if="cur?.site_version" class="dim">｜ 站点版本 v{{ cur.site_version }}</span>
-          <span v-if="cur?.site_updated && cur?.site_latest && cur.site_updated !== cur.site_latest"
-                class="dim">｜ 本地这份下载于 {{ cur.site_updated }}</span>
-        </n-descriptions-item>
-          <n-descriptions-item label="作者">{{ cur?.author || '—' }}</n-descriptions-item>
-          <n-descriptions-item label="类型" :span="2">{{ cur?.nsfw || '—' }}</n-descriptions-item>
-        </n-descriptions>
-        <div class="tagedit">
-          <span class="lbl">标签</span>
-          <n-dynamic-tags :value="(cur && cur.tags) || []" size="small"
-                          :disabled="!cur" @update:value="saveTags" />
-        </div>
-        <div class="tagedit">
-          <span class="lbl" title="这条 Mod 替换/影响游戏里的哪些东西（来自 XMA 的 Affects / Replaces）">
-            影响/替换
-          </span>
-          <n-dynamic-tags :value="splitList(cur && cur.affects)" size="small"
-                          :disabled="!cur" @update:value="saveAffectsList" />
-        </div>
-        <n-descriptions :column="1" label-placement="left" size="small" label-width="56">
-          <n-descriptions-item label="地址">
-            <a v-if="cur?.addr" class="addr" :href="cur.addr" target="_blank"
-               rel="noreferrer">{{ cur.addr }}</a>
-            <span v-else>—</span>
-          </n-descriptions-item>
-          <n-descriptions-item label="预览图">
-            <span class="ellip" :title="cur?.img_name || ''">{{ cur?.img_name || '—' }}</span>
-          </n-descriptions-item>
-          <n-descriptions-item label="文件夹">
-            <span class="ellip" :title="cur?.folder || ''" style="cursor: pointer"
-                  @click="copyPath">{{ cur?.rel || cur?.folder || '—' }}</span>
-          </n-descriptions-item>
-        </n-descriptions>
-      </n-card>
+          <div class="opgrid">
+            <n-button class="opmain" block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
+                      @click="updateOne(cur)">
+              {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
+            </n-button>
+            <n-button block size="small" type="primary" :disabled="!cur" :loading="installing"
+                      @click="installToGame(false)">安装到游戏</n-button>
+            <n-button block size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
+            <n-button block size="small" :disabled="!cur" :loading="fixingCover"
+                      @click="fixCoverToGame">补封面到游戏</n-button>
+          </div>
 
+          <div class="oplinks">
+            <n-button text size="tiny" :disabled="!cur" @click="cur && api.open('folder', cur.folder)">
+              打开文件夹
+            </n-button>
+            <span class="sep">·</span>
+            <n-button text size="tiny" :disabled="!cur" @click="copyPath">复制路径</n-button>
+            <template v-if="cur?.has_img">
+              <span class="sep">·</span>
+              <n-button text size="tiny" tag="a" :href="api.raw(cur.folder)" target="_blank">查看原图</n-button>
+            </template>
+          </div>
+
+          <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
+
+          <div v-if="cur" class="stats" :class="{ compact: detmode !== 'full' }">
+            <div class="st"><b>{{ shots.length }}</b><span>张图</span></div>
+            <div class="st"><b>{{ humanSize(cur.payload_size) }}</b><span>{{ cur.payload_files || 0 }} 个文件</span></div>
+            <div class="st"><b>{{ cur.site_version ? 'v' + cur.site_version : '—' }}</b><span>站点版本</span></div>
+          </div>
+        </n-card>
+
+        <!-- ⑤ 元信息（XMA 右下）：分类 / 更新时间 / 发布日期 / 影响替换 / 种族 / 性别 / 标签 / 地址 -->
+        <n-card size="small" class="desc-card">
+          <n-descriptions :column="detmode === 'narrow' ? 2 : 1"
+                          label-placement="left" size="small" label-width="52"
+                          style="margin-bottom: 2px">
+            <n-descriptions-item label="分类" :span="detmode === 'narrow' ? 2 : 1">
+              {{ cur?.category || '—' }}<template v-if="cur?.subcat"> · {{ cur.subcat }}</template>
+              ｜ 序号 {{ cur?.seq ?? '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="更新时间" :span="detmode === 'narrow' ? 2 : 1">
+              {{ cur?.site_latest || cur?.site_updated || '—' }}
+              <n-tag v-if="cur?.update_avail" size="tiny" type="warning" :bordered="false"
+                     style="margin-left:6px;cursor:pointer" @click="onlyUpd = true">有新版</n-tag>
+              <n-tag v-if="cur?.site_version" size="tiny" :bordered="false"
+                     :title="'站点上的最新版本号'" style="margin-left:6px">v{{ cur.site_version }}</n-tag>
+              <div v-if="cur?.site_updated && cur?.site_latest && cur.site_updated !== cur.site_latest"
+                   class="dim">本地这份下载于 {{ cur.site_updated }}</div>
+            </n-descriptions-item>
+            <n-descriptions-item label="发布日期" :span="detmode === 'narrow' ? 2 : 1">
+              {{ cur?.released || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="类型" :span="detmode === 'narrow' ? 2 : 1">
+              {{ cur?.nsfw || '—' }}
+            </n-descriptions-item>
+          </n-descriptions>
+
+          <div class="tagedit">
+            <span class="lbl" title="这条 Mod 替换/影响游戏里的哪些东西（XMA 的 Affects / Replaces）">
+              影响/替换
+            </span>
+            <n-dynamic-tags :value="splitList(cur && cur.affects)" size="small"
+                            :disabled="!cur" @update:value="saveAffectsList" />
+          </div>
+          <div class="tagedit">
+            <span class="lbl" title="XMA 的 Races（种族）：检查更新时自动带过来，也能自己改">
+              种族
+            </span>
+            <n-dynamic-tags :value="splitList(cur && cur.races)" size="small"
+                            :disabled="!cur" @update:value="(v) => saveSiteMeta('races', v)" />
+          </div>
+          <div class="tagedit">
+            <span class="lbl" title="XMA 的 Genders（性别）：检查更新时自动带过来，也能自己改">
+              性别
+            </span>
+            <n-dynamic-tags :value="splitList(cur && cur.genders)" size="small"
+                            :disabled="!cur" @update:value="(v) => saveSiteMeta('genders', v)" />
+          </div>
+          <div class="tagedit">
+            <span class="lbl">标签</span>
+            <n-dynamic-tags :value="(cur && cur.tags) || []" size="small"
+                            :disabled="!cur" @update:value="saveTags" />
+          </div>
+
+          <n-descriptions :column="1" label-placement="left" size="small" label-width="56">
+            <n-descriptions-item label="地址">
+              <a v-if="cur?.addr" class="addr" :href="cur.addr" target="_blank"
+                 rel="noreferrer">{{ cur.addr }}</a>
+              <span v-else>—</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="预览图">
+              <span class="ellip" :title="cur?.img_name || ''">{{ cur?.img_name || '—' }}</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="文件夹">
+              <span class="ellip" :title="cur?.folder || ''" style="cursor: pointer"
+                    @click="copyPath">{{ cur?.rel || cur?.folder || '—' }}</span>
+            </n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+      </div>
+
+      <!-- 内容描述编辑 -->
+      <n-modal v-model:show="descEdit" preset="card" style="width: 640px" title="编辑内容描述">
+        <n-input v-model:value="descText" type="textarea" :rows="8"
+                 placeholder="写这条 Mod 是做什么的、装了会怎样、注意事项…（留空 = 清空）" />
+        <template #footer>
+          <n-space justify="end">
+            <n-button size="small" @click="descEdit = false">取消</n-button>
+            <n-button size="small" type="primary" @click="saveDesc">保存</n-button>
+          </n-space>
+        </template>
+      </n-modal>
     </aside>
 
     <!-- 追加图片 -->
@@ -1490,11 +1690,12 @@ async function copyPath() {
   /* 实在放不下时滚动，绝不把内容裁掉 */
   overflow: auto;
 }
-/* ---- 详情展开：半屏 / 全屏（排布参考 XMA mod 页）----
-   半屏 = 列表与详情各占一半，详情内部仍单列 → 图片更大、影响/替换一行就放得下
-   全屏 = 详情铺满窗口，内部照 XMA 分两列：左大图 / 右操作+元信息 ---- */
+/* ---- 详情展开：半屏 / 全屏。排布照 XMA mod 页的五个分区 ----
+   左列 = ① 标题 ② 大图轮播 ③ 描述/文件/历史 ；右列 = ④ 操作 ⑤ 元信息
+   两列各自独立堆叠（列内不留空档），列宽比 2:1 ---- */
 .wrap.det-half {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* 半屏 = 列表让出大半，详情拿 60%：这样内部才排得下 2:1 的两列 */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
 }
 .wrap.det-full {
   grid-template-columns: minmax(0, 1fr);
@@ -1502,57 +1703,68 @@ async function copyPath() {
 .wrap.det-full .left {
   display: none;
 }
-/* 半屏：图片上限放宽（窄栏是 30vh），信息卡跟着整列滚、自己不滚 */
-.wrap.det-half :deep(.preview img) {
-  max-height: 42vh;
-}
-/* 主按钮整行突出（对应 XMA 那颗大 Download Mod） */
-.wrap.det-half .opgrid .opmain,
-.wrap.det-full .opgrid .opmain {
-  grid-column: 1 / -1;
-}
-/* 全屏：详情右栏改栅格 */
+.wrap.det-half .right,
 .wrap.det-full .right {
   display: grid;
-  grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr);
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
   grid-template-areas:
     'bar bar'
-    'ttl ttl'
-    'pv  act'
-    'pv  info';
+    'main side';
   gap: 10px;
+  align-items: start;
+  min-height: 0;
 }
+.wrap.det-half .bridge-bar,
 .wrap.det-full .bridge-bar {
   grid-area: bar;
 }
-.wrap.det-full .dtitle {
-  grid-area: ttl;
+.wrap.det-half .col-main,
+.wrap.det-full .col-main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
 }
-.wrap.det-full :deep(.pv-card) {
-  grid-area: pv;
-  min-height: 0;
+.wrap.det-half .col-side,
+.wrap.det-full .col-side {
+  grid-area: side;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
 }
-.wrap.det-full .act-card {
-  grid-area: act;
+/* 窄栏：两列包装层不参与布局，按 order 排成单列（操作在最上、描述在最下） */
+.wrap.det-narrow .col-main,
+.wrap.det-narrow .col-side {
+  display: contents;
 }
-.wrap.det-full :deep(.desc-card) {
-  grid-area: info;
-  min-height: 0;
-  overflow: auto;
-}
+.wrap.det-narrow .bridge-bar { order: 0; }
+.wrap.det-narrow .act-card { order: 1; }
+.wrap.det-narrow :deep(.pv-card) { order: 2; }
+.wrap.det-narrow .desc-card { order: 3; }
+.wrap.det-narrow .descbox-card { order: 4; }
+/* 展开后图片填满可用空间（等比，不裁切不拉伸） */
+.wrap.det-half :deep(.pv-card .n-card__content),
 .wrap.det-full :deep(.pv-card .n-card__content) {
   min-height: 0;
 }
+.wrap.det-half :deep(.preview) {
+  flex: 1 1 auto;
+  min-height: 40vh;
+}
 .wrap.det-full :deep(.preview) {
   flex: 1 1 auto;
-  min-height: 30vh;
+  min-height: 48vh;
 }
+.wrap.det-half :deep(.preview .n-image),
 .wrap.det-full :deep(.preview .n-image),
+.wrap.det-half :deep(.preview .pv-img),
 .wrap.det-full :deep(.preview .pv-img) {
   width: 100%;
   height: 100%;
 }
+.wrap.det-half :deep(.preview img),
 .wrap.det-full :deep(.preview img) {
   width: 100%;
   height: 100%;
@@ -1560,7 +1772,18 @@ async function copyPath() {
   max-height: none;
   object-fit: contain;
 }
-/* 展开时的标题条：照 XMA 的大标题 + 版本 / 分类 by 作者 + 站点链接 */
+/* 主按钮整行突出（对应 XMA 那颗大 Download Mod） */
+.wrap.det-half .opgrid .opmain,
+.wrap.det-full .opgrid .opmain {
+  grid-column: 1 / -1;
+}
+/* 侧栏窄 → 其余动作改单列堆叠（XMA 侧栏就是竖着排的） */
+.wrap.det-half .opgrid,
+.wrap.det-full .opgrid {
+  grid-template-columns: 1fr;
+}
+
+/* ---- ① 标题条 ---- */
 .dtitle {
   flex: 0 0 auto;
   padding: 10px 14px;
@@ -1603,16 +1826,210 @@ async function copyPath() {
 .dtitle .r2 .grow {
   flex: 1 1 auto;
 }
-/* 窗口不够宽：全屏也退回单列，整列滚动 */
+.dtitle .r2 .badge {
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: rgba(128, 128, 128, 0.22);
+}
+
+/* ---- ② 大图轮播：‹ › 切图 + 右下角计数 ---- */
+.preview {
+  position: relative;
+}
+.navbtn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 48px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+.navbtn:hover {
+  opacity: 0.95;
+}
+.navbtn.prev {
+  left: 6px;
+}
+.navbtn.next {
+  right: 6px;
+}
+.navcnt {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
+
+/* ---- ③ 描述 / 文件 / 历史 ---- */
+.descbox-card {
+  flex: 0 0 auto;
+}
+.desctext {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 13px;
+}
+.descempty {
+  font-size: 12.5px;
+  opacity: 0.55;
+  line-height: 1.65;
+}
+.flist {
+  display: flex;
+  flex-direction: column;
+}
+.frow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 12.5px;
+  border-bottom: 1px dashed rgba(128, 128, 128, 0.18);
+}
+.frow:last-child {
+  border-bottom: 0;
+}
+.fname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fsize,
+.ftime {
+  flex: 0 0 auto;
+  opacity: 0.6;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.ftime {
+  min-width: 92px;
+  text-align: right;
+}
+.ftotal {
+  margin-top: 6px;
+  font-size: 11.5px;
+  opacity: 0.6;
+}
+.hrow {
+  padding: 5px 2px;
+  border-bottom: 1px dashed rgba(128, 128, 128, 0.18);
+}
+.hrow:last-child {
+  border-bottom: 0;
+}
+.hline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.hline b {
+  font-weight: 600;
+}
+.hnotes {
+  margin-top: 3px;
+  font-size: 12px;
+  opacity: 0.72;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+/* ---- ④ 操作区：作者行 + 统计格 ---- */
+/* 窄栏里把三格压成一行，别让它把操作卡撑高 */
+.stats.compact {
+  display: flex;
+  gap: 0;
+  justify-content: flex-start;
+  align-items: center;
+  margin-top: 7px;
+}
+.stats.compact .st {
+  border: 0;
+  padding: 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 3px;
+}
+.stats.compact .st + .st::before {
+  content: '·';
+  margin: 0 7px 0 4px;
+  opacity: 0.45;
+}
+.who {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+.who .ava {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(128, 128, 128, 0.22);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.who .wname {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 9px;
+}
+.stats .st {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 5px 2px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 6px;
+}
+.stats .st b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.stats .st span {
+  font-size: 10.5px;
+  opacity: 0.6;
+}
+/* 窗口不够宽：展开时两列并排不下 → 退回单列 */
 @media (max-width: 1320px) {
+  .wrap.det-half .right,
   .wrap.det-full .right {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto;
-    grid-template-areas: 'bar' 'ttl' 'pv' 'act' 'info';
+    grid-template-areas: 'bar' 'main' 'side';
     overflow: auto;
   }
-  .wrap.det-full :deep(.desc-card) {
-    overflow: visible;
+  .wrap.det-half .opgrid,
+  .wrap.det-full .opgrid {
+    grid-template-columns: 1fr 1fr;
   }
 }
 

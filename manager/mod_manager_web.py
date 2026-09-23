@@ -971,6 +971,10 @@ def record_site_update(cfg, target, addr):
         if row is not None:
             st.set_site_info(row["folder"], updated=info["updated"], latest=info["updated"],
                              version=info.get("version") or "", checked=now_str(), avail=0)
+            if info.get("meta_ok"):
+                st.set_site_meta(row["folder"], races=info.get("races") or "",
+                                 genders=info.get("genders") or "",
+                                 released=info.get("released") or "")
         st.cx.close()
         return info
     except Exception as e:
@@ -1160,6 +1164,10 @@ def _job_update_check(job: Job):
         if info.get("meta_ok"):
             got_tags = st2.set_tags(m["folder"], info.get("tags") or [])
             got_aff = st2.set_affects(m["folder"], info.get("affects") or "")
+            # 顺手把站点上的 种族 / 性别 / 首发日期 也记下来（详情右栏要用）
+            st2.set_site_meta(m["folder"], races=info.get("races") or "",
+                              genders=info.get("genders") or "",
+                              released=info.get("released") or "")
         st2.cx.close()
         item = {"folder": m["folder"], "rel": m.get("rel") or "", "name": m["name"],
                 "local": base, "latest": latest, "ref": ref,
@@ -1399,6 +1407,12 @@ def api_mods():
             "ih": (m.get("img_hash") or "")[:16],
             "tags": tag_map.get(m["folder"], []),
             "affects": m.get("affects") or "",
+            "payload_size": _payload_stat(m["folder"])[0],
+            "payload_files": _payload_stat(m["folder"])[1],
+            "races": m.get("races") or "",
+            "genders": m.get("genders") or "",
+            "released": m.get("released") or "",
+            "desc": m.get("desc") or "",
             "site_updated": m.get("site_updated") or "",     # 本地这份的站点更新时间（基线）
             "site_latest": m.get("site_latest") or "",       # 最近一次检查看到的站点值
             "site_version": m.get("site_version") or "",
@@ -1444,6 +1458,90 @@ def api_mod_set_affects(b):
     mod_index(force=True)
     mm.log("设置影响/替换：%s -> %s" % (Path(folder).name, got or "（空）"))
     return {"ok": True, "folder": folder, "affects": got}
+
+
+def _payload_stat(folder) -> tuple:
+    """Mod 载荷大小 / 文件数（只算 pmp/ttmp2/zip 这类，图片和 地址.txt 不算）——XMA 侧栏也显示这个"""
+    try:
+        size, n = 0, 0
+        for e in Path(folder).iterdir():
+            if e.is_file() and e.suffix.lower() in (".pmp", ".ttmp2", ".pcp", ".zip", ".7z", ".rar"):
+                size += e.stat().st_size
+                n += 1
+        return size, n
+    except Exception:
+        return 0, 0
+
+
+def api_mod_set_desc(b):
+    """写某条 Mod 的「内容描述」（空串 = 清空）"""
+    folder = str(b.get("folder") or "")
+    if not folder:
+        raise SystemExit("缺少 folder")
+    st = mm.Store()
+    got = st.set_desc(folder, b.get("desc"))
+    st.cx.close()
+    mod_index(force=True)
+    mm.log("设置内容描述：%s（%d 字）" % (Path(folder).name, len(got)))
+    return {"ok": True, "folder": folder, "desc": got}
+
+
+def api_mod_set_site_meta(b):
+    """设置某条 Mod 的「种族 / 性别」（字段缺省 = 不动这一项，空串 = 清空）"""
+    folder = str(b.get("folder") or "")
+    if not folder:
+        raise SystemExit("缺少 folder")
+    st = mm.Store()
+    got = st.set_site_meta(folder,
+                           races=None if b.get("races") is None else str(b.get("races")),
+                           genders=None if b.get("genders") is None else str(b.get("genders")))
+    st.cx.close()
+    mod_index(force=True)
+    mm.log("设置种族/性别：%s -> %s" % (Path(folder).name, got))
+    return {"ok": True, "folder": folder, **got}
+
+
+def api_mod_files(q):
+    """列出某条 Mod 文件夹里的文件（详情「文件」页签用）"""
+    folder = (q.get("folder") or [""])[0]
+    if not folder:
+        raise SystemExit("缺少 folder")
+    p = Path(folder)
+    if not p.is_dir():
+        raise SystemExit("文件夹不存在：%s" % folder)
+    items, total = [], 0
+    for e in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+        try:
+            stt = e.stat()
+        except OSError:
+            continue
+        size = stt.st_size if e.is_file() else 0
+        total += size
+        items.append({"name": e.name, "dir": e.is_dir(), "size": size,
+                      "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(stt.st_mtime))})
+    return {"ok": True, "folder": folder, "items": items, "count": len(items), "total": total}
+
+
+def api_mod_history(q):
+    """读站点版本历史（详情「历史」页签，点开才读，不占后台任务）"""
+    folder = (q.get("folder") or [""])[0]
+    if not folder:
+        raise SystemExit("缺少 folder")
+    st = mm.Store()
+    row = st.cx.execute("SELECT addr FROM mods WHERE folder=?", (str(folder),)).fetchone()
+    st.cx.close()
+    addr = (row["addr"] if row else "") or ""
+    if not addr:
+        return {"ok": False, "items": [], "error": "这条 Mod 没有站点地址，读不到版本历史"}
+    cfg = cfg_now()
+    ck = ""
+    try:
+        ck = _browser_cookie_header(cfg)
+    except Exception:
+        pass
+    info = mm.fetch_history(cfg, addr, cookies=ck)
+    return {"ok": bool(info.get("ok")), "items": info.get("items") or [],
+            "error": info.get("error") or "", "addr": addr, "modid": info.get("modid") or ""}
 
 
 def api_mod_set_tags(b):
@@ -2534,6 +2632,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_tags())
                 if u.path == "/api/affects":
                     return self._json(api_affects())
+                if u.path == "/api/mod/files":
+                    return self._json(api_mod_files(q))
+                if u.path == "/api/mod/history":
+                    return self._json(api_mod_history(q))
                 if u.path == "/api/bridge/requests":
                     return self._json(api_bridge_requests())
                 if u.path == "/api/images":
@@ -2628,6 +2730,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api_mod_set_tags(body))
             if u.path == "/api/mod/affects":
                 return self._json(api_mod_set_affects(body))
+            if u.path == "/api/mod/desc":
+                return self._json(api_mod_set_desc(body))
+            if u.path == "/api/mod/site-meta":
+                return self._json(api_mod_set_site_meta(body))
             if u.path == "/api/mod/tags/add":
                 return self._json(api_mod_add_tags(body))
             if u.path == "/api/mod/tags/remove":

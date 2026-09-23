@@ -132,6 +132,11 @@ CREATE TABLE IF NOT EXISTS mods (
     file_size   INTEGER,
     updated_at  TEXT,
     affects     TEXT,
+    -- ---- 站点元信息 / 本地描述（2026-09 加）----
+    races       TEXT,         -- 站点上的 Races（种族）
+    genders     TEXT,         -- 站点上的 Genders（性别）
+    released    TEXT,         -- 站点上的 Original Release Date（首发日期）
+    desc        TEXT,         -- Mod 内容描述（站点有就带过来，也能自己编）
     -- ---- 「检查更新」用（2026-09 加）----
     site_updated TEXT,        -- 站点上 Last Version Update（= 我们这次下载/更新时的版本时间，基线）
     site_latest  TEXT,        -- 最近一次检查时站点上的最后更新时间
@@ -1175,12 +1180,14 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
     顺序：**先读页面**（Tags、Affects / Replaces、Last Version Update 都在这上面），
     再问一次版本历史接口补充版本号与更新说明（读不到也无所谓）。
 
-    返回 {ok, meta_ok, modid, updated, version, patch, tags, affects, source, error}
+    返回 {ok, meta_ok, modid, updated, version, patch, tags, affects, races, genders,
+          released, history, source, error}
       meta_ok=True 表示页面上那两块元信息是**可靠读到的** → 调用方可以拿它覆盖本地标签/影响替换；
       False（只有接口读通）时**不要**动本地那两项，免得把主人填的值清空。
     """
     out = {"ok": False, "meta_ok": False, "modid": "", "updated": "", "version": "",
-           "patch": "", "tags": [], "affects": "", "source": "", "error": ""}
+           "patch": "", "tags": [], "affects": "", "races": "", "genders": "",
+           "released": "", "history": [], "source": "", "error": ""}
     if "heliosphere" in str(addr or ""):
         return fetch_helio_update(cfg, addr, cookies)
     m = re.search(r"/modid/(\d+)", str(addr or ""))
@@ -1196,6 +1203,9 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
         if meta["ok"] or meta["last_update"]:
             out["tags"] = meta["tags"]
             out["affects"] = meta["affects"]
+            out["races"] = meta.get("races") or ""
+            out["genders"] = meta.get("genders") or ""
+            out["released"] = meta.get("first_release") or ""
             out["meta_ok"] = meta["ok"]
             out["updated"] = meta["last_update"] or meta["first_release"]
             out["source"] = "page"
@@ -1209,6 +1219,12 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
                                  % out["modid"], cookies).decode("utf-8", "replace") or "{}")
         hist = j.get("version_history") or []
         if hist:
+            out["history"] = [{"version": str(h.get("version_new") or ""),
+                               "prev": str(h.get("version_previous") or ""),
+                               "time": _dt.datetime.fromtimestamp(int(h["timestamp"]) / 1000
+                                     ).strftime("%Y-%m-%d %H:%M:%S") if str(h.get("timestamp") or "").isdigit() else "",
+                               "notes": str(h.get("patch_notes") or "")[:600]}
+                              for h in sorted(hist, key=lambda h: -int(h.get("timestamp") or 0))][:30]
             last = max(hist, key=lambda h: int(h.get("timestamp") or 0))
             out["version"] = str(last.get("version_new") or "")
             out["patch"] = str(last.get("patch_notes") or "")[:400]
@@ -1226,6 +1242,39 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
                             "XIVModArchive 就能读能更新")
         else:
             out["error"] = "；".join(errs) or "读不到站点信息"
+    return out
+
+
+def fetch_history(cfg, addr, cookies="") -> dict:
+    """读站点的**版本历史**（XMA 的 update_history 接口），给详情里的「历史」页签用。
+
+    返回 {ok, modid, items: [{version, prev, time, notes}], error}
+    items 按时间倒序。读不到就把原因放 error（NSFW 未登录会 403，界面据此提示去登录）。
+    """
+    out = {"ok": False, "modid": "", "items": [], "error": ""}
+    a = str(addr or "").strip()
+    if "heliosphere" in a:
+        info = fetch_helio_update(cfg, a, cookies)
+        if info.get("ok"):
+            out["ok"] = True
+            out["items"] = [{"version": info.get("version") or "", "prev": "",
+                             "time": info.get("updated") or "", "notes": ""}]
+        else:
+            out["error"] = info.get("error") or "heliosphere 读不到版本历史"
+        return out
+    m = re.search(r"/modid/(\d+)", a)
+    if not m:
+        out["error"] = "这条 Mod 没有站点地址（缺 modid）"
+        return out
+    out["modid"] = m.group(1)
+    try:
+        info = fetch_site_update(cfg, a, cookies)
+        out["items"] = info.get("history") or []
+        out["ok"] = bool(out["items"])
+        if not out["ok"]:
+            out["error"] = info.get("error") or "站点上没有版本历史（只有一条首发记录）"
+    except Exception as e:
+        out["error"] = str(e)[:120]
     return out
 
 
@@ -1893,7 +1942,8 @@ class Store:
         have = {r["name"] for r in self.cx.execute("PRAGMA table_info(mods)")}
         for col, typ in (("img_source", "TEXT"), ("subcat", "TEXT"), ("affects", "TEXT"),
                          ("site_updated", "TEXT"), ("site_latest", "TEXT"), ("site_version", "TEXT"),
-                         ("site_checked", "TEXT"), ("update_avail", "INTEGER")):
+                         ("site_checked", "TEXT"), ("update_avail", "INTEGER"),
+                         ("races", "TEXT"), ("genders", "TEXT"), ("released", "TEXT"), ("desc", "TEXT")):
             if col not in have:
                 self.cx.execute("ALTER TABLE mods ADD COLUMN %s %s" % (col, typ))
         self.cx.commit()
@@ -1990,6 +2040,24 @@ class Store:
                             [v for _, v in sets] + [str(folder)])
             self.cx.commit()
         return dict(sets)
+
+    def set_site_meta(self, folder, races=None, genders=None, released=None) -> dict:
+        """写站点元信息：种族 / 性别 / 首发日期（None = 这一项不动）"""
+        pairs = (("races", races), ("genders", genders), ("released", released))
+        sets = [(c, v) for c, v in pairs if v is not None]
+        if sets:
+            self.cx.execute("UPDATE mods SET %s WHERE folder=?"
+                            % ", ".join("%s=?" % c for c, _ in sets),
+                            [v for _, v in sets] + [str(folder)])
+            self.cx.commit()
+        return dict(sets)
+
+    def set_desc(self, folder, text) -> str:
+        """写「内容描述」（空串 = 清空）"""
+        val = str(text or "").strip()
+        self.cx.execute("UPDATE mods SET desc=? WHERE folder=?", (val, str(folder)))
+        self.cx.commit()
+        return val
 
     def affects_all(self) -> list:
         """已有取值 + 条数（给界面做建议/筛选）"""
