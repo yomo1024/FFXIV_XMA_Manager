@@ -1430,7 +1430,12 @@ def _ensure_payload_for_install(cfg, folder) -> str:
 
     返回可以交给插件的包路径（本地原有 → 直接用；云端取回 → 返回暂存目录里那个）。
     """
-    pkg = _bridge_find_package(folder)
+    # 注意：_bridge_find_package 在「文件夹里没有可安装的包」时是**抛 SystemExit**，不是返回 None ——
+    # 一开始没接住它，导致归档后的 Mod 点「安装到游戏」直接报「没有包」，永远走不到自动取回（踩过）。
+    try:
+        pkg = _bridge_find_package(folder)
+    except SystemExit:
+        pkg = None
     if pkg:
         return str(pkg)
     st = mm.Store()
@@ -1446,7 +1451,10 @@ def _ensure_payload_for_install(cfg, folder) -> str:
     r = _cloud_restore_files(cfg, folder, rows, dest_root=dest)
     if not r["ok"]:
         raise SystemExit("从云端取回失败：%s" % (r["failed"][0].get("why") if r["failed"] else "未知原因"))
-    pkg2 = _bridge_find_package(dest)
+    try:
+        pkg2 = _bridge_find_package(dest)
+    except SystemExit as e:
+        raise SystemExit("云端取回了文件，但里面没有 .pmp/.zip 这种能直接装的包（%s）" % str(e)[:120])
     if not pkg2:
         raise SystemExit("取回成功但没在暂存目录里找到可安装的包：%s" % dest)
     return str(pkg2)
