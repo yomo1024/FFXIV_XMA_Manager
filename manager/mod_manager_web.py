@@ -876,6 +876,30 @@ def save_upload(files) -> str:
     return str(dest)
 
 
+def _merge_site(a, b):
+    """把 b 读到的东西并进 a（b 优先，但别丢掉 a 已经拿到的）"""
+    if not isinstance(a, dict):
+        return b or {}
+    if not isinstance(b, dict):
+        return a
+    out = dict(a)
+    for k in ("updated", "version", "patch", "modid"):
+        if not out.get(k) and b.get(k):
+            out[k] = b[k]
+    if b.get("tags"):
+        out["tags"] = b["tags"]
+    if b.get("affects"):
+        out["affects"] = b["affects"]
+    if b.get("meta_ok"):
+        out["meta_ok"] = True
+    if b.get("ok"):
+        out["ok"] = True
+        out["error"] = ""
+    if b.get("source"):
+        out["source"] = ((out.get("source") or "") + "+" + b["source"]).strip("+")
+    return out
+
+
 def _site_info(cfg, addr):
     """读站点更新信息，三级兜底：
 
@@ -885,15 +909,17 @@ def _site_info(cfg, addr):
        纯 HTTP 请求带 cookie 也照样 403，只有真浏览器能过
     """
     info = mm.fetch_site_update(cfg, addr)
-    if info.get("ok"):
+    # 只有「有更新时间 **且** 页面元信息（标签/影响替换）也读到」才算完事；
+    # 只从版本接口拿到时间的话，还得继续想办法读页面 —— 否则标签/影响替换补不上
+    if info.get("ok") and info.get("meta_ok"):
         return info
     try:
         ck = _browser_cookie_header(cfg)
         if ck:
             info2 = mm.fetch_site_update(cfg, addr, cookies=ck)
-            if info2.get("ok"):
-                info2["source"] = (info2.get("source") or "") + "+cookie"
-                return info2
+            info = _merge_site(info, info2)
+            if info.get("ok") and info.get("meta_ok"):
+                return info
     except Exception:
         pass
     page = str(addr or "").strip()
@@ -905,10 +931,15 @@ def _site_info(cfg, addr):
         mm.browser_wait_ready(cfg, timeout=45)
         got = mm.browser_capture(cfg)
         iso = got.get("lastUpdate_iso") or got.get("firstRelease_iso") or ""
-        if iso:
+        tags = mm.norm_tags(got.get("tags") or [])
+        aff = mm.norm_affects(got.get("affects") or "")
+        if iso or tags or aff:
             out = dict(info)
             out.update({"ok": True, "updated": iso, "source": "browser", "error": "",
                         "modid": got.get("modid") or info.get("modid") or ""})
+            if tags or aff:          # 页面读到了这两块 → 调用方可以覆盖本地值
+                out.update({"tags": tags, "affects": aff, "meta_ok": True})
+            info = _merge_site(info, out)
             try:      # 页面里同源问一次版本历史（cf_clearance 已就绪，能问到版本号/更新说明）
                 raw2 = mm.browser_eval(
                     cfg, "fetch('/api/mod/update_history?modid=%s').then(r=>r.text())" % out["modid"],
@@ -1122,11 +1153,18 @@ def _job_update_check(job: Job):
         st2 = mm.Store()
         st2.set_site_info(m["folder"], latest=latest, version=info.get("version") or "",
                           checked=now_str(), avail=avail)
+        # 主人定的规则：**以站点为准**刷新「标签」和「影响/替换」（会覆盖本地手改值）。
+        # 只有页面可靠读到这两块（meta_ok）才写 —— 只从版本接口拿到时间时才不动它们，
+        # 免得把本地值清空。
+        got_tags, got_aff = None, None
+        if info.get("meta_ok"):
+            got_tags = st2.set_tags(m["folder"], info.get("tags") or [])
+            got_aff = st2.set_affects(m["folder"], info.get("affects") or "")
         st2.cx.close()
         item = {"folder": m["folder"], "rel": m.get("rel") or "", "name": m["name"],
                 "local": base, "latest": latest, "ref": ref,
                 "version": info.get("version") or "", "patch": info.get("patch") or "",
-                "avail": bool(avail)}
+                "avail": bool(avail), "tags": got_tags, "affects": got_aff}
         if avail:
             has.append(item)
         else:
@@ -1179,11 +1217,16 @@ def _job_mod_update(job: Job):
                               latest=info.get("updated") or "",
                               version=info.get("version") or "",
                               checked=now_str(), avail=0)
+            new_tags, new_aff = None, None
+            if info.get("meta_ok"):      # 同规则：更新时也以站点为准刷新标签/影响替换
+                new_tags = st2.set_tags(folder, info.get("tags") or [])
+                new_aff = st2.set_affects(folder, info.get("affects") or "")
             st2.cx.close()
             done.append({"folder": folder, "name": m["name"], "removed": rep["removed"],
                          "added": rep["added"], "kept": rep["kept"],
                          "updated": info.get("updated") or "", "version": info.get("version") or "",
-                         "patch": info.get("patch") or ""})
+                         "patch": info.get("patch") or "",
+                         "tags": new_tags, "affects": new_aff})
         except Exception as e:
             mm.log("更新失败 %s：%s" % (m["name"][:40], e))
             failed.append("%s：%s" % (m["name"], str(e)[:140]))

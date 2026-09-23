@@ -44,6 +44,7 @@ import traceback
 import urllib.parse
 import urllib.request
 import zipfile
+from html import unescape
 from pathlib import Path
 
 from app_version import APP_VERSION                 # 版本号唯一来源（同目录 app_version.py）
@@ -1083,8 +1084,8 @@ def fetch_helio_update(cfg, addr, cookies="") -> dict:
     注意：它的「下载」是页面上的按钮（点了才调接口，接口没公开），所以这里只做版本检测，
     更新要靠「打开页面手动下载 → 上传新文件替换」。
     """
-    out = {"ok": False, "modid": "", "updated": "", "version": "", "patch": "",
-           "source": "", "error": "", "kind": "helio"}
+    out = {"ok": False, "meta_ok": False, "modid": "", "updated": "", "version": "",
+           "patch": "", "tags": [], "affects": "", "source": "", "error": "", "kind": "helio"}
     m = re.search(r"/mod/([A-Za-z0-9]+)", str(addr or ""))
     if not m:
         out["error"] = "不是 heliosphere 的 Mod 链接"
@@ -1100,6 +1101,15 @@ def fetch_helio_update(cfg, addr, cookies="") -> dict:
     v = re.search(r'"version"\s*:\s*"([^"]+)"', flat)
     up = re.search(r'"updatedAt"\s*:\s*"([^"]+)"', flat)
     rel = re.search(r'"releasedAt"\s*:\s*"([^"]+)"', flat)
+    tgs = re.findall(r'\{"category":(?:true|false),"slug":"([^"]+)"', flat)
+    aff = re.search(r'"affects"\s*:\s*\[([^\]]*)\]', flat)
+    if tgs:
+        out["tags"] = [x.strip() for x in dict.fromkeys(tgs) if x.strip()][:30]
+        out["meta_ok"] = True
+    if aff is not None:
+        items = [unescape(x).strip() for x in re.findall(r'"([^"]*)"', aff.group(1))]
+        out["affects"] = ", ".join(x for x in items if x)
+        out["meta_ok"] = True
     dl = re.search(r'"downloadSize"\s*:\s*(\d+)', flat)
     if v:
         out["version"] = v.group(1)
@@ -1127,15 +1137,50 @@ def _site_get(url, cookies="", timeout=25) -> bytes:
         return r.read()
 
 
-def fetch_site_update(cfg, addr, cookies="") -> dict:
-    """读站点上这条 Mod 的「最后更新时间 / 最新版本 / 更新说明」。
+def parse_page_meta(html: str) -> dict:
+    """从 Mod 页 HTML 里解析元信息：Tags / Affects-Replaces / Races / Genders / 更新时间。
 
-    ① /api/mod/update_history → 时间戳精确、还带版本号和更新说明（作者有升版本时最准）
-    ② 页面 mod-meta-block 里的 `Last Version Update` → 兜底（没版本历史的 Mod 也有这一栏）
-    返回 {ok, modid, updated, version, patch, source, error}
+    匿名与登录态的标记不一样（登录态每栏是 `<div class="mod-meta-block">标题 : <br><code>值</code>`
+    且值是链接；匿名态是纯文本），统一做法：每个 meta 块**先去标签压空白**，再按「标题 : 值」切。
     """
-    out = {"ok": False, "modid": "", "updated": "", "version": "", "patch": "",
-           "source": "", "error": ""}
+    out = {"ok": False, "tags": [], "affects": "", "races": "", "genders": "",
+           "last_update": "", "first_release": ""}
+    for m in re.finditer(r'<div[^>]*class="[^"]*mod-meta-block[^"]*"[^>]*>([\s\S]*?)</div>', html or ""):
+        txt = re.sub(r"<[^>]+>", " ", m.group(1))
+        txt = unescape(re.sub(r"\s+", " ", txt)).strip()
+        mo = re.match(r"^([A-Za-z][A-Za-z /]*?)\s*:\s*(.*)$", txt)
+        if not mo:
+            continue
+        key, val = mo.group(1).strip().lower(), mo.group(2).strip()
+        if key.startswith("tags"):
+            out["tags"] = [x.strip() for x in re.split(r"[,、]", val) if x.strip()]
+            out["ok"] = True
+        elif key.startswith("affects"):
+            out["affects"] = val.strip().strip(",;")
+            out["ok"] = True
+        elif key.startswith("races"):
+            out["races"] = val
+        elif key.startswith("genders"):
+            out["genders"] = val
+        elif key.startswith("last version update"):
+            out["last_update"] = site_time_iso(val)
+        elif key.startswith("original release date"):
+            out["first_release"] = site_time_iso(val)
+    return out
+
+
+def fetch_site_update(cfg, addr, cookies="") -> dict:
+    """读站点上这条 Mod 的「最后更新时间 / 最新版本 / 更新说明 / 标签 / 影响替换」。
+
+    顺序：**先读页面**（Tags、Affects / Replaces、Last Version Update 都在这上面），
+    再问一次版本历史接口补充版本号与更新说明（读不到也无所谓）。
+
+    返回 {ok, meta_ok, modid, updated, version, patch, tags, affects, source, error}
+      meta_ok=True 表示页面上那两块元信息是**可靠读到的** → 调用方可以拿它覆盖本地标签/影响替换；
+      False（只有接口读通）时**不要**动本地那两项，免得把主人填的值清空。
+    """
+    out = {"ok": False, "meta_ok": False, "modid": "", "updated": "", "version": "",
+           "patch": "", "tags": [], "affects": "", "source": "", "error": ""}
     if "heliosphere" in str(addr or ""):
         return fetch_helio_update(cfg, addr, cookies)
     m = re.search(r"/modid/(\d+)", str(addr or ""))
@@ -1146,40 +1191,41 @@ def fetch_site_update(cfg, addr, cookies="") -> dict:
     page = "https://www.xivmodarchive.com/modid/%s" % out["modid"]
     errs = []
     try:
+        html = _site_get(page, cookies).decode("utf-8", "replace")
+        meta = parse_page_meta(html)
+        if meta["ok"] or meta["last_update"]:
+            out["tags"] = meta["tags"]
+            out["affects"] = meta["affects"]
+            out["meta_ok"] = meta["ok"]
+            out["updated"] = meta["last_update"] or meta["first_release"]
+            out["source"] = "page"
+            out["ok"] = True
+        else:
+            errs.append("页面里没找到「Last Version Update」")
+    except Exception as e:
+        errs.append("页面：%s" % str(e)[:60])
+    try:                      # 版本号 / 更新说明（有版本历史才有；读不到不影响上面的结果）
         j = json.loads(_site_get("https://www.xivmodarchive.com/api/mod/update_history?modid=%s"
                                  % out["modid"], cookies).decode("utf-8", "replace") or "{}")
         hist = j.get("version_history") or []
         if hist:
             last = max(hist, key=lambda h: int(h.get("timestamp") or 0))
-            out["updated"] = _dt.datetime.fromtimestamp(int(last["timestamp"]) / 1000).strftime("%Y-%m-%d %H:%M:%S")
             out["version"] = str(last.get("version_new") or "")
             out["patch"] = str(last.get("patch_notes") or "")[:400]
-            out["source"] = "api"
-            out["ok"] = True
-            return out
+            if not out["updated"]:
+                out["updated"] = _dt.datetime.fromtimestamp(
+                    int(last["timestamp"]) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                out["source"] = "api"
+                out["ok"] = True
     except Exception as e:
-        errs.append("版本接口：%s" % str(e)[:60])
-    api_ok_no_hist = not errs          # 接口读通了、只是这条没有版本历史
-    try:
-        html = _site_get(page, cookies).decode("utf-8", "replace")
-        for m2 in re.finditer(r'<div[^>]*class="[^"]*mod-meta-block[^"]*"[^>]*>([\s\S]*?)</div>', html):
-            txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m2.group(1))).strip()
-            t = re.search(r"Last Version Update\s*:\s*(.+)$", txt, re.I)
-            if t:
-                iso = site_time_iso(t.group(1))
-                if iso:
-                    out["updated"] = iso
-                    out["source"] = "page"
-                    out["ok"] = True
-                    return out
-        errs.append("页面里没找到「Last Version Update」")
-    except Exception as e:
-        if api_ok_no_hist:
-            errs.append("这条没有版本历史，页面又需要登录（多半是 NSFW）："
-                        "到「设置 → 打开内置浏览器」登录一次 XIVModArchive，之后就能查能更新")
+        if not out["ok"]:
+            errs.append("版本接口：%s" % str(e)[:60])
+    if not out["ok"]:
+        if errs and "页面" in errs[0] and "403" in errs[0]:
+            out["error"] = ("页面需要登录（多半是 NSFW）：到「设置 → 打开内置浏览器」登录一次 "
+                            "XIVModArchive 就能读能更新")
         else:
-            errs.append("页面：%s" % str(e)[:60])
-    out["error"] = "；".join(errs)
+            out["error"] = "；".join(errs) or "读不到站点信息"
     return out
 
 
