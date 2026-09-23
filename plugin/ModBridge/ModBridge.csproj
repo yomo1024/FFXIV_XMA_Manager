@@ -1,0 +1,22 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <Version>0.2.6.0</Version>
+    <Author>you</Author>
+    <Name>Mod Bridge</Name>
+    <Punchline>网页点一下，mod 直接装进 Penumbra。</Punchline>
+    <Description>在本机 127.0.0.1 上开一个带 token 鉴权的小 HTTP 服务，接受网页/工具发来的 mod 安装请求：
+下载 mod 包 → 调 Penumbra API 解包装入 → 在集合里启用 → 触发重绘，让 mod 立刻生效。
+用 /modbridge 打开设置窗口查看端口、token 与最近安装记录。</Description>
+    <RepoUrl>https://github.com/you/ModBridge</RepoUrl>
+    <Tags>mods;penumbra;http;bridge</Tags>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 类型化的 Penumbra IPC 订阅器，直接 new Xxx(pi).Invoke(...) 即可 -->
+    <PackageReference Include="Penumbra.Api" Version="5.19.2" />
+  </ItemGroup>
+
+</Project>

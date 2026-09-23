@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "FFXIV Mod 管理器助手",
+  "version": "1.0.0",
+  "description": "在 XIVModArchive 的 Mod 页面上：一键把 Mod 送到本地「FFXIV Mod 管理器」—— 用你自己的浏览器（已登录）下载，管理器自动接住并入库。",
+  "permissions": [
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://www.xivmodarchive.com/*"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.xivmodarchive.com/modid/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "FFXIV Mod 管理器助手"
+  }
+}

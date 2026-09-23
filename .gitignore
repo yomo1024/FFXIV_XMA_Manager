@@ -1,0 +1,40 @@
+# ---- 运行时产物 / 私人数据（千万不要提交）----
+config.json
+mod_manager.json
+mod_manager.db
+mod_manager.log
+*.log
+browser_profile/
+.cover_cache/
+cover_cache/
+cover_cache_draw/
+cover_cache_webp/
+.thumb_cache/
+backup/
+logs/
+dist/
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 可执行文件 / 打包产物 ----
+*.exe
+*.zip
+*.7z
+
+# ---- 前端 ----
+node_modules/
+.vite/
+web-src/*.log
+
+# ---- C# ----
+bin/
+obj/
+*.user
+.vs/
+
+# ---- 系统 ----
+Thumbs.db
+desktop.ini

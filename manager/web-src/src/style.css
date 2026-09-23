@@ -1,0 +1,70 @@
+/* Tailwind：只要主题变量 + 工具类，不要 preflight。
+   （preflight 会把 button/input 的 background 重置成透明，和 Naive UI 打架，
+     暗色模式下就变成“白底浅字”看不见了。） */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* 关键：Tailwind 的 preflight 被我们关掉了，它顺带提供的 box-sizing 得自己补回来。
+   否则所有 height:100% + padding 的元素都会多出 padding 的高度，底部内容被顶出视口
+   （之前右侧详情栏按钮只露出一半就是这个原因）。 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* 基础观感：中文字体、滚动条 */
+:root {
+  font-family: "Microsoft YaHei", "PingFang SC", -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+}
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+body {
+  overflow: hidden;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 150, 0.35);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 130, 150, 0.6);
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cell-thumb {
+  width: 64px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+  background: #f0f1f5;
+}
+
+/* 表头不要在窄列里竖着排（中文表头以前会一个字一行，比如「序号」变成 序/号） */
+.n-data-table-th,
+.n-data-table-th__title,
+.n-data-table-th .n-data-table-th__title {
+  white-space: nowrap !important;
+}
+
+/* 数字列也别折行 */
+.n-data-table-td {
+  overflow-wrap: normal;
+}

@@ -1,0 +1,41 @@
+#ffmm-panel{position:fixed;right:16px;bottom:16px;z-index:2147483000;
+ font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;color:#eee;background:#1f2430;
+ border:1px solid #3a4256;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.45);width:280px}
+#ffmm-panel .mm-head{display:flex;justify-content:space-between;align-items:center;
+ padding:7px 10px;background:#2a3142;border-radius:10px 10px 0 0;font-weight:600;font-size:12px}
+#ffmm-panel .mm-x{cursor:pointer;opacity:.7;padding:0 4px}
+#ffmm-panel .mm-x:hover{opacity:1}
+#ffmm-panel .mm-body{padding:9px 10px}
+#ffmm-panel .mm-name{font-weight:600;word-break:break-all}
+#ffmm-panel .mm-sub{opacity:.7;font-size:12px;margin:2px 0 7px;word-break:break-all}
+#ffmm-panel label{display:flex;align-items:center;gap:6px;margin:5px 0;font-size:12px}
+#ffmm-panel select,#ffmm-panel input{flex:1;min-width:0;background:#171b24;color:#eee;
+ border:1px solid #3a4256;border-radius:6px;padding:3px 6px;font-size:12px}
+#ffmm-panel .mm-tagsrc{font-size:11px;opacity:.65;margin:-2px 0 2px}
+#ffmm-panel button{width:100%;margin-top:7px;padding:7px;border-radius:7px;border:0;cursor:pointer;
+ font:600 12px "Microsoft YaHei",system-ui,sans-serif}
+#ffmm-panel #ffmm-dl{background:#2e7d5b;color:#fff}
+#ffmm-panel #ffmm-dl:disabled{background:#3a4256;color:#98a0b3;cursor:not-allowed}
+#ffmm-panel #ffmm-push{background:transparent;color:#9ecbff;border:1px solid #3a4256}
+#ffmm-panel .mm-status{margin-top:7px;font-size:11.5px;opacity:.85;word-break:break-all;min-height:16px}
+#ffmm-panel.mm-off{opacity:.55}
+/* ---- 队列 ---- */
+#ffmm-panel .mm-queue{margin-top:8px;border-top:1px solid #3a4256;padding-top:6px}
+#ffmm-panel .mm-qhead{display:flex;justify-content:space-between;font-size:11.5px;opacity:.85;margin-bottom:4px}
+#ffmm-panel .mm-qhead a{cursor:pointer;margin-left:8px;color:#9ecbff}
+#ffmm-panel .mm-qhead a:hover{text-decoration:underline}
+#ffmm-panel #ffmm-qlist{max-height:196px;overflow:auto}
+#ffmm-panel .mm-q{padding:5px 0;border-bottom:1px dashed #2c3241}
+#ffmm-panel .mm-q:last-child{border-bottom:0}
+#ffmm-panel .mm-q.ok .mm-qinfo{color:#9ee6b5}
+#ffmm-panel .mm-q.err .mm-qinfo{color:#ff9a9a}
+#ffmm-panel .mm-qrow{display:flex;justify-content:space-between;gap:6px;align-items:center}
+#ffmm-panel .mm-qname{font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#ffmm-panel .mm-qname i{opacity:.55;font-style:normal;font-size:11px}
+#ffmm-panel .mm-qact{cursor:pointer;opacity:.55;font-size:11px;padding:0 2px}
+#ffmm-panel .mm-qact:hover{opacity:1}
+#ffmm-panel .mm-qbar{height:4px;background:#171b24;border-radius:3px;overflow:hidden;margin:4px 0 2px}
+#ffmm-panel .mm-qbar i{display:block;height:100%;background:#2e7d5b;transition:width .3s}
+#ffmm-panel .mm-q.err .mm-qbar i{background:#b1484d}
+#ffmm-panel .mm-qinfo{font-size:10.5px;opacity:.78;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#ffmm-panel .mm-qempty{font-size:11px;opacity:.5}
