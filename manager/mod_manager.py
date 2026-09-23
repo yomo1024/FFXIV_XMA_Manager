@@ -693,7 +693,7 @@ PAGE_INFO_JS = (
     "  var t2=(e.innerText||'').trim();"
     "  var m2=t2.match(/^Tags\\s*:\\s*([\\s\\S]*)$/i);"
     "  if(m2){m2[1].split(',').forEach(function(x){x=x.trim(); if(x&&tags.indexOf(x)<0)tags.push(x);});}});"
-    "var races='',genders='',mtype='',affects='';"
+    "var races='',genders='',mtype='',affects='',lastUp='',firstRel='';"
     "[].slice.call(document.querySelectorAll('.mod-meta-block,div,p,li')).forEach(function(e){"
     "  if(e.children.length>3)return;var t3=(e.innerText||'').trim();var m3;"
     "  if(!races&&(m3=t3.match(/^Races?\\s*:\\s*(.+)$/i)))races=m3[1].trim();"
@@ -701,7 +701,10 @@ PAGE_INFO_JS = (
     "  if(!mtype&&(m3=t3.match(/^Type\\s*:\\s*(.+)$/i)))mtype=m3[1].trim();"
     # XIV Mod Archive 的「Affects / Replaces」：可能是单件"Eerie Tights"，
     # 也可能是多件（逗号/斜杠分隔），原样读回来给用户改
-    "  if(!affects&&(m3=t3.match(/^Affects\\s*\\/\\s*Replaces\\s*:\\s*(.+)$/i)))affects=m3[1].trim();});"
+    "  if(!affects&&(m3=t3.match(/^Affects\\s*\\/\\s*Replaces\\s*:\\s*(.+)$/i)))affects=m3[1].trim();"
+    # 「检查更新」用：NSFW 的 Mod 只有真浏览器读得到页面，所以这两栏也一起带回来
+    "  if(!lastUp&&(m3=t3.match(/^Last Version Update\\s*:\\s*(.+)$/i)))lastUp=m3[1].trim();"
+    "  if(!firstRel&&(m3=t3.match(/^Original Release Date\\s*:\\s*(.+)$/i)))firstRel=m3[1].trim();});"
     "var dlc=[];"
     "links.forEach(function(e){var h2=abs(e.getAttribute('href')||'');"
     "  if(h2&&/\\/files\\/|\\.pmp|\\.ttmp2?|\\.zip|\\.7z/i.test(h2)&&dlc.indexOf(h2)<0)dlc.push(h2);});"
@@ -714,6 +717,7 @@ PAGE_INFO_JS = (
     "name:h1?h1.innerText.trim():'',author:author,cover:img?img.src:'',"
     "dl:dl?abs(href):'',dlRaw:href,dlCands:dlc.slice(0,5),filesTab:filesTab,"
     "tags:tags.slice(0,40),races:races,genders:genders,mtype:mtype,affects:affects,"
+    "lastUpdate:lastUp,firstRelease:firstRel,"
     "login:(location.href.indexOf('/login')>-1)||(low.indexOf('log in')>-1)||(low.indexOf('sign in')>-1),"
     "hidden:(low.indexOf('hidden')>-1)||(low.indexOf('not authorized')>-1)||(low.indexOf('no files')>-1),"
     "ready:document.readyState,body:text};"
@@ -1218,8 +1222,11 @@ def replace_mod_payload(cfg, folder, new_file, mode="same_name", to_recycle=True
 
 
 def browser_capture(cfg) -> dict:
-    """读取当前页面的 网址/名称/作者/封面/下载直链"""
+    """读取当前页面的 网址/名称/作者/封面/下载直链（以及站点上的更新时间）"""
     info = json.loads(browser_eval(cfg, PAGE_INFO_JS) or "{}")
+    for k in ("lastUpdate", "firstRelease"):        # 转成本机时区的标准写法
+        if info.get(k):
+            info[k + "_iso"] = site_time_iso(info[k])
     m = re.search(r"/modid/(\d+)", info.get("url") or "")
     info["modid"] = m.group(1) if m else ""
     info["addr"] = ("https://www.xivmodarchive.com/modid/%s" % m.group(1)) if m else ""

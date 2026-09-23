@@ -877,7 +877,13 @@ def save_upload(files) -> str:
 
 
 def _site_info(cfg, addr):
-    """读站点更新信息：先直连；被挡（NSFW 未登录等）再借内置浏览器的登录态重试。"""
+    """读站点更新信息，三级兜底：
+
+    ① 直连（公开 Mod 就够）
+    ② 借内置浏览器的登录态直连（有些站点认 cookie）
+    ③ **用内置浏览器真读一次页面** —— XIVModArchive 在 Cloudflare 后面，NSFW 那种
+       纯 HTTP 请求带 cookie 也照样 403，只有真浏览器能过
+    """
     info = mm.fetch_site_update(cfg, addr)
     if info.get("ok"):
         return info
@@ -890,6 +896,33 @@ def _site_info(cfg, addr):
                 return info2
     except Exception:
         pass
+    page = str(addr or "").strip()
+    if not page.lower().startswith("http"):
+        return info
+    try:
+        mm.log("直连读不到（%s），改用内置浏览器读页面：%s" % ((info.get("error") or "")[:50], page))
+        mm.browser_goto(cfg, page)          # 已经在运行也导航过去（launch_browser 只负责启动）
+        mm.browser_wait_ready(cfg, timeout=45)
+        got = mm.browser_capture(cfg)
+        iso = got.get("lastUpdate_iso") or got.get("firstRelease_iso") or ""
+        if iso:
+            out = dict(info)
+            out.update({"ok": True, "updated": iso, "source": "browser", "error": "",
+                        "modid": got.get("modid") or info.get("modid") or ""})
+            try:      # 页面里同源问一次版本历史（cf_clearance 已就绪，能问到版本号/更新说明）
+                raw2 = mm.browser_eval(
+                    cfg, "fetch('/api/mod/update_history?modid=%s').then(r=>r.text())" % out["modid"],
+                    await_promise=True, tries=1)
+                hist = (json.loads(raw2 or "{}") or {}).get("version_history") or []
+                if hist:
+                    last = max(hist, key=lambda h: int(h.get("timestamp") or 0))
+                    out["version"] = str(last.get("version_new") or "")
+                    out["patch"] = str(last.get("patch_notes") or "")[:400]
+            except Exception:
+                pass
+            return out
+    except Exception as e:
+        mm.log("借内置浏览器读页面也失败：%s" % str(e)[:100])
     return info
 
 
@@ -1041,7 +1074,7 @@ def _site_download(cfg, addr, inbox, job=None):
         except Exception as e:
             mm.log("直链下载失败（%s），改用内置浏览器" % str(e)[:80])
     try:
-        mm.launch_browser(cfg, page)
+        mm.browser_goto(cfg, page)          # 浏览器已在运行时也要真的导航到这页
         mm.browser_wait_ready(cfg, timeout=60)
         _href, path = mm.browser_download(cfg, inbox, timeout=900, url=page)
         return Path(path), info
