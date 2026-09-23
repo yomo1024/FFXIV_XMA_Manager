@@ -174,6 +174,16 @@ dotnet build -c Release -p:DalamudLibPath=<你的 Dalamud dev 目录>/
 3. 保存 → `/xlplugins` → 找到 **Mod Bridge** → 安装 → 启用
 4. 以后插件更新会自动出现在更新列表里（管理员点「安装到游戏」时会检查版本，插件太旧会明确拦住）
 
+> **拿不到新版本时怎么办**（自定义源有缓存）：
+> · **最稳**：源地址用 **raw** 这条（缓存只有几分钟）：
+>   `https://raw.githubusercontent.com/yomo1024/FFXIV_XMA_Manager/main/pluginmaster.json`
+> · 用 jsDelivr 那条时，它会把分支内容缓存好几个小时。清缓存两招：
+>   ① 访问一次 `https://purge.jsdelivr.net/gh/yomo1024/FFXIV_XMA_Manager@main/pluginmaster.json`
+>     （以及 `.../pluginmaster-cdn.json`）—— 返回 JSON 就是清成功；
+>   ② 或者给地址末尾加 `?v=20260924`（换个 query 就当新资源，立刻拿新版，不用等缓存过期）
+> · 还拿不到：Dalamud `/xlsettings` → Experimental → 自定义插件源里重新粘贴一次地址并刷新；
+>   实在不行把 ModBridge 卸载后重装一次
+
 > 插件包在 `plugin/release/ModBridge-<版本>.zip`；改了插件代码后跑一次
 > `python plugin/pack-release.py <编译输出目录> .` 就会重新打 zip 并刷新 pluginmaster.json。
 
