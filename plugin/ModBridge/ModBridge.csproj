@@ -1,7 +1,7 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
 
   <PropertyGroup>
-    <Version>0.2.10</Version>
+    <Version>0.2.11</Version>
     <Author>yomo1024</Author>
     <Name>Mod Bridge</Name>
     <Punchline>网页点一下，mod 直接装进 Penumbra。</Punchline>

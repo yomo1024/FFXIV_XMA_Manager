@@ -1998,7 +1998,10 @@ class Store:
                          ("site_checked", "TEXT"), ("update_avail", "INTEGER"),
                          ("races", "TEXT"), ("genders", "TEXT"), ("released", "TEXT"), ("desc", "TEXT"),
                          ("cloud_backend", "TEXT"), ("cloud_path", "TEXT"), ("cloud_state", "TEXT"),
-                         ("cloud_size", "INTEGER"), ("cloud_synced", "TEXT"), ("payload_mtime", "REAL")):
+                         ("cloud_size", "INTEGER"), ("cloud_synced", "TEXT"), ("payload_mtime", "REAL"),
+                         # 记住这条 mod 在 Penumbra 里的真实目录名：Penumbra 的目录名由包内
+                         # meta.json 决定，跟库里的名字对不上 → 记一次，以后补封面/同步直接用它
+                         ("installed_dir", "TEXT")):
             if col not in have:
                 self.cx.execute("ALTER TABLE mods ADD COLUMN %s %s" % (col, typ))
         self.cx.commit()
@@ -2127,6 +2130,12 @@ class Store:
                             [v for _, v in sets] + [str(folder)])
             self.cx.commit()
         return dict(sets)
+
+    def set_installed_dir(self, folder, dir_name) -> dict:
+        """记住这条 mod 在 Penumbra 里的目录名（拿名字猜不中时全靠它）"""
+        self.cx.execute("UPDATE mods SET installed_dir=? WHERE folder=?", (str(dir_name or ""), str(folder)))
+        self.cx.commit()
+        return {"installed_dir": str(dir_name or "")}
 
     def set_payload_files(self, folder, items, state="archived") -> int:
         """整批写入载荷清单（items: [{rel_path,size,md5,sha1,cloud_fid}]）"""

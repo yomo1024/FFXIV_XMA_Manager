@@ -278,9 +278,12 @@ public static class Program
         {
             var f = Path.Combine(root, name);
             // 1x1 PNG / 假 jpg 都行，这里只当文件搬运
-            File.WriteAllBytes(f, ext == ".png"
-                ? Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AF/6lwAAAAASUVORK5CYII=")
-                : new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 5 });
+            File.WriteAllBytes(f, ext switch
+            {
+                ".png"  => Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AF/6lwAAAAASUVORK5CYII="),
+                ".webp" => Convert.FromBase64String("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEAAUAmJaQAA3AA/v89WAAAAA=="),  // 1x1 真 WebP
+                _       => new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 5 },
+            });
             return f;
         }
 
@@ -298,48 +301,70 @@ public static class Program
             && meta1["Author"]!.GetValue<string>() == "作者"
             && meta1["FileVersion"]!.GetValue<int>() == 4);
 
-        // a2) 关键那一份：根目录的 cover.webp（用户那个汉化版 Penumbra 认它）
-        Check("写了 cover.webp", File.Exists(Path.Combine(m1, "cover.webp")));
-        Check("cover.webp 内容就是封面原图",
-            File.ReadAllBytes(Path.Combine(m1, "cover.webp")).SequenceEqual(File.ReadAllBytes(cover)));
-        Check("返回里标出 cover.webp", cv1.CoverFile == "cover.webp", cv1.CoverFile);
+        // a2) 没有真 WebP 时**不伪造** cover.webp
+        //     （老逻辑把 png/jpg 改名成 cover.webp → 认 cover.webp 的汉化版 Penumbra 解不出来 = "没图"，
+        //      而且"已有 cover.webp 就跳过"会让之后所有补封面全部失效）
+        Check("IsRealWebp：png 不是 webp", !ModBridge.Http.CoverWriter.IsRealWebp(cover));
+        Check("没给真 WebP → 不写 cover.webp", !File.Exists(Path.Combine(m1, "cover.webp")));
+        Check("改成写 cover.png（真扩展名）",
+            File.Exists(Path.Combine(m1, "cover.png")) && cv1.CoverFile == "cover.png", cv1.CoverFile);
         Check("同时也写了 cover.<ext>（有人按固定名+扩展名找）", File.Exists(Path.Combine(m1, "cover.png")));
         var metaA = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(m1, "meta.json")))!;
         Check("meta.json 的 Image 仍指向 images\\_MetaImage.png",
             metaA["Image"]!.GetValue<string>() == "images\\_MetaImage.png");
 
         // a3) 管理器转好了真 WebP → cover.webp 用那一份
-        var webpSrc = MakeImg("real.webp", ".jpg");   // 内容随便，只看搬运
+        var webpSrc = MakeImg("real.webp", ".webp");   // ★ 真 WebP（假 webp 现在会被拒）
         var mW = MakeMod("mw", "{\"Name\":\"webp\"}");
         var cvW = ModBridge.Http.CoverWriter.Apply(mW, jpgLater(), webpSrc);
         Check("给了 coverWebpPath → cover.webp 用它",
             cvW.Ok && cvW.CoverFile == "cover.webp"
             && File.ReadAllBytes(Path.Combine(mW, "cover.webp")).SequenceEqual(File.ReadAllBytes(webpSrc)), cvW.Error);
 
-        // a4) 已经有 cover.webp（Heliosphere 给的）→ 跳过、不改原图
-        var mHW = MakeMod("mhw", "{\"Name\":\"已有 cover.webp\"}");
+        // a4) 已有 cover.webp 但是**伪装的**（内容不是 WebP）→ 不能再无脑跳过（那正是"补了也没用"的死锁）
+        var mHW = MakeMod("mhw", "{\"Name\":\"假 cover.webp\"}");
         File.WriteAllBytes(Path.Combine(mHW, "cover.webp"), new byte[] { 9, 9, 9 });
         var cvHW = ModBridge.Http.CoverWriter.Apply(mHW, cover);
-        Check("已有 cover.webp → 跳过（不覆盖 Heliosphere 的图）",
-            cvHW.Skipped && cvHW.CoverFile == "cover.webp", cvHW.CoverFile);
-        Check("原 cover.webp 没被改",
-            File.ReadAllBytes(Path.Combine(mHW, "cover.webp")).SequenceEqual(new byte[] { 9, 9, 9 }));
-        Check("跳过后没写 images\\_MetaImage",
-            !File.Exists(Path.Combine(mHW, "images", "_MetaImage.png")));
+        Check("伪 cover.webp 不再被当有效封面跳过", cvHW.Ok && !cvHW.Skipped, cvHW.Error);
+        Check("会明确报出来（Note）", !string.IsNullOrWhiteSpace(cvHW.Note), cvHW.Note);
+        Check("照样补上 images\\_MetaImage.png", File.Exists(Path.Combine(mHW, "images", "_MetaImage.png")));
 
-        // a4b) 没人给封面、文件夹里已有一个 cover.jpg（Penumbra 导入包时就是这样）→ 自己补出 cover.webp
+        // a4b) 给了真 WebP → 把伪装的那份**替换修好**（主人现场那批 mod 就靠这条修）
+        var mFix = MakeMod("mfix", "{\"Name\":\"修好它\"}");
+        File.WriteAllBytes(Path.Combine(mFix, "cover.webp"), new byte[] { 9, 9, 9 });
+        var cvFix = ModBridge.Http.CoverWriter.Apply(mFix, cover, webpSrc);
+        Check("真 WebP 来了 → 伪 cover.webp 被替换成真 WebP",
+            cvFix.Ok && File.ReadAllBytes(Path.Combine(mFix, "cover.webp")).SequenceEqual(File.ReadAllBytes(webpSrc)), cvFix.Error);
+        Check("替换后 IsRealWebp = true", ModBridge.Http.CoverWriter.IsRealWebp(Path.Combine(mFix, "cover.webp")));
+
+        // a4c) 作者给的是**真 WebP** → 跳过、不动人家的图
+        var mReal = MakeMod("mreal", "{\"Name\":\"作者的真 webp\"}");
+        File.WriteAllBytes(Path.Combine(mReal, "cover.webp"), File.ReadAllBytes(webpSrc));
+        var cvReal = ModBridge.Http.CoverWriter.Apply(mReal, cover);
+        Check("真 cover.webp → 跳过（不覆盖作者的图）",
+            cvReal.Skipped && cvReal.CoverFile == "cover.webp", cvReal.CoverFile);
+        Check("原图没被改",
+            File.ReadAllBytes(Path.Combine(mReal, "cover.webp")).SequenceEqual(File.ReadAllBytes(webpSrc)));
+        Check("跳过后没写 images\\_MetaImage",
+            !File.Exists(Path.Combine(mReal, "images", "_MetaImage.png")));
+
+        // a4d) 没人给封面、文件夹里已有一个 cover.jpg（Penumbra 导入包时就是这样）
+        //      → 不造假 cover.webp，改用 images\_MetaImage.jpg 出图
         var mSelf = MakeMod("mself", "{\"Name\":\"只有包内封面\"}");
-        File.WriteAllBytes(Path.Combine(mSelf, "cover.jpg"), new byte[] { 0x52, 0x49, 0x46, 0x46 });
+        File.WriteAllBytes(Path.Combine(mSelf, "cover.jpg"), new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 });
         var cvSelf = ModBridge.Http.CoverWriter.Apply(mSelf, null, null);
-        Check("没人给封面也能补出 cover.webp（用文件夹里已有的那个）",
-            cvSelf.Ok && File.Exists(Path.Combine(mSelf, "cover.webp")), cvSelf.Error);
+        Check("没人给封面也能补（用文件夹里已有的那个）→ 写 _MetaImage.jpg",
+            cvSelf.Ok && File.Exists(Path.Combine(mSelf, "images", "_MetaImage.jpg")), cvSelf.Error);
+        Check("不造假 cover.webp", !File.Exists(Path.Combine(mSelf, "cover.webp")));
         Check("原来的 cover.jpg 还在", File.Exists(Path.Combine(mSelf, "cover.jpg")));
 
-        // a5) 根目录只有 cover.jpg（没有 cover.webp）→ 要补一份 cover.webp，但别动人家的 cover.jpg
+        // a5) 根目录只有 cover.jpg（没有 cover.webp）→ 补 _MetaImage，但别动人家的 cover.jpg
         var mH = MakeMod("mh", "{\"Name\":\"只有 cover.jpg\"}");
         File.WriteAllBytes(Path.Combine(mH, "cover.jpg"), new byte[] { 7, 7, 7 });
         var cvH = ModBridge.Http.CoverWriter.Apply(mH, cover);
-        Check("只有 cover.jpg → 会补出 cover.webp", cvH.Ok && File.Exists(Path.Combine(mH, "cover.webp")), cvH.Error);
+        Check("只有 cover.jpg → 补 images\\_MetaImage.png",
+            cvH.Ok && File.Exists(Path.Combine(mH, "images", "_MetaImage.png")), cvH.Error);
+        Check("不造假 cover.webp", !File.Exists(Path.Combine(mH, "cover.webp")));
         Check("人家的 cover.jpg 没被改",
             File.ReadAllBytes(Path.Combine(mH, "cover.jpg")).SequenceEqual(new byte[] { 7, 7, 7 }));
 
@@ -356,8 +381,8 @@ public static class Program
         File.WriteAllBytes(Path.Combine(m3, "images", "_MetaImage.png"), new byte[] { 1, 2, 3 });
         var before = File.ReadAllBytes(Path.Combine(m3, "images", "_MetaImage.png"));
         var cv3 = ModBridge.Http.CoverWriter.Apply(m3, cover);
-        Check("有 Image 但没 cover.webp → 补 cover.webp（不是跳过）",
-            cv3.Ok && File.Exists(Path.Combine(m3, "cover.webp")), cv3.Error);
+        Check("有 Image 但没 cover.webp → 不造假 cover.webp，也不动原来的图",
+            cv3.Ok && !File.Exists(Path.Combine(m3, "cover.webp")), cv3.Error);
         Check("没有覆盖原来的图", File.ReadAllBytes(Path.Combine(m3, "images", "_MetaImage.png")).SequenceEqual(before));
         Check("也没改它的 Image",
             System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(m3, "meta.json")))!["Image"]!
@@ -400,9 +425,12 @@ public static class Program
         Check("文件夹不存在 → 有原因",
             (ModBridge.Http.CoverWriter.Apply(Path.Combine(root, "nope"), cover).Error ?? "").Contains("不存在"));
 
-        // g2) 已经有图时：即使传了封面也不动（尊重包自带）
-        var cvSkip = ModBridge.Http.CoverWriter.Apply(m3, cover);
-        Check("已经有 cover.webp 时再传封面 → 仍然 skip", cvSkip.Skipped, cvSkip.Error);
+        // g2) 已经有**真 WebP** 封面时：即使传了封面也不动（尊重包自带）
+        var cvSkip = ModBridge.Http.CoverWriter.Apply(mReal, cover);
+        Check("已有真 WebP cover.webp 时再传封面 → 仍然 skip", cvSkip.Skipped, cvSkip.Error);
+        // g2b) 但假货（非 WebP 内容）**不能**让它 skip —— 否则补封面永远补不上
+        var cvSkipFake = ModBridge.Http.CoverWriter.Apply(mHW, cover);
+        Check("假 cover.webp → 不 skip（能修）", !cvSkipFake.Skipped, cvSkipFake.Error);
 
         // h) 坏 JSON 不能把原文件写坏
         var mBad = MakeMod("mBad", "{ not json ");
@@ -438,12 +466,13 @@ public static class Program
         using (var za = new System.IO.Compression.ZipArchive(zs, System.IO.Compression.ZipArchiveMode.Create))
         {
             var e1 = za.CreateEntry("cover.webp");
-            using (var w = new StreamWriter(e1.Open())) w.Write("WEBP-DATA");
+            using (var w = e1.Open()) w.Write(File.ReadAllBytes(MakeImg("ziptmp_real.webp", ".webp")));
             var e2 = za.CreateEntry("meta.json");
             using (var w = new StreamWriter(e2.Open())) w.Write("{\"Name\":\"x\"}");
         }
         var inZip = ModBridge.Http.CoverWriter.GuessFromPackage(pmpZip);
-        Check("包内自带 cover.webp → 能抽出来", inZip is not null && File.ReadAllText(inZip) == "WEBP-DATA", inZip);
+        Check("包内自带 cover.webp → 能抽出来", inZip is not null
+            && File.ReadAllBytes(inZip).SequenceEqual(File.ReadAllBytes(MakeImg("ziptmp_real.webp", ".webp"))), inZip);
         var mZip = MakeMod("mzip", "{\"Name\":\"zip\"}");
         var cvZip = ModBridge.Http.CoverWriter.Apply(mZip, null, inZip);
         Check("只有包内封面也能写进 mod（cover.webp）",

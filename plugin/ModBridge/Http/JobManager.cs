@@ -315,6 +315,8 @@ public sealed class JobManager : IDisposable
                 {
                     job.CoverResult = "已写入 " + (cr.CoverFile ?? cr.RelPath);
                     job.Step($"预览图已写入：{cr.RelPath}");
+                    if (!string.IsNullOrWhiteSpace(cr.Note))
+                        job.Step("注意：" + cr.Note);
                     job.Step($"ReloadMod → {_bridge.Reload(dir, name ?? "")}（让 Penumbra 重新读 meta.json）");
                 }
                 else if (cr.Skipped)
@@ -328,6 +330,25 @@ public sealed class JobManager : IDisposable
                     job.Step("预览图没写上：" + cr.Error);
                 }
             }
+
+            // ---------- 3.6 封面自检：把「游戏里到底有没有图、是不是真 WebP」写进步骤 ----------
+            //    失败要可见：否则"没这一步"和"这一步没跑"分不清（主人要求"信息不留空"）
+            try
+            {
+                var absCheck = string.IsNullOrEmpty(_bridge.ModDirectory) ? "" : Path.Combine(_bridge.ModDirectory, dir);
+                if (!string.IsNullOrEmpty(absCheck) && Directory.Exists(absCheck))
+                {
+                    var cvAbs = Path.Combine(absCheck, "cover.webp");
+                    var hasCv = File.Exists(cvAbs);
+                    var realCv = CoverWriter.IsRealWebp(cvAbs);
+                    var draw = CoverLocator.FindDrawable(absCheck);
+                    job.Step("封面自检：cover.webp "
+                             + (hasCv ? (realCv ? "✓ 是真 WebP" : "✗ 内容是伪装的（不是 WebP，认 cover.webp 的 Penumbra 会解不出来）")
+                                      : "✗ 没有")
+                             + " ｜ 本插件能画的图：" + (draw is null ? "✗ 没有" : "✓ " + Path.GetFileName(draw)));
+                }
+            }
+            catch { /* 自检失败不影响安装 */ }
 
             // ---------- 4. 启用 / 优先级 / 重绘 ----------
             if (job.Enable)

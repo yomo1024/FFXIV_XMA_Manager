@@ -42,14 +42,39 @@ public static class CoverWriter
 
     public static string MetaRelPath(string ext) => MetaDir + "\\" + MetaBase + ext;
 
-    /// <summary>mod 文件夹里已经有的固定名封面（cover.webp / cover.png / cover.jpg …）。</summary>
+    /// <summary>
+    /// 这个文件是不是**真 WebP**（RIFF....WEBP）。
+    ///
+    /// 用来分辨「作者/Heliosphere 给的真封面」和「早先把 jpg 改名成 cover.webp 留下的假货」：
+    /// 假货让认 cover.webp 的那个汉化版 Penumbra 解不出图 —— 看起来就是「游戏里没封面」，
+    /// 而且老逻辑「已有 cover.webp 就跳过」会让**之后所有补封面全部失效**（2026-09 主人现场反馈）。
+    /// </summary>
+    public static bool IsRealWebp(string? path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return false;
+            using var fs = File.OpenRead(path);
+            var head = new byte[12];
+            if (fs.Read(head, 0, 12) < 12)
+                return false;
+            return head[0] == (byte)'R' && head[1] == (byte)'I' && head[2] == (byte)'F' && head[3] == (byte)'F'
+                && head[8] == (byte)'W' && head[9] == (byte)'E' && head[10] == (byte)'B' && head[11] == (byte)'P';
+        }
+        catch { return false; }
+    }
+
+    /// <summary>mod 文件夹里已经有的固定名封面（cover.webp / cover.png / cover.jpg …）。
+    /// `cover.webp` **必须内容真是 WebP** 才算（假货不算，得让后面的修复流程能动手）。</summary>
     public static string? ExistingRootCover(string modFolder)
     {
         var webp = Path.Combine(modFolder, CoverWebp);
-        if (File.Exists(webp))
+        if (File.Exists(webp) && IsRealWebp(webp))
             return CoverWebp;
         foreach (var ext in ImageExts)
         {
+            if (ext == ".webp") continue;   // ★ 上面已按"内容真是 WebP"判过；这里再按存在判会把假货又算成有封面
             var p = Path.Combine(modFolder, CoverBase + ext);
             if (File.Exists(p))
                 return CoverBase + ext;
@@ -112,7 +137,8 @@ public static class CoverWriter
     }
 
     /// <summary>结果：Ok=写入成功；Skipped=本来就有图，没动；否则 Error 有原因。</summary>
-    public readonly record struct Result(bool Ok, bool Skipped, string? RelPath, string? Error, string? CoverFile = null)
+    public readonly record struct Result(bool Ok, bool Skipped, string? RelPath, string? Error,
+                                        string? CoverFile = null, string? Note = null)
     {
         public static Result Fail(string why) => new(false, false, null, why);
         public static Result Skip(string rel, string? coverFile = null) => new(false, true, rel, null, coverFile);
@@ -179,7 +205,9 @@ public static class CoverWriter
         }
 
         // 选一个真实存在的封面源：优先真 WebP，其次原始封面图
-        var webpSrc = !string.IsNullOrWhiteSpace(coverWebpPath) && File.Exists(coverWebpPath) ? coverWebpPath : null;
+        // 只认**真 WebP**：管理器用 Pillow 转的才合格；转不出来时宁可不写 cover.webp（见下）
+        var webpSrc = !string.IsNullOrWhiteSpace(coverWebpPath) && File.Exists(coverWebpPath)
+                      && IsRealWebp(coverWebpPath) ? coverWebpPath : null;
         var src = webpSrc ?? (string.IsNullOrWhiteSpace(coverPath) ? null : coverPath);
 
         if (src is null)
@@ -189,14 +217,27 @@ public static class CoverWriter
 
         var ext = Path.GetExtension(coverPath ?? src).ToLowerInvariant();
 
-        // 1) 写 cover.webp（最重要的那一份）
-        try
+        // 1) 根目录封面：**有真 WebP 才写 cover.webp**
+        //    以前这里不管三七二十一把拿到的图（可能是 jpg/png）复制成 cover.webp —— 内容不是 WebP，
+        //    认 cover.webp 的 Penumbra 解不出来 = 看起来"没图"，而且会让后续补封面被 skip 死锁住。
+        string? note = null;
+        var webpDest = Path.Combine(modFolder, CoverWebp);
+        if (webpSrc is not null)
         {
-            File.Copy(src, Path.Combine(modFolder, CoverWebp), true);
+            try
+            {
+                File.Copy(webpSrc, webpDest, true);
+            }
+            catch (Exception e)
+            {
+                return Result.Fail("写 cover.webp 失败：" + e.Message);
+            }
         }
-        catch (Exception e)
+        else
         {
-            return Result.Fail("写 cover.webp 失败：" + e.Message);
+            if (File.Exists(webpDest) && !IsRealWebp(webpDest))
+                note = "现有 cover.webp 不是真 WebP（早先 jpg 改名留下的假货），已用 cover." + ext.TrimStart('.')
+                       + " + images\\_MetaImage 出图；等管理器转出真 WebP 再自动替换";
         }
 
         string? rel = existingValid ? existing : null;
@@ -241,9 +282,9 @@ public static class CoverWriter
         catch (Exception e)
         {
             // cover.webp 已经写好了，这一份失败不算致命
-            return new Result(true, false, rel, "附加步骤失败：" + e.Message, CoverWebp);
+            return new Result(true, false, rel, "附加步骤失败：" + e.Message, CoverWebp, note);
         }
 
-        return new Result(true, false, rel, null, CoverWebp);
+        return new Result(true, false, rel, null, webpSrc is not null ? CoverWebp : (CoverBase + ext), note);
     }
 }

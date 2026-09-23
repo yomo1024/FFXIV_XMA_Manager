@@ -1177,14 +1177,23 @@ async function diagCover() {
     const lines = [
       (cp.files ? `从云端取回封面 : ✓ ${cp.files} 张（库里原来没有，已从网盘取回）`
                 : (cp.ok === false ? `从云端取回封面 : ✗ ${cp.why || '没取到'}` : '')),
+      `对上的游戏目录 : ${(r.installed_dirs || []).join(' ｜ ') || '没对上'}（${r.matched_by || '没匹上'}${r.remembered_dir ? ' ｜ 记住的是 ' + r.remembered_dir : ''}）`,
       `管理器找到的图 : ${f(r.cover_exists, r.cover, '没找到能当封面的图')}`,
       `转好的 WebP   : ${f(r.webp_exists, r.webp, '没生成（多半是 Pillow 缺或转换报错）')}`,
       `转好的 JPEG   : ${f(r.draw_exists, r.draw, '没生成（同上）')}`,
       `游戏里同名 mod: ${(r.installed_dirs || []).join(' ｜ ') || '没找到（还没装？或名字对不上）'}`,
     ]
     for (const c of (r.checks || [])) {
-      lines.push(c.error ? `插件查询失败（${c.dir}）：${c.error}`
-                         : `插件里的实况（${c.dir}）：${JSON.stringify(c.plugin)}`)
+      if (c.error) { lines.push(`插件查询失败（${c.dir}）：${c.error}`); continue }
+      const p = c.plugin || {}
+      lines.push(`插件里的实况（${c.dir}）：${JSON.stringify(p)}`)
+      if (p.coverWebpExists && !p.coverWebpReal)
+        lines.push('⚠ 插件目录里的 cover.webp 内容是伪装的（不是真 WebP）→ 认 cover.webp 的 Penumbra 会解不出来。'
+                 + '点「补封面到游戏」会写进真 WebP 把它修好。')
+      else if (p.coverWebpReal)
+        lines.push('插件目录里的 cover.webp：✓ 是真 WebP')
+      else
+        lines.push('插件目录里没有 cover.webp —— 点「补封面到游戏」会写进去。')
     }
     if (r.hint) lines.push('提示：' + r.hint)
     dialog.info({
@@ -1218,7 +1227,7 @@ async function doPick() {
   pickBusy.value = true
   try {
     const r = await api.bridgeFixCover(cur.value.folder, pickDir.value)
-    if (r.ok) msg.success('已把封面写进 ' + pickDir.value)
+    if (r.ok) msg.success('已把封面写进 ' + pickDir.value + '（已记住这个目录，以后自动用它）')
     else msg.error(r.error || '补封面失败')
     showPick.value = false
   } catch (e) { msg.error(e.message) } finally { pickBusy.value = false }
@@ -1235,6 +1244,7 @@ async function fixCoverToGame() {
       const s = r.skipped || 0
       msg.success(
         `封面已补进游戏（写入 ${w} 条${s ? `，本来就有跳过 ${s} 条` : ''}）：${r.mod}` +
+        (r.remembered_dir ? `｜已记住目录 ${r.remembered_dir}` : '') +
         ' —— 去 Penumbra 那条 mod 的面板看看（不用重启游戏）',
       )
     } else {

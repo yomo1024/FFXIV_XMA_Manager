@@ -425,9 +425,14 @@ public sealed class ApiRouter
             image,
             imageExists,
             hasPreview = imageExists,
+            coverWebpExists = System.IO.File.Exists(System.IO.Path.Combine(abs, "cover.webp")),
+            coverWebpReal = ModBridge.Http.CoverWriter.IsRealWebp(System.IO.Path.Combine(abs, "cover.webp")),
             imagesInMod = pics.ToArray(),
             error,
-            hint = imageExists
+            hint = System.IO.File.Exists(System.IO.Path.Combine(abs, "cover.webp"))
+                     && !ModBridge.Http.CoverWriter.IsRealWebp(System.IO.Path.Combine(abs, "cover.webp"))
+                ? "cover.webp 内容是伪装的（不是真 WebP，早先把 jpg 改名留下的）→ 点「补封面到游戏」会写进真 WebP 修好它"
+                : imageExists
                 ? "已就绪：Penumbra 里应该能看到这张图（看不到就重启一次游戏）"
                 : (metaExists ? "meta.json 里没有可用的 Image → 用 POST /fix-cover 补一张" : "这个目录里没有 meta.json"),
         }));

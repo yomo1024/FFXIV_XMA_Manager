@@ -3411,6 +3411,24 @@ def _bridge_get(path_qs, timeout=25):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def _bridge_targets(m, folder, plist, dir_name=""):
+    """挑出这条 mod 在 Penumbra 里对应的目录：① 手填 ② 库里记住的 ③ 名字/文件夹名匹配。
+
+    为什么要「记住」：Penumbra 的目录名来自包内 meta.json，跟库里的名字经常对不上，
+    光靠猜永远猜不中 → 第一次用「选目录补封面」挑一次，之后自动用这个目录（2026-09 主人现场）。
+    """
+    if dir_name:
+        return [str(dir_name)], "指定"
+    remembered = str((m or {}).get("installed_dir") or "")
+    if remembered and any(str(p.get("dir") or "") == remembered for p in plist):
+        return [remembered], "记住的目录"
+    keys_all = _bridge_norm((m or {}).get("name") or "", Path(str(folder)).name)
+    hits = [p.get("dir") for p in plist
+            if any(_bridge_name_match(a, c) for a in keys_all
+                   for c in _bridge_norm(p.get("name"), p.get("dir")))]
+    return hits, ("名字匹配" if hits else "")
+
+
 def api_bridge_cover_check(folder, dir_name=""):
     """封面诊断：把整条链路的实况摆出来，一眼看出卡在哪一步。
 
@@ -3440,21 +3458,15 @@ def api_bridge_cover_check(folder, dir_name=""):
         out["hint"] = "游戏内插件没连上：%s" % e
         return out
     plist = plug.get("mods") or []
-    if dir_name:
-        targets = [dir_name]
-    else:
-        # 匹配键：库里的名字 + 库里的**文件夹名**（安装时 dirName 就是这个）。
-        # _bridge_norm() 返回**列表**（内部已去掉 [作者] / 序号 / hs- 前缀等），别当字符串用。
-        keys_all = _bridge_norm(m.get("name") or "", Path(folder).name)
-        targets = [p.get("dir") for p in plist
-                   if any(_bridge_name_match(a, c) for a in keys_all
-                          for c in _bridge_norm(p.get("name"), p.get("dir")))]
+    targets, how = _bridge_targets(m, folder, plist, dir_name)
+    out["matched_by"] = how
+    out["remembered_dir"] = str(m.get("installed_dir") or "")
     out["installed_dirs"] = targets
     out["installed_count"] = len(plist)
     out["installed_sample"] = [(p.get("name") or "")[:28] for p in plist[:20]]
     if not targets:
         out["hint"] = ("游戏里没找到同名的已装 mod（还没装进去？或 Penumbra 里的目录名/显示名和库里对不上）。"
-                       "可以点「手动指定目录」从已装列表里选一个。")
+                       "点「选目录补封面」挑一次，我会记住这个目录，以后自动用。")
         return out
     for d in targets:
         try:
@@ -3478,20 +3490,12 @@ def api_bridge_fix_cover(folder, dir_name=""):
     plist = plug.get("mods") or []
     libname = payload.get("name") or ""
 
-    targets = []
-    if dir_name:
-        targets = [dir_name]
-    else:
-        # 库里的名字 + 库里的文件夹名（= 安装时的 dirName）；_bridge_norm 返回列表
-        keys_all = _bridge_norm(libname, Path(folder).name)
-        for p in plist:
-            keys = _bridge_norm(p.get("name"), p.get("dir"))
-            if any(_bridge_name_match(a, c) for a in keys_all for c in keys):
-                targets.append(p.get("dir"))
+    mrow = one_mod(cfg_now(), folder) or {}
+    targets, how = _bridge_targets(mrow, folder, plist, dir_name)
     if not targets:
         return {"ok": False, "need_dir": True,
                 "error": "在游戏里没找到同名的已装 mod（名字对不上）。"
-                         "可以点「选目录补封面」从已装列表里挑一个；也能在游戏里先看看它的目录名。",
+                         "点「选目录补封面」挑一次，我会记住这个目录，以后自动用。",
                 "mod": libname,
                 "installed": [{"name": p.get("name") or "", "dir": p.get("dir") or ""} for p in plist],
                 "installed_names": [p.get("name") for p in plist][:20]}
@@ -3508,8 +3512,17 @@ def api_bridge_fix_cover(folder, dir_name=""):
             results.append({"dir": d, "status": "error", "error": str(e)})
     written = sum(1 for x in results if x["status"] == "written")
     skipped = sum(1 for x in results if x["status"] == "skipped")
-    mm.log("补封面「%s」→ %s" % (libname, results))
-    return {"ok": written > 0 or skipped > 0, "mod": libname,
+    # 记住这次用到的目录（手挑的 / 猜中的都记），下次直接用它，不再"名字对不上"
+    if written > 0 and len(targets) == 1:
+        try:
+            st = mm.Store()
+            st.set_installed_dir(folder, targets[0])
+            st.cx.close()
+        except Exception:
+            mm.log(traceback.format_exc())
+    mm.log("补封面「%s」→ %s（%s）" % (libname, results, how))
+    return {"ok": written > 0 or skipped > 0, "mod": libname, "matched_by": how,
+            "remembered_dir": targets[0] if (written > 0 and len(targets) == 1) else "",
             "cover": Path(payload.get("coverDrawPath") or payload.get("coverPath") or "").name,
             "written": written, "skipped": skipped, "results": results}
 
