@@ -514,18 +514,29 @@ def name_tokens(s) -> list:
     return [t for t in _TOKEN_RE.findall((s or "").lower()) if t]
 
 
-def same_name_tokens(a, b) -> bool:
-    """token 判同：**短的一方的 token 必须全部出现在长的一方**。
+def same_name_tokens(a, b, author="") -> bool:
+    """token 判同（「已安装」判定用）。
 
-    这条专门挡"只共用一个通用词"的误判（主人 2026-09 报的）：
-      {botanica, ruffle}  vs  {botanica, bodychain, rue, pocky}  → 短方没被全覆盖 ⇒ 不是同一条 ✓
-      {wisp, 1}           vs  {ruby, blaire, wisp, 1}            → 全覆盖     ⇒ 是同一条 ✓
+    规则：一边的 token 必须被另一边**全包含**；并且
+      · 两边词完全相同 → 同一条 ✓
+      · 只有**多出的那一边"像装饰过的名字"**（含数字如序号/版本，或含这条 mod 的作者名）才算同一条 ✓
+        否则要求词全等 —— 这样 `Botanica` vs `Botanica Bodychain` 就不会被当成同一条 ✗（主人 2026-09 报的误判）
+
+    样例：
+      `7.[Ruby Blaire] Wisp 1.1` vs `Wisp 1.1`（作者 Ruby Blaire）→ 带数字+作者 ⇒ 同一条 ✓
+      `Botanica` vs `Botanica Bodychain`（作者 Pocky）→ 长边没装饰 ⇒ 要求全等 ⇒ 不是同一条 ✓
     """
-    ta, tb = name_tokens(a), name_tokens(b)
-    if not ta or not tb:
+    sa, sb = set(name_tokens(a)), set(name_tokens(b))
+    if not sa or not sb:
         return False
-    short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
-    return set(short) <= set(long_)
+    if sa == sb:
+        return True
+    if not (sa <= sb or sb <= sa):
+        return False
+    long_str, long_set = (a, sa) if len(sa) > len(sb) else (b, sb)
+    author_set = set(name_tokens(author))
+    decorated = any(ch.isdigit() for ch in str(long_str)) or bool(author_set & long_set)
+    return bool(decorated)
 
 
 def installed_match(m, names, raw=None) -> bool:
@@ -553,10 +564,11 @@ def installed_match(m, names, raw=None) -> bool:
         n = norm_name(e)
         if not n or not (base in n or n in base):
             continue
-        if same_name_tokens(name, e):
+        if same_name_tokens(name, e, author):
+            log("已安装判定：「%s」↔ 已装目录「%s」→ 算已安装" % (name, e))
             return True
-        # 只共用了词（比如都叫 Botanica）→ 不算已安装，并记一行日志方便追
-        log("已安装判定：跳过「%s」——它和「%s」只是名字像（共用词，不是同一条）" % (e, name))
+        # 只共用了词 / 只是前缀（比如都叫 Botanica）→ 不算已安装，并记一行日志方便追
+        log("已安装判定：跳过「%s」——它和「%s」只是名字像（不是同一条）" % (e, name))
     if not entries:
         # 老调用没给原始名 → 退化成更严格的子串：短的要够长、且占长名一半以上
         for n in names:
