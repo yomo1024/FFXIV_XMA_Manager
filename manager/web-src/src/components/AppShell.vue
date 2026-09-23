@@ -395,7 +395,7 @@ onUnmounted(() => clearTimeout(timer))
 }
 .hdr {
   flex: 0 0 auto;
-  padding: 12px 18px 8px;
+  padding: 10px 18px 7px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.16);
 }
 .hdr-top {

@@ -1028,6 +1028,31 @@ async function copyPath() {
         </n-button>
       </div>
 
+      <!-- 操作：放最上面（版本更新 + 常用动作） -->
+      <n-card size="small" title="操作" class="act-card">
+        <div class="oprow">
+          <span class="lbl">更新</span>
+          <n-button size="small" type="primary" ghost :disabled="!cur || !cur.addr" @click="updateOne(cur)">
+            {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
+          </n-button>
+          <n-button size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
+          <span v-if="cur && !cur.addr" class="dim">（没有站点地址，只能手动替换）</span>
+        </div>
+        <n-space size="small" class="pane-actions" style="margin-top: 8px">
+          <n-button size="small" :disabled="!cur" @click="api.open('folder', cur.folder)">
+            打开文件夹
+          </n-button>
+          <n-button size="small" :disabled="!cur" @click="copyPath">复制路径</n-button>
+          <n-button size="small" type="primary" :disabled="!cur" :loading="installing"
+                    @click="installToGame(false)">安装到游戏</n-button>
+          <n-button size="small" :disabled="!cur" :loading="fixingCover" @click="fixCoverToGame">
+            补封面到游戏
+          </n-button>
+          <n-button v-if="cur?.has_img" size="small" tag="a" :href="api.raw(cur.folder)"
+                    target="_blank">查看原图</n-button>
+        </n-space>
+      </n-card>
+
       <n-card size="small" :title="cur ? cur.name : '预览'" class="pv-card">
         <template #header-extra>
           <n-button size="tiny" :disabled="!cur" @click="showAddImg = true">添加图片…</n-button>
@@ -1083,14 +1108,6 @@ async function copyPath() {
                           :disabled="!cur" @update:value="saveTags" />
         </div>
         <div class="tagedit">
-          <span class="lbl" title="从站点重新下载最新版覆盖，或自己上传新文件替换">更新</span>
-          <n-button size="tiny" :disabled="!cur || !cur.addr" @click="updateOne(cur)">
-            {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
-          </n-button>
-          <n-button size="tiny" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
-          <span v-if="cur && !cur.addr" class="dim">（没有站点地址，只能手动替换）</span>
-        </div>
-        <div class="tagedit">
           <span class="lbl" title="这条 Mod 替换/影响游戏里的哪些东西（来自 XMA 的 Affects / Replaces）">
             影响/替换
           </span>
@@ -1113,25 +1130,6 @@ async function copyPath() {
         </n-descriptions>
       </n-card>
 
-      <div class="pane-spacer"></div>
-
-      <n-card size="small" title="操作" class="act-card">
-        <n-space size="small" class="pane-actions">
-        <n-button size="small" :disabled="!cur" @click="api.open('folder', cur.folder)">
-          打开文件夹
-        </n-button>
-        <n-button size="small" :disabled="!cur" @click="copyPath">复制路径</n-button>
-        <n-button size="small" type="primary" :disabled="!cur" :loading="installing"
-                  @click="installToGame(false)">
-          安装到游戏
-        </n-button>
-        <n-button size="small" :disabled="!cur" :loading="fixingCover" @click="fixCoverToGame">
-          补封面到游戏
-        </n-button>
-        <n-button v-if="cur?.has_img" size="small" tag="a" :href="api.raw(cur.folder)"
-                  target="_blank">查看原图</n-button>
-        </n-space>
-      </n-card>
     </aside>
 
     <!-- 追加图片 -->
@@ -1336,10 +1334,10 @@ async function copyPath() {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: 1fr 400px;
   grid-template-rows: minmax(0, 1fr);
   gap: 14px;
-  padding: 14px 18px 18px;
+  padding: 14px 18px 16px;
 }
 .left {
   min-width: 0;
@@ -1432,7 +1430,7 @@ async function copyPath() {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   /* 实在放不下时滚动，绝不把内容裁掉 */
   overflow: auto;
 }
@@ -1570,7 +1568,7 @@ async function copyPath() {
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: 46vh;
+  max-height: 30vh;
   object-fit: contain;
 }
 .ph {
@@ -1701,7 +1699,7 @@ async function copyPath() {
 /* 操作卡片：按钮换行排布，窄面板也不挤 */
 .act-card {
   flex: 0 0 auto;
-  margin-top: 8px;
+  margin-top: 2px;
 }
 .act-card :deep(.n-card__content) {
   padding: 10px 12px 12px;
@@ -1751,6 +1749,12 @@ async function copyPath() {
   margin-top: 4px;
   padding-top: 4px;
   border-top: 1px dashed rgba(128, 128, 128, 0.25);
+}
+.oprow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .advgrid {
   display: grid;

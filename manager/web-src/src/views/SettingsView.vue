@@ -162,168 +162,261 @@ async function save() {
 
 <template>
   <div class="pane">
-    <n-card size="small" title="设置" style="max-width: 900px">
-      <n-alert v-if="resolved.temp_root" type="warning" :show-icon="false" style="margin-bottom: 10px">
+    <div class="inside">
+      <n-alert v-if="resolved.temp_root" type="warning" :show-icon="false" style="margin-bottom: 12px">
         当前是临时根目录模式（命令行 --root），Mod 根目录不可改。
       </n-alert>
-      <n-alert type="info" :show-icon="false" style="margin-bottom: 10px">
-        路径直接粘绝对路径（浏览器拿不到本机文件夹选择框）。留空表示用默认值。
-      </n-alert>
-      <n-form label-placement="left" label-width="120" size="small">
-        <n-form-item label="游戏内插件">
-          <div class="dim" style="width: 100%; margin-bottom: 4px">
-            同一台电脑上，游戏里启用过 Mod Bridge 之后点「自动配对」即可（会读插件配置文件里的端口与 token）；
-            也可以手动填。
-          </div>
-          <n-space align="center" style="flex-wrap: wrap">
-            <n-input v-model:value="s.bridge_url" placeholder="http://127.0.0.1:42100"
-                     style="width: 300px" />
-            <n-input v-model:value="s.bridge_token" placeholder="token（游戏里 /modbridge 复制）"
-                     style="width: 300px" />
-            <n-button size="small" :loading="testing" @click="autoPair">自动配对（推荐）</n-button>
-            <n-button size="small" :loading="testing" @click="testBridge">测试连接</n-button>
-            <n-button size="small" :loading="testing" @click="loadVersions">刷新版本</n-button>
-          </n-space>
-        </n-form-item>
-        <n-form-item label="版本">
-          <div style="width: 100%">
-            <div class="dim">
-              管理器 <b>v{{ resolved.manager_version || '?' }}</b>
-              <span v-if="resolved.manager_build">（构建 {{ resolved.manager_build }}）</span>
-              <span v-if="resolved.min_plugin_version">
-                ・要求插件 ≥ v{{ resolved.min_plugin_version }}
-              </span>
-            </div>
-            <div class="dim" style="margin-top: 4px">
-              <template v-if="verInfo && verInfo.plugin_version">
-                游戏内插件 <b>v{{ verInfo.plugin_version }}</b>
-                <span v-if="verInfo.plugin_ok" style="color:#18a058">✓ 版本达标</span>
-                <span v-else style="color:#d03050">✗ 版本过旧，请更新插件并重启游戏</span>
-              </template>
-              <template v-else-if="verInfo">游戏内插件：没连上（点「测试连接」或「自动配对」）</template>
-              <template v-else>游戏内插件：点「刷新版本」查看</template>
-            </div>
-            <n-alert v-if="verInfo && verInfo.plugin_version && !verInfo.plugin_ok" type="warning"
-                     :show-icon="false" style="max-width: 820px; margin-top: 6px">
-              {{ verInfo.version_message }}
-            </n-alert>
-          </div>
-        </n-form-item>
-        <n-form-item v-if="bridgeMsg" label=" ">
-          <n-alert :type="bridgeMsg.ok ? 'success' : 'warning'" :show-icon="false"
-                   style="max-width: 800px">{{ bridgeMsg.text }}</n-alert>
-        </n-form-item>
-        <n-form-item label="封面同步到游戏">
-          <div style="width: 100%">
-            <div class="dim" style="margin-bottom: 4px">
-              Penumbra 认的是 mod 文件夹里的 <code>cover.webp</code>（Heliosphere 的包就是这个文件名）；新装的 mod 会自动带上。
-              已经装好的那些可以用这里一次补上（按 mod 名对号入座，只写封面，不动 mod 内容）。
-            </div>
-            <n-space align="center">
-              <n-button size="small" :loading="syncing" @click="syncCoversPreview">预览能同步哪些</n-button>
-              <n-button size="small" type="primary" :loading="syncing"
-                        :disabled="!syncInfo || !syncInfo.willFix" @click="syncCoversRun">开始同步</n-button>
-            </n-space>
-            <n-alert v-if="syncMsg" :type="syncMsg.ok ? 'success' : 'warning'" :show-icon="false"
-                     style="max-width: 800px; margin-top: 6px">{{ syncMsg.text }}</n-alert>
-            <div v-if="syncInfo && syncInfo.noCoverList && syncInfo.noCoverList.length" class="dim"
-                 style="margin-top: 4px">
-              管理器里还没封面图的（先去 Mod 列表点「补预览图」）：{{ syncInfo.noCoverList.map((x) => x.mod).slice(0, 8).join('、') }}
-              <span v-if="syncInfo.noCoverList.length > 8">…</span>
-            </div>
-            <div v-if="syncInfo && syncInfo.unmatchedList && syncInfo.unmatchedList.length" class="dim"
-                 style="margin-top: 4px">
-              对不上号的（游戏里装了、管理器里没有）：{{ syncInfo.unmatchedList.map((x) => x.dir).slice(0, 6).join('、') }}
-              <span v-if="syncInfo.unmatchedList.length > 6">…</span>
-            </div>
-          </div>
-        </n-form-item>
-        <n-form-item label="Mod 根目录">
-          <n-space style="width: 100%">
-            <n-input v-model:value="s.root" placeholder="G:\Games\FFXIV\MOD\202609" style="width: 560px" />
-            <n-button size="small" @click="api.open('root')">打开</n-button>
-          </n-space>
-        </n-form-item>
-        <n-form-item label="汇总表 Excel">
-          <n-space style="width: 100%">
-            <n-input v-model:value="s.excel" placeholder="留空=放在 Mod 根目录旁边" style="width: 560px" />
-            <n-button size="small" @click="api.open('excel')">打开</n-button>
-          </n-space>
-        </n-form-item>
-        <n-divider style="margin: 8px 0" />
-        <n-form-item label="下载目录">
-          <n-space style="width: 100%">
-            <n-input v-model:value="s.download_dir" :placeholder="resolved.download_resolved" style="width: 560px" />
-            <n-button size="small" @click="api.open('downloads')">打开</n-button>
-          </n-space>
-        </n-form-item>
-        <n-form-item label="暂存目录">
-          <n-space style="width: 100%">
-            <n-input v-model:value="s.inbox_dir" :placeholder="resolved.inbox_resolved" style="width: 560px" />
-            <n-button size="small" @click="api.open('inbox')">打开</n-button>
-          </n-space>
-        </n-form-item>
-        <n-form-item label="Penumbra 目录">
-          <n-space style="width: 100%">
-            <n-input v-model:value="s.install_dir" placeholder="留空=自动探测；填了列表里就会显示已安装/未安装" style="width: 560px" />
-            <n-button size="small" :disabled="!resolved.install_resolved" @click="api.open('install')">打开</n-button>
-          </n-space>
-        </n-form-item>
-        <n-form-item label="备份目录">
-          <n-space style="width: 100%">
-            <n-input v-model:value="s.backup_dir" :placeholder="resolved.backup_resolved" style="width: 560px" />
-            <n-button size="small" @click="api.open('backup')">打开</n-button>
-          </n-space>
-        </n-form-item>
-        <n-divider style="margin: 8px 0" />
-        <n-form-item label="内置浏览器">
-          <n-input v-model:value="s.browser_path" placeholder="留空=自动探测（优先 CentBrowser / Chrome / Edge）" style="width: 560px" />
-        </n-form-item>
 
-        <n-form-item label="自动开内置浏览器">
-            <div style="width: 100%">
-              <n-switch v-model:value="s.auto_open_browser" />
-              <span class="dim" style="margin-left: 10px">只在需要时才自动打开（默认关闭）</span>
-              <div class="dim" style="margin-top: 4px">
-                默认<b>关闭</b>：用书签小工具在你自己浏览器里把页面推过来就够了 ——
-                「解析链接」和「抓封面」都不会再自作主张去开内置浏览器。
-                只有必须让工具自己去过 Cloudflare、或要现抓整页画廊时，才勾上它。
+      <!-- ① 游戏内插件 -->
+      <n-card size="small" class="sec" title="游戏内插件（Mod Bridge）">
+        <template #header-extra>
+          <n-space size="small">
+            <n-button size="tiny" type="primary" ghost :loading="testing" @click="autoPair">
+              自动配对（推荐）
+            </n-button>
+            <n-button size="tiny" :loading="testing" @click="testBridge">测试连接</n-button>
+            <n-button size="tiny" :loading="testing" @click="loadVersions">刷新版本</n-button>
+          </n-space>
+        </template>
+        <n-form label-placement="left" label-width="96" size="small">
+          <n-form-item label="地址 / token">
+            <n-space align="center" style="flex: 1 1 auto; flex-wrap: nowrap">
+              <n-input v-model:value="s.bridge_url" placeholder="http://127.0.0.1:42100"
+                       style="flex: 1 1 auto; min-width: 170px" />
+              <n-input v-model:value="s.bridge_token" placeholder="token（游戏里 /modbridge 复制）"
+                       style="flex: 1 1 auto; min-width: 170px" />
+            </n-space>
+          </n-form-item>
+          <n-form-item label="版本">
+            <div class="verbox">
+              <div>
+                <span class="chip">管理器 v{{ resolved.manager_version || '?' }}</span>
+                <span v-if="resolved.manager_build" class="dim">构建 {{ resolved.manager_build }}</span>
+                <span v-if="resolved.min_plugin_version" class="dim">・要求插件 ≥ v{{ resolved.min_plugin_version }}</span>
+              </div>
+              <div style="margin-top: 4px">
+                <template v-if="verInfo && verInfo.plugin_version">
+                  <span class="chip ok">插件 v{{ verInfo.plugin_version }}</span>
+                  <span v-if="verInfo.plugin_ok" style="color:#18a058">✓ 版本达标</span>
+                  <span v-else style="color:#d03050">✗ 版本过旧，请更新插件并重启游戏</span>
+                </template>
+                <template v-else-if="verInfo"><span class="dim">没连上（点「测试连接」或「自动配对」）</span></template>
+                <template v-else><span class="dim">点「刷新版本」查看</span></template>
               </div>
             </div>
-        </n-form-item>
-        <n-form-item label="Excel 缩略图宽">
-          <n-input-number v-model:value="s.thumb_width" :min="120" :max="2400" :step="100" style="width: 160px" />
-          <span style="margin-left: 10px; font-size: 12px; opacity: 0.6">像素，越大越清晰也越大</span>
-        </n-form-item>
-        <n-form-item label="内嵌预览图">
-          <n-switch v-model:value="s.embed_images" />
-          <span style="margin-left: 10px; font-size: 12px; opacity: 0.6">关掉的话 Excel 只有文字</span>
-        </n-form-item>
-        <n-form-item label="表头筛选">
-          <n-switch v-model:value="s.autofilter" />
-          <span style="margin-left: 10px; font-size: 12px; opacity: 0.6">给 Excel 表头加筛选按钮</span>
-        </n-form-item>
-      </n-form>
-      <template #footer>
-        <n-space justify="space-between" align="center">
-          <span style="font-size: 12px; opacity: 0.55">
-            索引库：{{ resolved.db }} ｜ 日志：{{ resolved.logging }}
-          </span>
-          <n-space>
-            <n-button size="small" @click="api.open('log')">打开日志</n-button>
-            <n-button size="small" @click="load">重新读取</n-button>
-            <n-button size="small" type="primary" :loading="busy" @click="save">保存</n-button>
-          </n-space>
+          </n-form-item>
+          <n-form-item v-if="verInfo && verInfo.plugin_version && !verInfo.plugin_ok" label=" ">
+            <n-alert type="warning" :show-icon="false">{{ verInfo.version_message }}</n-alert>
+          </n-form-item>
+          <n-form-item v-if="bridgeMsg" label=" ">
+            <n-alert :type="bridgeMsg.ok ? 'success' : 'warning'" :show-icon="false">{{ bridgeMsg.text }}</n-alert>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
+      <!-- ② 封面同步 -->
+      <n-card size="small" class="sec" title="封面同步到游戏">
+        <div class="hint">
+          Penumbra 认的是 mod 文件夹里的 <code>cover.webp</code>（Heliosphere 的包就是这个文件名）；新装的 mod 会自动带上。
+          已经装好的那些可以用这里一次补上（按 mod 名对号入座，只写封面，不动 mod 内容）。
+        </div>
+        <n-space align="center" style="margin-top: 8px">
+          <n-button size="small" :loading="syncing" @click="syncCoversPreview">预览能同步哪些</n-button>
+          <n-button size="small" type="primary" :loading="syncing"
+                    :disabled="!syncInfo || !syncInfo.willFix" @click="syncCoversRun">开始同步</n-button>
         </n-space>
-      </template>
-    </n-card>
+        <n-alert v-if="syncMsg" :type="syncMsg.ok ? 'success' : 'warning'" :show-icon="false"
+                 style="margin-top: 8px">{{ syncMsg.text }}</n-alert>
+        <div v-if="syncInfo && syncInfo.noCoverList && syncInfo.noCoverList.length" class="hint" style="margin-top: 6px">
+          还没封面图的（先去 Mod 列表点「补预览图」）：
+          {{ syncInfo.noCoverList.map((x) => x.mod).slice(0, 8).join('、') }}
+          <span v-if="syncInfo.noCoverList.length > 8">…</span>
+        </div>
+        <div v-if="syncInfo && syncInfo.unmatchedList && syncInfo.unmatchedList.length" class="hint" style="margin-top: 4px">
+          对不上号的（游戏里装了、管理器里没有）：
+          {{ syncInfo.unmatchedList.map((x) => x.dir).slice(0, 6).join('、') }}
+          <span v-if="syncInfo.unmatchedList.length > 6">…</span>
+        </div>
+      </n-card>
+
+      <!-- ③ 目录 -->
+      <n-card size="small" class="sec" title="目录">
+        <div class="hint">路径直接粘绝对路径（浏览器拿不到本机文件夹选择框）；留空表示用默认值（灰色字是实际生效的值）。</div>
+        <n-form label-placement="left" label-width="108" size="small" style="margin-top: 8px">
+          <n-form-item label="Mod 根目录">
+            <n-space align="center" class="pathrow">
+              <n-input v-model:value="s.root" placeholder="G:\Games\FFXIV\MOD\202609" class="pathinput" />
+              <n-button size="small" @click="api.open('root')">打开</n-button>
+            </n-space>
+          </n-form-item>
+          <n-form-item label="汇总表 Excel">
+            <n-space align="center" class="pathrow">
+              <n-input v-model:value="s.excel" placeholder="留空 = 放在 Mod 根目录旁边" class="pathinput" />
+              <n-button size="small" @click="api.open('excel')">打开</n-button>
+            </n-space>
+          </n-form-item>
+          <n-form-item label="下载目录">
+            <n-space align="center" class="pathrow">
+              <n-input v-model:value="s.download_dir" :placeholder="resolved.download_resolved" class="pathinput" />
+              <n-button size="small" @click="api.open('downloads')">打开</n-button>
+            </n-space>
+          </n-form-item>
+          <n-form-item label="暂存目录">
+            <n-space align="center" class="pathrow">
+              <n-input v-model:value="s.inbox_dir" :placeholder="resolved.inbox_resolved" class="pathinput" />
+              <n-button size="small" @click="api.open('inbox')">打开</n-button>
+            </n-space>
+          </n-form-item>
+          <n-form-item label="Penumbra 目录">
+            <n-space align="center" class="pathrow">
+              <n-input v-model:value="s.install_dir"
+                       placeholder="留空 = 自动探测；填了列表里就会显示已安装/未安装" class="pathinput" />
+              <n-button size="small" :disabled="!resolved.install_resolved" @click="api.open('install')">打开</n-button>
+            </n-space>
+          </n-form-item>
+          <n-form-item label="备份目录">
+            <n-space align="center" class="pathrow">
+              <n-input v-model:value="s.backup_dir" :placeholder="resolved.backup_resolved" class="pathinput" />
+              <n-button size="small" @click="api.open('backup')">打开</n-button>
+            </n-space>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
+      <!-- ④ 内置浏览器 -->
+      <n-card size="small" class="sec" title="内置浏览器">
+        <n-form label-placement="left" label-width="108" size="small">
+          <n-form-item label="浏览器程序">
+            <n-input v-model:value="s.browser_path"
+                     placeholder="留空 = 自动探测（优先 CentBrowser / Chrome / Edge）"
+                     style="flex: 1 1 auto" />
+          </n-form-item>
+          <n-form-item label="自动开浏览器">
+            <div style="flex: 1 1 auto">
+              <n-switch v-model:value="s.auto_open_browser" />
+              <span class="dim" style="margin-left: 10px">只在需要时才自动打开（默认关闭）</span>
+              <div class="hint" style="margin-top: 4px">
+                默认<b>关闭</b>：用书签小工具在你自己浏览器里把页面推过来就够了 ——「解析链接」和「抓封面」都不会再自作主张去开内置浏览器。
+                只有必须让工具自己去过 Cloudflare、或要现抓整页画廊时，才勾上它。
+                <br />顺手一提：NSFW 的 Mod 想自动检查更新／下载，需要在<b>内置浏览器里登录一次</b> XIVModArchive。
+              </div>
+            </div>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
+      <!-- ⑤ Excel 导出 -->
+      <n-card size="small" class="sec" title="Excel 导出">
+        <div class="opts">
+          <div class="opt">
+            <span class="opt-lbl">缩略图宽</span>
+            <n-input-number v-model:value="s.thumb_width" :min="120" :max="2400" :step="100"
+                            size="small" style="width: 130px" />
+            <span class="hint">像素，越大越清晰也越大</span>
+          </div>
+          <div class="opt">
+            <span class="opt-lbl">内嵌预览图</span>
+            <n-switch v-model:value="s.embed_images" size="small" />
+            <span class="hint">关掉的话 Excel 只有文字</span>
+          </div>
+          <div class="opt">
+            <span class="opt-lbl">表头筛选</span>
+            <n-switch v-model:value="s.autofilter" size="small" />
+            <span class="hint">给 Excel 表头加筛选按钮</span>
+          </div>
+        </div>
+      </n-card>
+    </div>
+
+    <!-- 底部操作条：滚多远都能点到保存 -->
+    <div class="footbar">
+      <span class="dim">索引库：{{ resolved.db }} ｜ 日志：{{ resolved.logging }}</span>
+      <div class="grow"></div>
+      <n-button size="small" @click="api.open('log')">打开日志</n-button>
+      <n-button size="small" @click="load">重新读取</n-button>
+      <n-button size="small" type="primary" :loading="busy" @click="save">保存</n-button>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .pane {
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.inside {
+  flex: 1 1 auto;
   overflow: auto;
-  padding: 16px 18px 24px;
+  padding: 16px 18px 8px;
+  max-width: 1120px;
+}
+.sec {
+  margin-bottom: 12px;
+}
+.sec :deep(.n-card__content) {
+  padding: 12px 14px;
+}
+.hint {
+  font-size: 12px;
+  opacity: 0.65;
+  line-height: 1.6;
+}
+.dim {
+  font-size: 12px;
+  opacity: 0.65;
+}
+.verbox {
+  flex: 1 1 auto;
+  line-height: 1.8;
+}
+.chip {
+  display: inline-block;
+  padding: 0 6px;
+  margin-right: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.chip.ok {
+  border-color: rgba(24, 160, 88, 0.5);
+  color: #18a058;
+}
+.pathrow {
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  width: 100%;
+}
+.pathinput {
+  flex: 1 1 auto;
+  min-width: 220px;
+}
+.opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+}
+.opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.opt-lbl {
+  font-size: 13px;
+  opacity: 0.8;
+  min-width: 76px;
+  text-align: right;
+}
+.footbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-top: 1px solid rgba(128, 128, 128, 0.18);
+}
+.grow {
+  flex: 1 1 auto;
 }
 </style>
