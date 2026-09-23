@@ -37,6 +37,15 @@ PC = "/1/clouddrive"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
+# ★ 取直链 / 下载大文件必须用**客户端 UA**：用网页 UA 时夸克对大文件直接拒
+#   （HTTP 400 / code 23018 "download file size limit"，实测 127MB 就超了）。
+#   来源：netdisk-fast-download 的接口样例注释「解除文件大小限制需要UA」；
+#   实测：网页 UA → 23018；客户端 UA → code=0 直链到手，127MB 能正常下。
+#   注意直链签名跟「请求 /file/download 时的 UA + cookie」绑定，所以**下载时也必须用同一个 UA**。
+CLIENT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+             "quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 "
+             "Safari/537.36 Channel/pckk_other_ch")
+
 BASE_PARAMS = {"pr": "ucpro", "fr": "pc", "uc_param_str": ""}
 
 
@@ -113,9 +122,9 @@ def _default_params(extra=None) -> dict:
     return p
 
 
-def _headers(cookie) -> dict:
+def _headers(cookie, ua=None) -> dict:
     return {
-        "user-agent": UA,
+        "user-agent": ua or UA,
         "origin": "https://pan.quark.cn",
         "referer": "https://pan.quark.cn/",
         "accept": "application/json, text/plain, */*",
@@ -125,7 +134,7 @@ def _headers(cookie) -> dict:
     }
 
 
-def _request(method, url_host, path, cookie, params=None, body=None, timeout=60, allow_anon=False) -> dict:
+def _request(method, url_host, path, cookie, params=None, body=None, timeout=60, allow_anon=False, ua=None) -> dict:
     """纯标准库发请求（**不要引入 requests** —— 管理器跑在只有标准库的 python 上，
     打包出来的 exe 也一样；早期版本这里用了 requests，结果线上直接报
     No module named 'requests'）。"""
@@ -139,7 +148,7 @@ def _request(method, url_host, path, cookie, params=None, body=None, timeout=60,
     payload = None
     if body is not None and method.upper() != "GET":
         payload = _json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers=_headers(cookie), method=method.upper())
+    req = urllib.request.Request(url, data=payload, headers=_headers(cookie, ua), method=method.upper())
     # 网络抖动重试（本机到 drive-pc.quark.cn 偶尔 TLS 重置 —— 实测踩到过；
     # 上传大文件时更不能一次抖动就整个任务失败）
     last = ""
@@ -214,8 +223,9 @@ class QuarkDrive:
         self._dir_cache = {}
 
     # ------------------------------------------------------------- 底层
-    def _call(self, method, host, path, params=None, body=None) -> dict:
-        return _request(method, host, path, self.cookie, params, body, self.timeout)
+    def _call(self, method, host, path, params=None, body=None, ua=None, timeout=None) -> dict:
+        return _request(method, host, path, self.cookie, params, body,
+                        timeout or self.timeout, ua=ua)
 
     # ------------------------------------------------------------- 账号
     def account(self) -> dict:
@@ -292,10 +302,14 @@ class QuarkDrive:
     def download_url(self, fid) -> str:
         """取下载直链（可能带时效；拿不到返回空串）。
 
-        注意：`/file/download` **只认 POST**（GET 会被拒：Request method 'GET' not supported，实测）。
+        两个要点（都实测过）：
+          · `/file/download` **只认 POST**（GET 会被拒：Request method 'GET' not supported）
+          · **必须用客户端 UA**（`CLIENT_UA`）：用网页 UA 时大文件会被拒
+            （400 / code 23018 "download file size limit"）
         返回可能是 list 也可能是 dict，两种都兼容。
         """
-        d = self._call("POST", PC_HOST, PC + "/file/download", None, {"fids": [str(fid)]})
+        d = self._call("POST", PC_HOST, PC + "/file/download", None, {"fids": [str(fid)]},
+                       ua=CLIENT_UA, timeout=120)
         if isinstance(d, list):
             return str((d[0] or {}).get("download_url") or "")
         return str((d or {}).get("download_url") or "")

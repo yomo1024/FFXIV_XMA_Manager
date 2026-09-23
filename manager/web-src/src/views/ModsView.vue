@@ -5,7 +5,7 @@ import {
   NButton, NInput, NSelect, NDataTable, NTag, NCard, NDescriptions, NDescriptionsItem,
   NImage, NModal, NForm, NFormItem, NInputNumber, NSwitch, NRadioGroup, NRadioButton,
   NSpace, NAlert, NEmpty, NTooltip, NDivider, NButtonGroup, NDynamicTags,
-  NCheckboxGroup, NCheckbox, NTabs, NTabPane, NSpin, useMessage, useDialog,
+  NCheckboxGroup, NCheckbox, NTabs, NTabPane, NSpin, NProgress, useMessage, useDialog,
 } from 'naive-ui'
 import { api } from '../api'
 
@@ -323,6 +323,79 @@ async function checkUpdates() {
   } catch (e) {
     updateChecking.value = false
     msg.error('启动检查失败：' + e.message)
+  }
+}
+
+// ---------------- 云端文件下载（带进度条）----------------
+const dl = ref(null)               // {name, done, total, pct, speed, state, error}
+let dlCtl = null                   // AbortController，取消用
+
+function cancelDownload() {
+  try { if (dlCtl) dlCtl.abort() } catch (e) { /* 忽略 */ }
+}
+
+/** 点云端文件 → 流式下载到本地，界面上给进度/速度；能「另存为」就直接流式落盘 */
+async function downloadCloud(folder, rel) {
+  const url = api.cloudFileUrl(folder, rel)
+  const name = String(rel).split('/').pop() || 'download.bin'
+  let handle = null
+  if (window.showSaveFilePicker) {
+    try {
+      handle = await window.showSaveFilePicker({ suggestedName: name })
+    } catch (e) {
+      if (e && e.name === 'AbortError') return    // 用户自己取消了「另存为」
+      handle = null                                // 其它情况退回内存 Blob 下载
+    }
+  }
+  dlCtl = new AbortController()
+  dl.value = { name, done: 0, total: 0, pct: 0, speed: 0, state: 'running', error: '' }
+  const t0 = Date.now()
+  const tick = (n, total) => {
+    const d = dl.value
+    if (!d) return
+    d.done = n
+    d.total = total
+    d.pct = total ? Math.min(100, Math.round((n * 100) / total)) : 0
+    d.speed = n / Math.max(0.3, (Date.now() - t0) / 1000)
+  }
+  try {
+    const resp = await fetch(url, { signal: dlCtl.signal })
+    if (!resp.ok) throw new Error('HTTP ' + resp.status)
+    const total = Number(resp.headers.get('Content-Length') || 0)
+    const reader = resp.body.getReader()
+    if (handle) {
+      const w = await handle.createWritable()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        await w.write(value)
+        tick((dl.value ? dl.value.done : 0) + value.length, total)
+      }
+      await w.close()
+    } else {
+      const chunks = []
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        chunks.push(value)
+        tick((dl.value ? dl.value.done : 0) + value.length, total)
+      }
+      const blob = new Blob(chunks)
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = name
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000)
+    }
+    if (dl.value) dl.value.state = 'done'
+    msg.success('已下载：' + name)
+  } catch (e) {
+    if (dl.value) {
+      dl.value.state = (e && e.name === 'AbortError') ? 'cancelled' : 'error'
+      dl.value.error = (e && e.message) || String(e)
+    }
+  } finally {
+    dlCtl = null
   }
 }
 
@@ -1338,11 +1411,35 @@ async function copyPath() {
                   <!-- 云端载荷：归档后本地没有这些文件了，列出来、点了直接从云端下载 -->
                   <template v-if="(filesMap[cur.folder].cloud || []).length">
                     <div class="clabel">云端载荷（本地已归档 —— 点文件名从云端下载）</div>
+
+                    <!-- 下载进度条 -->
+                    <div v-if="dl" class="dlbox">
+                      <div class="dlhead">
+                        <span class="dlname" :title="dl.name">{{ dl.name }}</span>
+                        <span class="grow"></span>
+                        <n-button v-if="dl.state === 'running'" size="tiny" quaternary
+                                  @click="cancelDownload">取消</n-button>
+                        <n-button v-else size="tiny" quaternary @click="dl = null">关闭</n-button>
+                      </div>
+                      <n-progress type="line" size="small" :percentage="dl.pct"
+                                  :status="dl.state === 'error' ? 'error'
+                                           : (dl.state === 'done' ? 'success' : 'default')"
+                                  :show-indicator="false" style="margin-top: 4px" />
+                      <div class="dlstat">
+                        <template v-if="dl.state === 'running'">
+                          {{ humanSize(dl.done) }} / {{ dl.total ? humanSize(dl.total) : '?' }}
+                          ｜ {{ dl.pct }}% ｜ {{ humanSize(dl.speed) }}/s
+                        </template>
+                        <template v-else-if="dl.state === 'done'">✓ 完成（{{ humanSize(dl.done) }}）</template>
+                        <template v-else-if="dl.state === 'cancelled'">已取消</template>
+                        <template v-else>✗ {{ dl.error }}</template>
+                      </div>
+                    </div>
+
                     <div class="flist">
                       <a v-for="c in filesMap[cur.folder].cloud" :key="c.rel_path"
-                         class="frow link" :href="api.cloudFileUrl(cur.folder, c.rel_path)"
-                         :download="c.rel_path.split('/').pop()"
-                         :title="'从云端下载 ' + c.rel_path">
+                         class="frow link" href="#" :title="'从云端下载 ' + c.rel_path"
+                         @click.prevent="downloadCloud(cur.folder, c.rel_path)">
                         <n-tag size="tiny" :bordered="false" type="info"
                                style="flex:0 0 auto;margin-right:4px">云</n-tag>
                         <span class="fname">{{ c.rel_path }}</span>
@@ -1352,9 +1449,11 @@ async function copyPath() {
                     </div>
                     <div class="ftotal">
                       云端 {{ filesMap[cur.folder].cloud.length }} 个载荷文件
+                      ｜ <a :href="filesMap[cur.folder].open_url || '#/'" target="_blank"
+                            rel="noreferrer">在网盘里打开这个目录</a>
                       <template v-if="filesMap[cur.folder].share_url">
                         ｜ <a :href="filesMap[cur.folder].share_url" target="_blank"
-                              rel="noreferrer">在网盘里打开</a>
+                              rel="noreferrer">分享页</a>
                       </template>
                     </div>
                   </template>
@@ -1438,8 +1537,8 @@ async function copyPath() {
           <!-- 归档 / 取回 只放在列表上方那个工具栏（能作用于选中项或全部），这里不再重复 -->
           <n-button size="tiny" quaternary :loading="cloudBusy" :disabled="!cur.archived_files"
                     @click="verifyCloud([cur.folder])">校验云端</n-button>
-          <a v-if="shareUrl && cur.archived_files" class="oplink" :href="shareUrl" target="_blank"
-             rel="noreferrer">在网盘里打开</a>
+          <a v-if="cur.archived_files" class="oplink" target="_blank" rel="noreferrer"
+             :href="'/api/cloud/open?folder=' + encodeURIComponent(cur.folder)">在网盘里打开</a>
           <span class="cl" :title="cur.cloud_path || ''">
             <template v-if="cur.cloud_state === 'archived'">
               已归档 {{ cur.archived_files }} 个文件 ｜ {{ humanMB(cur.cloud_size) }}
@@ -2152,6 +2251,31 @@ async function copyPath() {
   border-top: 1px dashed rgba(128, 128, 128, 0.22);
   font-size: 11.5px;
   opacity: 0.65;
+}
+/* 下载进度面板 */
+.dlbox {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(128, 128, 128, 0.22);
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.05);
+}
+.dlbox .dlhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.dlbox .dlname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dlbox .dlstat {
+  margin-top: 3px;
+  font-size: 11.5px;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
 }
 .opcloud .oplink {
   font-size: 11.5px;

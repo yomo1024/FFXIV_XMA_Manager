@@ -1441,8 +1441,9 @@ def _cloud_download(drv, cfg, fid) -> bytes:
     url = drv.download_url(fid)
     if not url:
         raise RuntimeError("取不到下载直链")
+    # 直链签名跟「请求 /file/download 时的 UA + cookie」绑定 → 下载必须用同一个客户端 UA
     req = urllib.request.Request(url, headers={
-        "user-agent": qd.UA, "cookie": drv.cookie,
+        "user-agent": qd.CLIENT_UA, "cookie": drv.cookie,
         "referer": "https://pan.quark.cn/", "origin": "https://pan.quark.cn"})
     with urllib.request.urlopen(req, timeout=1800) as r:
         return r.read()
@@ -2007,7 +2008,9 @@ def api_mod_files(q):
     return {"ok": True, "folder": folder, "items": items, "count": len(items), "total": total,
             "cloud": [{"rel_path": p["rel_path"], "size": p["size"] or 0, "state": p["state"] or ""}
                       for p in pfs],
-            "share_url": str(cfg_now().get("cloud_share_url") or "")}
+            "share_url": str(cfg_now().get("cloud_share_url") or ""),
+            "open_url": ("/api/cloud/open?folder=" + urllib.parse.quote(str(folder))
+                         if pfs else "")}
 
 
 def api_mod_history(q):
@@ -3193,6 +3196,39 @@ class Handler(BaseHTTPRequestHandler):
             return
         mm.log("下载：%s（%.1f MB）" % (p.name, size / 1048576.0))
 
+    _open_fid_cache = {}
+
+    def api_cloud_open(self, q):
+        """跳到夸克里这条 Mod 的**云端目录**（精准定位，不是只打开网盘首页）。
+
+        实测：`https://pan.quark.cn/list#/list/all/<目录fid>` 能直接停在该目录
+        （用主人的 Cookie 在真浏览器里验证过：页面列出该目录里的文件）。
+        目录 fid 按 cloud_path 缓存；解析不出来就退回「分享链接」，再不行才退回网盘首页。
+        """
+        folder = (q.get("folder") or [""])[0]
+        cfg = cfg_now()
+        share = str(cfg.get("cloud_share_url") or "")
+        try:
+            st = mm.Store()
+            row = st.cx.execute("SELECT cloud_path FROM mods WHERE folder=?", (str(folder),)).fetchone()
+            st.cx.close()
+            cpath = (row["cloud_path"] if row else "") or mod_cloud_path(cfg, folder)
+            fid = self._open_fid_cache.get(cpath)
+            if not fid:
+                fid = cloud_drive(cfg).resolve(cpath) or ""
+                if fid:
+                    self._open_fid_cache[cpath] = fid
+            target = ("https://pan.quark.cn/list#/list/all/%s" % fid) if fid else (share or "https://pan.quark.cn/list")
+        except Exception as e:
+            mm.log("打开云端目录失败（退回分享链接/首页）：%s" % str(e)[:160])
+            target = share or "https://pan.quark.cn/list"
+        self.send_response(302)
+        self._cors()
+        self.send_header("Location", target)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def api_cloud_file(self, q):
         """把云端载荷**流式下载给浏览器**（文件页签里点云端文件名时用）。
 
@@ -3235,7 +3271,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         req = urllib.request.Request(url, headers={
-            "user-agent": qd.UA, "cookie": drv.cookie, "referer": "https://pan.quark.cn/"})
+            "user-agent": qd.CLIENT_UA, "cookie": drv.cookie, "referer": "https://pan.quark.cn/"})
         try:
             with urllib.request.urlopen(req, timeout=1800) as r:
                 while True:
@@ -3291,6 +3327,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_cloud_state())
                 if u.path == "/api/cloud/file":
                     return self.api_cloud_file(q)
+                if u.path == "/api/cloud/open":
+                    return self.api_cloud_open(q)
                 if u.path == "/api/affects":
                     return self._json(api_affects())
                 if u.path == "/api/mod/files":
