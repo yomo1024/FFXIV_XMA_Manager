@@ -3328,9 +3328,12 @@ def api_bridge_fix_cover(folder, dir_name=""):
             if any(_bridge_name_match(a, c) for a in keys_all for c in keys):
                 targets.append(p.get("dir"))
     if not targets:
-        return {"ok": False, "error": "在游戏里没找到对应的已装 mod（名字对不上）。"
-                                      "可以先把这条 mod 装进游戏，或在游戏里看看它的目录名。",
-                "mod": libname, "installed": [p.get("name") for p in plist][:20]}
+        return {"ok": False, "need_dir": True,
+                "error": "在游戏里没找到同名的已装 mod（名字对不上）。"
+                         "可以点「选目录补封面」从已装列表里挑一个；也能在游戏里先看看它的目录名。",
+                "mod": libname,
+                "installed": [{"name": p.get("name") or "", "dir": p.get("dir") or ""} for p in plist],
+                "installed_names": [p.get("name") for p in plist][:20]}
 
     results = []
     for d in targets:

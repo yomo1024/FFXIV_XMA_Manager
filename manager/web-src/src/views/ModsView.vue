@@ -1196,11 +1196,37 @@ async function diagCover() {
   }
 }
 
+/** 「选目录补封面」：自动匹配不上（改名 / Penumbra 里显示名对不上）时，从已装列表里挑 */
+const showPick = ref(false)
+const pickList = ref([])
+const pickDir = ref('')
+const pickBusy = ref(false)
+async function openPick(r) {
+  pickList.value = (r && r.installed && r.installed.length) ? r.installed : []
+  pickDir.value = ''
+  showPick.value = true
+  if (!pickList.value.length) {
+    try { pickList.value = (await api.bridgeInstalled()).items || [] }
+    catch (e) { msg.error('读不到游戏里的已装列表：' + e.message) }
+  }
+}
+async function doPick() {
+  if (!pickDir.value) return msg.warning('先选一个目录')
+  pickBusy.value = true
+  try {
+    const r = await api.bridgeFixCover(cur.value.folder, pickDir.value)
+    if (r.ok) msg.success('已把封面写进 ' + pickDir.value)
+    else msg.error(r.error || '补封面失败')
+    showPick.value = false
+  } catch (e) { msg.error(e.message) } finally { pickBusy.value = false }
+}
+
 async function fixCoverToGame() {
   if (!cur.value) return
   fixingCover.value = true
   try {
     const r = await api.bridgeFixCover(cur.value.folder)
+    if (!r.ok && r.need_dir) { await openPick(r); return }     // 名字对不上 → 让主人从已装列表挑目录
     if (r.ok) {
       const w = r.written || 0
       const s = r.skipped || 0
@@ -1587,6 +1613,7 @@ async function copyPath() {
             <n-button block size="small" :disabled="!cur" :loading="fixingCover"
                       @click="fixCoverToGame">补封面到游戏</n-button>
         <n-button size="tiny" quaternary :disabled="!cur" @click="diagCover">诊断封面</n-button>
+        <n-button size="tiny" quaternary :disabled="!cur" @click="openPick(null)">选目录补封面</n-button>
           </div>
 
           <div class="oplinks">
@@ -1898,6 +1925,24 @@ async function copyPath() {
         <n-space justify="end">
           <n-button size="small" @click="showReplace = false">取消</n-button>
           <n-button size="small" type="primary" :loading="repReplacing" @click="submitReplace">开始替换</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+    <!-- 选目录补封面：自动匹配不上时用 -->
+    <n-modal v-model:show="showPick" preset="card" style="width: 560px" title="选一个已装目录，把封面写进去">
+      <n-alert type="info" :show-icon="false" style="margin-bottom:10px">
+        名字对不上时会走到这里。列表来自游戏内插件（Penumbra 里的显示名 ｜ 目录名）；
+        选中的那条目录里会被写入 <code>cover.webp</code> + <code>images\_MetaImage</code>。
+      </n-alert>
+      <n-select v-model:value="pickDir" :options="pickList.map(x => ({ label: (x.name || '') + '  ｜  ' + x.dir, value: x.dir }))"
+                filterable placeholder="搜索并选择 Penumbra 里的目录" style="width:100%" />
+      <div class="dim" style="margin-top:8px">共 {{ pickList.length }} 条已装 mod</div>
+      <template #footer>
+        <n-space justify="end">
+          <n-button size="small" @click="showPick = false">取消</n-button>
+          <n-button size="small" type="primary" :loading="pickBusy" :disabled="!pickDir" @click="doPick">
+            写进这个目录
+          </n-button>
         </n-space>
       </template>
     </n-modal>

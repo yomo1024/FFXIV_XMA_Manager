@@ -52,10 +52,9 @@ export const api = {
   bridgeAutopair: () => req('/api/bridge/autopair', { method: 'POST', body: '{}' }),
   bridgeInstalled: () => req('/api/bridge/installed'),
   bridgeCoverCheck: (folder, dir) => req('/api/bridge/cover-check',
-    { method: 'POST', body: JSON.stringify({ folder, dir: dir || '' }) }), req('/api/bridge/cover-check',
-    { method: 'POST', body: JSON.stringify({ folder }) }),
-  bridgeFixCover: (folder) =>
-    req('/api/bridge/fix-cover', { method: 'POST', body: JSON.stringify({ folder }) }),
+    { method: 'POST', body: JSON.stringify({ folder, dir: dir || '' }) }),
+  bridgeFixCover: (folder, dir) =>
+    req('/api/bridge/fix-cover', { method: 'POST', body: JSON.stringify({ folder, dir: dir || '' }) }),
   bridgeSyncCovers: (dryRun) =>
     req('/api/bridge/sync-covers', { method: 'POST', body: JSON.stringify({ dryRun: !!dryRun }) }),
 
