@@ -2077,10 +2077,53 @@ def api_mod_remove_tags(b):
     return {"ok": True, "removed": n, "mods": len(folders), "tags": want}
 
 
+def _cat_disk_scan(root: Path) -> dict:
+    """一次遍历磁盘：每个分类下有哪些类型目录(SFW/NSFW)、多少文件、有哪些子分类目录（带相对路径）"""
+    out = {}
+    if not root.is_dir():
+        return out
+    for d in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name):
+        info = {"zones": [], "files": 0, "loose": 0, "subs": []}
+        try:
+            info["files"] = sum(1 for q in d.rglob("*") if q.is_file())
+        except OSError:
+            pass
+        for z in ("SFW", "NSFW"):
+            if (d / z).is_dir():
+                info["zones"].append(z)
+        seen = set()
+        for zone, base in [("", d)] + [(z, d / z) for z in info["zones"]]:
+            try:
+                kids = sorted(base.iterdir(), key=lambda p: p.name)
+            except OSError:
+                continue
+            for e in kids:
+                if e.is_file():
+                    info["loose"] += 1
+                    continue
+                if not e.is_dir() or mm.MOD_RE.match(e.name):     # Mod 文件夹不算子分类
+                    continue
+                if e.name.upper() in ("SFW", "NSFW"):     # 类型目录本身不是子分类
+                    continue
+                if e.name in seen or e.name.startswith("."):
+                    continue
+                seen.add(e.name)
+                try:
+                    nf = sum(1 for q in e.rglob("*") if q.is_file())
+                except OSError:
+                    nf = 0
+                info["subs"].append({"name": e.name, "files": nf, "zone": zone,
+                                     "abs": str(e),
+                                     "path": ("%s/%s" % (zone, e.name)) if zone else e.name})
+        out[d.name] = info
+    return out
+
+
 def api_categories():
     cfg = cfg_now()
     root = Path(cfg["root"] or "")
     order = list(cfg.get("category_order") or [])
+    scan = _cat_disk_scan(root)
     on_disk = []
     if root.is_dir():
         on_disk = [d.name for d in sorted(root.iterdir()) if d.is_dir()]
@@ -2094,22 +2137,35 @@ def api_categories():
     names = []
     for c in sorted(set(order) | set(on_disk) | set(counts),
                     key=lambda c: (order.index(c) if c in order else 99, c)):
+        dsk = scan.get(c) or {}
+        db_subs = dict(subs.get(c, {}))
+        merged, used = [], set()
+        for s in dsk.get("subs", []):
+            nm = s["name"]
+            cnt = 0
+            for dbn, n in db_subs.items():                 # 库里叫 "a/b" 时按最后一段匹配
+                if dbn == nm or dbn.split(os.sep)[-1] == nm:
+                    cnt += n
+                    used.add(dbn)
+            merged.append({"name": nm, "path": s["path"], "zone": s["zone"], "abs": s["abs"],
+                           "files": s["files"], "count": cnt, "on_disk": True})
+        for dbn, n in sorted(db_subs.items()):
+            if dbn in used:
+                continue
+            merged.append({"name": dbn, "path": "", "zone": "", "abs": "", "files": 0,
+                           "count": n, "on_disk": False})
+        merged.sort(key=lambda x: (not x["on_disk"], x["name"]))
         names.append({"name": c, "count": counts.get(c, 0), "on_disk": c in on_disk,
-                      "subcats": [{"name": s, "count": n}
-                                  for s, n in sorted(subs.get(c, {}).items())]})
-    # 磁盘上有、但库里/顺序里没有的子分类目录
-    if root.is_dir():
-        for c in names:
-            for zone in ("SFW", "NSFW"):
-                d = root / c["name"] / zone
-                if not d.is_dir():
-                    continue
-                for e in sorted(d.iterdir()):
-                    if e.is_dir() and not mm.MOD_RE.match(e.name):
-                        c.setdefault("disk_subcats", [])
-                        if e.name not in c["disk_subcats"]:
-                            c["disk_subcats"].append(e.name)
-    return {"cats": names, "order": order}
+                      "abs": str(root / c) if root.is_dir() else "",
+                      "files": dsk.get("files", 0), "loose": dsk.get("loose", 0),
+                      "zones": dsk.get("zones", []), "subcats": merged,
+                      "sub_count": len(merged)})
+    stats = {"cats": len(names), "on_disk": len(on_disk),
+             "mods": sum(counts.values()),
+             "subcats": sum(c["sub_count"] for c in names),
+             "empty": sum(1 for c in names if not c["count"] and not c["files"]),
+             "files": sum(c["files"] for c in names)}
+    return {"cats": names, "order": order, "stats": stats}
 
 
 def api_dupes():
@@ -3908,6 +3964,30 @@ class Handler(BaseHTTPRequestHandler):
             cfg["category_order"] = order
             save_cfg(cfg)
 
+        def sub_target(cat, path):
+            """把「相对分类目录的路径」（可能带 SFW/NSFW 前缀）解析成安全目录"""
+            cat = str(cat or "").strip()
+            raw = str(path or "").strip().replace("\\", "/").strip("/")
+            if not cat or "/" in cat or "\\" in cat or not raw:
+                return None, "参数不合法"
+            segs = [s for s in raw.split("/") if s]
+            if not segs or any(s in (".", "..") for s in segs):
+                return None, "路径不合法"
+            if segs[-1].upper() in ("SFW", "NSFW") or segs[0].upper() in ("SFW", "NSFW") and len(segs) == 1:
+                return None, "SFW / NSFW 目录不能改名或删除"
+            if mm.MOD_RE.match(segs[-1]):
+                return None, "这看起来是一个 Mod 文件夹，请用「删除 Mod」"
+            tgt = root.joinpath(cat, *segs)
+            try:
+                tgt.resolve().relative_to(root.resolve())
+            except Exception:
+                return None, "路径越界"
+            return tgt, ""
+
+        def refresh():
+            mm.cmd_scan(cfg, quiet=True)
+            mod_index(force=True)
+
         if act == "create":
             name = str(b.get("name") or "").strip()
             if not name or "/" in name or "\\" in name:
@@ -3954,6 +4034,10 @@ class Handler(BaseHTTPRequestHandler):
             if left and not b.get("force"):
                 return self._json({"error": "这个分类里还有 %d 个文件，"
                                             "确认要一起删吗？" % len(left)}, 409)
+            try:
+                nmods = sum(1 for m in mm.Store().all() if m["category"] == name)
+            except Exception:
+                nmods = 0
             if not mm.send_to_recycle_bin(d):
                 shutil.rmtree(d, ignore_errors=True)
             if name in order:
@@ -3962,7 +4046,9 @@ class Handler(BaseHTTPRequestHandler):
                 save_cfg(cfg)
             mm.cmd_scan(cfg, quiet=True)
             mod_index(force=True)
-            return self._json({"ok": True})
+            mm.log("分类管理：删除分类「%s」（%d 个文件，%s）"
+                   % (name, len(left), "已移入回收站"))
+            return self._json({"ok": True, "files": len(left), "mods": nmods})
 
         if act == "order":
             names = [str(x) for x in (b.get("order") or []) if str(x).strip()]
@@ -3979,6 +4065,30 @@ class Handler(BaseHTTPRequestHandler):
             base = root / cat / zone if zone in ("SFW", "NSFW") else root / cat
             (base / name).mkdir(parents=True, exist_ok=True)
             return self._json({"ok": True, "path": str(base / name)})
+
+        if act in ("subdir-rename", "subdir-delete"):
+            tgt, err = sub_target(b.get("category"), b.get("path"))
+            if tgt is None:
+                return self._json({"error": err}, 400)
+            if not tgt.is_dir():
+                return self._json({"error": "这个子分类目录不存在（可能只在库里，磁盘上已经被删了）"}, 404)
+            if act == "subdir-rename":
+                new = str(b.get("new_name") or "").strip()
+                if not new or "/" in new or "\\" in new or new in (".", ".."):
+                    return self._json({"error": "名字不合法"}, 400)
+                dst = tgt.with_name(new)
+                if dst.exists():
+                    return self._json({"error": "新名字已经被占了"}, 400)
+                os.rename(str(tgt), str(dst))
+                refresh()
+                return self._json({"ok": True, "name": new})
+            files = [p for p in tgt.rglob("*") if p.is_file()]
+            if files and not b.get("force"):
+                return self._json({"error": "这个子分类里还有 %d 个文件，确认一起删吗？" % len(files)}, 409)
+            if not mm.send_to_recycle_bin(tgt):
+                shutil.rmtree(tgt, ignore_errors=True)
+            refresh()
+            return self._json({"ok": True, "files": len(files)})
 
         return self._json({"error": "不认识的操作：%s" % act}, 400)
 
