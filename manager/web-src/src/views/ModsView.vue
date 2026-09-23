@@ -1194,8 +1194,8 @@ async function copyPath() {
           </div>
         </n-card>
 
-        <!-- ③ 内容描述区（XMA 左下）：描述 / 文件 / 历史 -->
-        <n-card size="small" class="descbox-card">
+        <!-- ③ 内容描述区（XMA 左下）：描述 / 文件 / 历史 —— 只在展开时给，窄栏不占地方 -->
+        <n-card v-if="detmode !== 'narrow'" size="small" class="descbox-card">
           <n-tabs v-model:value="dtabs" size="small" type="line" animated>
             <n-tab-pane name="desc" tab="描述">
               <div v-if="cur?.desc" class="desctext">{{ cur.desc }}</div>
@@ -1266,10 +1266,10 @@ async function copyPath() {
             </n-button-group>
           </template>
 
-          <div class="who">
-            <span class="ava">{{ (cur?.author || '?').slice(0, 1) }}</span>
-            <span class="wname">{{ cur?.author || '未选择 Mod' }}</span>
-            <n-tag v-if="cur?.nsfw" size="tiny" :bordered="false">{{ cur.nsfw }}</n-tag>
+          <div v-if="cur" class="who">
+            <span class="ava">{{ (cur.author || '?').slice(0, 1).toUpperCase() }}</span>
+            <span class="wname">{{ cur.author || '未知作者' }}</span>
+            <n-tag v-if="cur.nsfw" size="tiny" :bordered="false" class="wtag">{{ cur.nsfw }}</n-tag>
           </div>
 
           <div class="opgrid">
@@ -1692,9 +1692,9 @@ async function copyPath() {
 }
 /* ---- 详情展开：半屏 / 全屏。排布照 XMA mod 页的五个分区 ----
    左列 = ① 标题 ② 大图轮播 ③ 描述/文件/历史 ；右列 = ④ 操作 ⑤ 元信息
-   两列各自独立堆叠（列内不留空档），列宽比 2:1 ---- */
+   两列各自独立堆叠（列内不留空档）：半屏 3:1、全屏 2:1 ---- */
 .wrap.det-half {
-  /* 半屏 = 列表让出大半，详情拿 60%：这样内部才排得下 2:1 的两列 */
+  /* 半屏 = 列表让出大半，详情拿 60%：这样内部才排得下两列 */
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
 }
 .wrap.det-full {
@@ -1706,17 +1706,24 @@ async function copyPath() {
 .wrap.det-half .right,
 .wrap.det-full .right {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
+  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);   /* 全屏 2:1 */
   grid-template-areas:
     'bar bar'
     'main side';
   gap: 10px;
   align-items: start;
+  /* 关键：不写这句，栅格默认 align-content:stretch 会把 auto 行平摊撑高 ——
+     实测窗口高 1500 时状态条那行从 40px 涨到 121px，标题上方就空出一大块 */
+  align-content: start;
   min-height: 0;
 }
 .wrap.det-half .bridge-bar,
 .wrap.det-full .bridge-bar {
   grid-area: bar;
+}
+/* 半屏：列比 3:1（主人指定）—— 主区更大、侧栏更窄 */
+.wrap.det-half .right {
+  grid-template-columns: minmax(0, 3fr) minmax(180px, 1fr);
 }
 .wrap.det-half .col-main,
 .wrap.det-full .col-main {
@@ -1970,31 +1977,42 @@ async function copyPath() {
   margin: 0 7px 0 4px;
   opacity: 0.45;
 }
+/* 作者：做成 XMA 那样的作者小卡（圆头像 + 名字 + 类型靠右），别再挤成一团 */
 .who {
   display: flex;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 8px;
+  gap: 8px;
+  margin-bottom: 9px;
+  padding: 6px 9px;
+  border: 1px solid rgba(128, 128, 128, 0.22);
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.06);
 }
 .who .ava {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(128, 128, 128, 0.22);
+  background: linear-gradient(135deg, #6aa9ff, #4c7bd9);
+  color: #fff;
   font-size: 13px;
-  font-weight: 600;
-  text-transform: uppercase;
+  font-weight: 700;
+  line-height: 1;
 }
 .who .wname {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.who .wtag {
+  flex: 0 0 auto;
 }
 .stats {
   display: grid;
