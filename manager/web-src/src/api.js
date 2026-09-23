@@ -76,6 +76,8 @@ export const api = {
   cloudArchive: (body) => req('/api/cloud/archive', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudRestore: (body) => req('/api/cloud/restore', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudVerify: (body) => req('/api/cloud/verify', { method: 'POST', body: JSON.stringify(body || {}) }),
+  cloudReconcile: (folders, write) => req('/api/cloud/reconcile',
+    { method: 'POST', body: JSON.stringify({ folders: folders || [], write: !!write }) }),
   modFileUrl: (folder, name) => '/api/mod/download?folder=' + encodeURIComponent(folder)
     + '&name=' + encodeURIComponent(name),
   history: (folder) => req('/api/mod/history?folder=' + encodeURIComponent(folder)),
@@ -150,6 +152,14 @@ export function jobResultText(s) {
         (un ? ` ｜ ${un} 条读不到（可能被站点挡了）` : '') +
         (sk ? ` ｜ 跳过 ${sk} 条（来源不是 XMA / heliosphere）` : '') +
         (n ? '（表格里带「有新版」标记，勾上点「更新选中」即可）' : '')
+    }
+    case 'cloud_reconcile': {
+      const f = (r.found || []).length
+      const mi = (r.missing || []).length
+      const lo = (r.local_only || []).length
+      return `${r.write ? '对账完成' : '对账预览（没改任何东西）'}：共 ${r.checked || 0} 条 ｜ ` +
+        `云端有载荷 ${f} 条（${r.total_files || 0} 个文件 / ${Math.round((r.total_size || 0) / 1048576)} MB）` +
+        (mi ? ` ｜ 云端找不到 ${mi} 条` : '') + (lo ? ` ｜ 本地有云端没有 ${lo} 条` : '')
     }
     case 'mod_update': {
       const ok = (r.ok || []).length

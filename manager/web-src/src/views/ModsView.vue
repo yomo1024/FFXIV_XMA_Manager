@@ -326,6 +326,21 @@ async function checkUpdates() {
   }
 }
 
+// ---------------- 与网盘对账：以云端实况为准重建归档状态 ----------------
+function askReconcile() {
+  const list = (folders && folders.length) ? folders : cloudTargets()
+  dialog.warning({
+    title: '与网盘对账',
+    content: '拿**云端实况**核对每条 Mod 到底归档没有，并重建「已归档」状态与云端载荷清单。\n'
+      + '用在：换电脑后 / 索引库丢了云状态 / 你在网盘里手工整理过。\n'
+      + (list.length ? `只对选中的 ${list.length} 条对账。` : '没勾选 → 对全部 Mod 对账。')
+      + '\n不下载、不删除任何文件，只改索引库里的记录。',
+    positiveText: '只看不改（预览）',
+    negativeText: '取消',
+    onPositiveClick: () => { startJob('cloud_reconcile', { folders: list, write: false }) },
+  })
+}
+
 // ---------------- 云端文件下载（带进度条）----------------
 const dl = ref(null)               // {name, done, total, pct, speed, state, error}
 let dlCtl = null                   // AbortController，取消用
@@ -1231,6 +1246,7 @@ async function copyPath() {
         <n-button size="small" :loading="updateChecking" @click="checkUpdates">检查更新</n-button>
         <n-button size="small" :loading="cloudBusy" @click="archiveCloud()">归档到云盘</n-button>
         <n-button size="small" :loading="cloudBusy" @click="restoreCloud()">从云盘取回</n-button>
+        <n-button size="small" :loading="cloudBusy" @click="askReconcile">与网盘对账</n-button>
         <template v-if="updCount">
           <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
                     @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>

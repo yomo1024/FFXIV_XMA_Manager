@@ -278,7 +278,8 @@ JOB_TITLES = {"scan": "扫描目录", "export": "生成 Excel", "run": "扫描�
               "fetch": "解析并下载入库",
               "update_check": "检查更新", "mod_update": "更新 Mod（覆盖下载）",
               "cloud_archive": "归档到云盘", "cloud_restore": "从云盘取回",
-              "cloud_verify": "校验云端文件"}
+              "cloud_verify": "校验云端文件",
+              "cloud_reconcile": "与网盘对账（重建归档状态）"}
 
 
 # --------------------------------------------------------------------- 各任务
@@ -1354,6 +1355,89 @@ def _cloud_upload_one(drv, qd, pay, fid_dir) -> dict:
             "why": "" if ok else "云端大小对不上（本地 %s / 云端 %s）" % (pay["size"], csize)}
 
 
+def _cloud_walk(drv, fid, prefix="", depth=0, out=None):
+    """递归列出云端某目录下的所有文件 → [(相对路径, 大小, fid)]"""
+    out = [] if out is None else out
+    if depth > 8:
+        return out
+    for it in drv.list_dir(fid):
+        nm = it.get("file_name") or ""
+        if not nm:
+            continue
+        if it.get("dir"):
+            _cloud_walk(drv, it.get("fid"), prefix + nm + "/", depth + 1, out)
+        else:
+            out.append((prefix + nm, int(it.get("size") or 0), it.get("fid") or ""))
+    return out
+
+
+def _job_cloud_reconcile(job: Job):
+    """与网盘对账：以**云端实况**为准，重建每条 Mod 的归档状态与云端载荷清单。
+
+    用途：迁机后 / 索引库丢了云状态 / 云端被手工整理过 —— 只要云盘里那份还在，就能认回来。
+    """
+    cfg = cfg_now()
+    if not (cfg.get("cloud_cookie") or "").strip():
+        raise RuntimeError("还没填夸克 Cookie（设置 → 云存储）")
+    drv = cloud_drive(cfg)
+    write = bool(job.params.get("write", True))
+    only = {str(f) for f in (job.params.get("folders") or [])}
+    st = mm.Store()
+    rows = [r for r in st.all() if (not only or r["folder"] in only)]
+    total = max(1, len(rows))
+    found, missing, local_only, errs = [], [], [], []
+    for i, r in enumerate(rows, 1):
+        if job.cancelled():
+            raise mm.BackupCancelled()
+        folder = r["folder"]
+        cpath = mod_cloud_path(cfg, folder)
+        job.set(i - 1, total, "%s ｜ %s" % (str(r["name"])[:24], cpath))
+        try:
+            fid = drv.resolve(cpath)
+        except Exception as e:
+            errs.append({"folder": folder, "name": r["name"], "why": str(e)[:120]})
+            continue
+        has_local = bool(local_payloads(folder))
+        if not fid:                        # 云端没有这个目录
+            if has_local:
+                local_only.append({"folder": folder, "name": r["name"], "path": cpath})
+                if write:
+                    st.set_cloud(folder, state="local")
+            else:
+                missing.append({"folder": folder, "name": r["name"], "path": cpath})
+                if write:
+                    st.set_cloud(folder, state="missing")
+            continue
+        all_files = _cloud_walk(drv, fid)   # 云端目录里的全部文件（含预览图/地址.txt）
+        # 只有这些才算「载荷」——云端目录里还可能有图/地址.txt，不能都当载荷
+        # （否则详情「云端载荷」会列出图片、大小也虚高）
+        files = [x for x in all_files if os.path.splitext(x[0])[1].lower() in PAYLOAD_EXT]
+        if not files:
+            (local_only if has_local else missing).append(
+                {"folder": folder, "name": r["name"], "path": cpath,
+                 "note": "云端有目录但里面没有载荷文件（%d 个其它文件）" % len(all_files)})
+            if write:
+                st.set_cloud(folder, state="local" if has_local else "missing")
+            continue
+        size = sum(x[1] for x in files)
+        found.append({"folder": folder, "name": r["name"], "path": cpath,
+                      "files": len(files), "size": size, "has_local": has_local})
+        if write:
+            st.set_cloud(folder, backend="quark", path=cpath, state="archived",
+                         size=size, synced=now_str())
+            st.set_payload_files(folder, [{"rel_path": x[0], "size": x[1], "cloud_fid": x[2]}
+                                          for x in files], state="archived")
+    if write:
+        mod_index(force=True)
+    mm.log("云盘对账：%d 条里云端有 %d 条、云端没有 %d 条、本地独有 %d 条、出错 %d 条（%s）"
+           % (len(rows), len(found), len(missing), len(local_only), len(errs),
+              "已写回" if write else "只看不写"))
+    return {"write": write, "checked": len(rows), "found": found, "missing": missing,
+            "local_only": local_only, "errors": errs,
+            "total_files": sum(x["files"] for x in found),
+            "total_size": sum(x["size"] for x in found)}
+
+
 def _job_cloud_archive(job: Job):
     """归档：整条 mod 的载荷树上传到夸克 → 逐文件校验 → 通过后才删本地载荷"""
     cfg = cfg_now()
@@ -1811,6 +1895,7 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "selfdownload": _job_selfdownload, "importfile": _job_import_file,
              "fetch": _job_fetch,
              "update_check": _job_update_check, "mod_update": _job_mod_update,
+             "cloud_reconcile": _job_cloud_reconcile,
              "cloud_archive": _job_cloud_archive, "cloud_restore": _job_cloud_restore,
              "cloud_verify": _job_cloud_verify}
 
@@ -3673,6 +3758,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api_mod_set_desc(body))
             if u.path == "/api/mod/site-meta":
                 return self._json(api_mod_set_site_meta(body))
+            if u.path == "/api/cloud/reconcile":
+                a = {"folders": body.get("folders") or [], "write": bool(body.get("write", True))}
+                job, err = start_job("cloud_reconcile", a)
+                if job is None:
+                    return self._json({"error": err}, 409)
+                return self._json({"ok": True, "kind": "cloud_reconcile",
+                                   "title": JOB_TITLES.get("cloud_reconcile"),
+                                   "dry_run": not a["write"]})
             if u.path == "/api/cloud/archive":
                 a = api_cloud_archive(body)
                 if a.get("error"):
