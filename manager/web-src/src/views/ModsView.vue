@@ -16,6 +16,10 @@ const msg = useMessage()
 const dialog = useDialog()
 
 const cur = ref(null)
+const detmax = ref(false)          // 详情全屏：右栏铺满窗口，列表收起来（选中项不变，上下文不丢）
+function toggleDetmax() {
+  detmax.value = !detmax.value
+}
 const q = ref('')
 const cat = ref('')
 const zone = ref('')
@@ -598,7 +602,8 @@ function onKey(e) {
       useAsPreview(shots.value[shotIdx.value])
       break
     case 'Escape':
-      if (focusArea.value === 'strip') focusArea.value = 'table'
+      if (detmax.value) detmax.value = false
+      else if (focusArea.value === 'strip') focusArea.value = 'table'
       else q.value = ''
       break
   }
@@ -751,6 +756,16 @@ const rowProps = (row) => ({
       shotsFor.value = row.folder
       loadShots(row.folder)
     }
+  },
+  // 双击一行 = 直接全屏看这条（长内容 / 多图时不用再点按钮）
+  onDblclick: () => {
+    focusArea.value = 'table'
+    cur.value = row
+    if (row.folder !== shotsFor.value) {
+      shotsFor.value = row.folder
+      loadShots(row.folder)
+    }
+    detmax.value = true
   },
 })
 
@@ -921,7 +936,7 @@ async function copyPath() {
 </script>
 
 <template>
-  <div class="wrap">
+  <div class="wrap" :class="{ detmax }">
     <div class="left">
       <div class="bar">
         <n-input ref="searchEl" v-model:value="q" placeholder="搜索 名称／作者／标签／影响替换／路径…" size="small"
@@ -1028,39 +1043,39 @@ async function copyPath() {
         </n-button>
       </div>
 
-      <!-- 操作：放最上面。按钮两列等宽（block）→ 天然对齐，不会长短不齐 -->
+      <!-- 操作：放最上面。主动作两列等宽，文件类收成一行小字按钮 → 又矮又不挤 -->
       <n-card size="small" title="操作" class="act-card">
-        <div class="opsec">
-          <span class="seclbl">版本更新</span>
-          <div class="opgrid">
-            <n-button block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
-                      @click="updateOne(cur)">
-              {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
-            </n-button>
-            <n-button block size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
-          </div>
-          <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
+        <template #header-extra>
+          <n-button size="tiny" quaternary
+                    :title="detmax ? '回到列表（窄栏）' : '全屏看这条详情（双击列表某一行也行）'"
+                    @click="toggleDetmax">{{ detmax ? '⤡ 收窄' : '⤢ 全屏' }}</n-button>
+        </template>
+
+        <div class="opgrid">
+          <n-button block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
+                    @click="updateOne(cur)">
+            {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
+          </n-button>
+          <n-button block size="small" type="primary" :disabled="!cur" :loading="installing"
+                    @click="installToGame(false)">安装到游戏</n-button>
+          <n-button block size="small" :disabled="!cur" @click="openReplace">上传新文件替换…</n-button>
+          <n-button block size="small" :disabled="!cur" :loading="fixingCover"
+                    @click="fixCoverToGame">补封面到游戏</n-button>
         </div>
 
-        <div class="opsec">
-          <span class="seclbl">游戏内</span>
-          <div class="opgrid">
-            <n-button block size="small" type="primary" :disabled="!cur" :loading="installing"
-                      @click="installToGame(false)">安装到游戏</n-button>
-            <n-button block size="small" :disabled="!cur" :loading="fixingCover"
-                      @click="fixCoverToGame">补封面到游戏</n-button>
-          </div>
+        <div class="oplinks">
+          <n-button text size="tiny" :disabled="!cur" @click="cur && api.open('folder', cur.folder)">
+            打开文件夹
+          </n-button>
+          <span class="sep">·</span>
+          <n-button text size="tiny" :disabled="!cur" @click="copyPath">复制路径</n-button>
+          <template v-if="cur?.has_img">
+            <span class="sep">·</span>
+            <n-button text size="tiny" tag="a" :href="api.raw(cur.folder)" target="_blank">查看原图</n-button>
+          </template>
         </div>
 
-        <div class="opsec">
-          <span class="seclbl">文件</span>
-          <div class="opgrid">
-            <n-button block size="small" :disabled="!cur" @click="api.open('folder', cur.folder)">打开文件夹</n-button>
-            <n-button block size="small" :disabled="!cur" @click="copyPath">复制路径</n-button>
-            <n-button v-if="cur?.has_img" block size="small" tag="a" :href="api.raw(cur.folder)"
-                      target="_blank">查看原图</n-button>
-          </div>
-        </div>
+        <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
       </n-card>
 
       <n-card size="small" :title="cur ? cur.name : '预览'" class="pv-card">
@@ -1444,6 +1459,42 @@ async function copyPath() {
   /* 实在放不下时滚动，绝不把内容裁掉 */
   overflow: auto;
 }
+/* ---- 详情全屏：右栏铺满窗口（预览放大 + 信息单独一列），列表收起但上下文不丢 ---- */
+.wrap.detmax {
+  grid-template-columns: minmax(0, 1fr);
+}
+.wrap.detmax .left {
+  display: none;
+}
+.wrap.detmax .right {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    'bar bar'
+    'pv act'
+    'pv info';
+  gap: 10px;
+}
+.wrap.detmax .bridge-bar {
+  grid-area: bar;
+}
+.wrap.detmax :deep(.pv-card) {
+  grid-area: pv;
+}
+.wrap.detmax .act-card {
+  grid-area: act;
+}
+.wrap.detmax :deep(.desc-card) {
+  grid-area: info;
+}
+.wrap.detmax :deep(.preview) {
+  min-height: 32vh;
+}
+.wrap.detmax :deep(.preview img) {
+  max-height: 58vh;
+}
+
 /* 预览卡片：按内容高度（图 + 缩略图条），不会撑出一块空白 */
 :deep(.pv-card) {
   flex: 0 0 auto;
@@ -1645,6 +1696,25 @@ async function copyPath() {
   flex: 1 1 auto;
   min-width: 0;
 }
+/* 长取值必须换行显示，不能顶出面板（实测最长 535px，容器只有 296px） */
+.tagedit :deep(.n-tag) {
+  max-width: 100%;
+  height: auto;
+  min-height: 22px;
+  white-space: normal;
+  align-items: flex-start;
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+.tagedit :deep(.n-tag__content) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
+}
+.tagedit :deep(.n-tag__close) {
+  margin-top: 2px;
+}
 .bridge-bar {
   flex: 0 0 auto;
   display: flex;
@@ -1706,26 +1776,16 @@ async function copyPath() {
   flex: 1 1 auto;
   min-height: 8px;
 }
-/* 操作卡片：分区 + 两列等宽网格，按钮永远对齐 */
+/* 操作卡片：主动作两列等宽网格 + 文件类收成一行小字按钮（省高度，不挤） */
 .act-card {
   flex: 0 0 auto;
   margin-top: 2px;
 }
+.act-card :deep(.n-card-header) {
+  padding: 8px 12px 4px;
+}
 .act-card :deep(.n-card__content) {
-  padding: 8px 12px 12px;
-}
-.opsec + .opsec {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed rgba(128, 128, 128, 0.2);
-}
-.opsec .seclbl {
-  display: block;
-  font-size: 11px;
-  line-height: 1;
-  letter-spacing: 0.03em;
-  opacity: 0.5;
-  margin: 0 0 6px 1px;
+  padding: 4px 12px 10px;
 }
 .opgrid {
   display: grid;
@@ -1735,8 +1795,19 @@ async function copyPath() {
 .opgrid :deep(.n-button) {
   justify-content: center;
 }
+.oplinks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  margin-top: 6px;
+}
+.oplinks .sep {
+  opacity: 0.28;
+  font-size: 11px;
+}
 .opnote {
-  margin-top: 5px;
+  margin-top: 4px;
   font-size: 12px;
   opacity: 0.55;
 }
