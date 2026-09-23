@@ -675,6 +675,41 @@ public static class Program
         Check("给了 coverDrawPath 时 images\\_MetaImage 用那份（jpg）",
             cvDraw.Ok && File.Exists(Path.Combine(mDraw, "images", "_MetaImage.jpg")), cvDraw.Error);
 
+        // ---------- 13.5 覆盖安装时找回目标目录（InstallTarget）----------
+        Console.WriteLine();
+        Console.WriteLine("覆盖安装时找回目标目录（同名 mod 已存在、Penumbra 不新增目录时不能直接失败）：");
+        var modsMap = new Dictionary<string, string>
+        {
+            ["11.[Rion] [Rion] Girly Pop"] = "[Rion] Girly Pop",
+            ["hs-Trigun [Tre]-1.0.0-EXXk"] = "[HS] Trigun",
+        };
+        Check("① 目录名提示一致 → 命中",
+            ModBridge.Http.InstallTarget.PickExisting("11.[Rion] [Rion] Girly Pop", null, modsMap) == "11.[Rion] [Rion] Girly Pop");
+        Check("② 包内 Name 一致 → 命中",
+            ModBridge.Http.InstallTarget.PickExisting(null, "[Rion] Girly Pop", modsMap) == "11.[Rion] [Rion] Girly Pop");
+        Check("③ 规范化后一致（去 hs-/序号）→ 命中",
+            ModBridge.Http.InstallTarget.PickExisting(null, "Trigun", modsMap) == "hs-Trigun [Tre]-1.0.0-EXXk");
+        Check("④ 完全对不上 → null（绝不乱写别人的目录）",
+            ModBridge.Http.InstallTarget.PickExisting("完全不同的名字", "也不同的名字", modsMap) is null);
+        Check("⑤ 空列表 → null",
+            ModBridge.Http.InstallTarget.PickExisting("x", "y", new Dictionary<string, string>()) is null);
+        var pkNameDir = Path.Combine(root, "pkname");
+        Directory.CreateDirectory(pkNameDir);
+        var pkName = Path.Combine(pkNameDir, "n.pmp");
+        using (var fs = File.Create(pkName))
+        using (var za = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            var e = za.CreateEntry("meta.json");
+            using var w = new StreamWriter(e.Open());
+            w.Write("{\"Name\":\"[Rion] Girly Pop\"}");
+        }
+        Check("⑥ 能从包里读出 Name",
+            ModBridge.Http.InstallTarget.PackageMetaName(pkName) == "[Rion] Girly Pop",
+            ModBridge.Http.InstallTarget.PackageMetaName(pkName) ?? "null");
+        Check("⑦ 用包内 Name 找回目录",
+            ModBridge.Http.InstallTarget.PickExisting(null, null, modsMap, pkName) == "11.[Rion] [Rion] Girly Pop");
+        Check("⑧ 不存在的包 → null", ModBridge.Http.InstallTarget.PackageMetaName(Path.Combine(root, "nope.pmp")) is null);
+
         // ---------- 14. 真包实测（可选）：设 MODBRIDGE_TEST_PMP 就跑真实的 mod 包，
         //     走一遍"封面注入 → 模拟 Penumbra 解包"，直接看装出来有没有图
         var realPmp = Environment.GetEnvironmentVariable("MODBRIDGE_TEST_PMP");

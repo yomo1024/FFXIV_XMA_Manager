@@ -51,6 +51,9 @@ export const api = {
     req('/api/bridge/decide', { method: 'POST', body: JSON.stringify({ requestId, approve }) }),
   bridgeAutopair: () => req('/api/bridge/autopair', { method: 'POST', body: '{}' }),
   bridgeInstalled: () => req('/api/bridge/installed'),
+  coverAudit: (folders, fix) => req('/api/bridge/cover-audit',
+    { method: 'POST', body: JSON.stringify({ folders: folders || [], fix: !!fix }) }),
+  coverAuditLast: () => req('/api/bridge/cover-audit/last'),
   bridgeCoverCheck: (folder, dir) => req('/api/bridge/cover-check',
     { method: 'POST', body: JSON.stringify({ folder, dir: dir || '' }) }),
   bridgeFixCover: (folder, dir) =>
@@ -160,21 +163,18 @@ export function jobResultText(s) {
       const f = (r.found || []).length
       const mi = (r.missing || []).length
       const lo = (r.local_only || []).length
+      const cov = r.total_covers ?? (r.found || []).reduce((s, x) => s + (x.covers || 0), 0)
       return `${r.write ? '对账完成' : '对账预览（没改任何东西）'}：共 ${r.checked || 0} 条 ｜ ` +
         `云端有载荷 ${f} 条（${r.total_files || 0} 个文件 / ${Math.round((r.total_size || 0) / 1048576)} MB）` +
-        (r.total_covers ? ` ｜ 封面 ${r.total_covers} 张` : '') +
-        (r.found || []).reduce((s, x) => s + (x.covers || 0), 0)
-          ? ` ｜ 封面 ${(r.found || []).reduce((s, x) => s + (x.covers || 0), 0)} 张` : '' +
+        (cov ? ` ｜ 封面 ${cov} 张` : '') +
         (mi ? ` ｜ 云端找不到 ${mi} 条` : '') + (lo ? ` ｜ 本地有云端没有 ${lo} 条` : '')
     }
-    case 'cloud_archive': {
-      const items = r.items || []
-      const cov = r.covers ?? items.reduce((s, x) => s + (x.covers || 0), 0)
-      const cfail = items.reduce((s, x) => s + ((x.covers_failed || []).length), 0)
-      const mb = Math.round((r.bytes || 0) / 1048576)
-      return `归档完成：${r.ok || 0}/${r.done || 0} 条 ｜ 载荷 ${mb} MB ｜ 封面 ${cov} 张已上云（换机/新电脑靠它出图）` +
-        (r.deleted ? ` ｜ 删本地 ${r.deleted} 个` : '') +
-        (cfail ? ` ｜ ${cfail} 张封面没传上去（看日志）` : '')
+    case 'cover_audit': {
+      const rows = r.rows || []
+      const bad = rows.filter(x => x.status === 'fake' || x.status === 'noimg' || x.status === 'no_dir')
+      return `封面体检：共 ${r.checked || 0} 条 ｜ 游戏里已经有图 ${r.ok || 0} 条 ｜ 需要处理 ${bad.length} 条` +
+        (r.no_dir ? `（其中 ${r.no_dir} 条对不上游戏目录，用「选目录补封面」挑一次）` : '') +
+        (r.fixed_now ? ` ｜ 这次补了 ${r.fixed || 0} 条${r.failed ? `，失败 ${r.failed}` : ''}` : '')
     }
     case 'cloud_archive': {
       const items = r.items || []

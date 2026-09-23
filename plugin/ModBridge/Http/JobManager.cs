@@ -272,7 +272,20 @@ public sealed class JobManager : IDisposable
             var (dir, name) = await WaitForNewModAsync(before, job, TimeSpan.FromSeconds(90))
                 .ConfigureAwait(false);
             if (dir is null)
-                throw new TimeoutException("等了 90 秒没在 Penumbra 里看到这条 mod（可以打开 Penumbra 看看是不是解包失败）");
+            {
+                // ★ 没等到"新"目录 → 多半是**覆盖安装**：同名 mod 已经存在，Penumbra 不会新增目录。
+                //   老逻辑在这里直接超时退出 ⇒ 后面的封面步骤全都没执行 ⇒ 重装了还是没图（2026-09 主人现场）。
+                //   这里改成：按目录名提示 / 包内 Name 找回已存在的那个，继续把封面写进去。
+                var afterInstall = _bridge.Mods();
+                var existing = InstallTarget.PickExisting(job.WantDirName, null, afterInstall, dest);
+                if (existing is null)
+                    throw new TimeoutException(
+                        "等了 90 秒没在 Penumbra 里看到这条 mod，按名字也没找到已存在的同名目录"
+                        + "（可以打开 Penumbra 看看是不是解包失败）");
+                dir = existing;
+                name = afterInstall.TryGetValue(existing, out var nm) ? nm : existing;
+                job.Step($"Penumbra 没有新增目录（同名已存在 → 覆盖安装）：继续对现有目录 {dir} 写封面");
+            }
             job.ModDirName = dir;
             job.ModName = name;
             job.Step($"Penumbra 已装入：{dir}（{name}）");

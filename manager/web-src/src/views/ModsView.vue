@@ -437,6 +437,84 @@ function humanMB(n) {
   const v = Number(n || 0)
   return v >= 1048576 ? (v / 1048576).toFixed(1) + ' MB' : (v / 1024).toFixed(0) + ' KB'
 }
+// ---------------- 封面体检：游戏里那条 mod 目录到底有没有图（可一键补，不需要重装） ----------------
+const coverBusy = ref(false)
+
+/** 启动体检/补封面并等结果（用 run_id 对齐，避免和别的任务串了） */
+async function coverAuditRun(fix) {
+  const r0 = await api.coverAudit([], !!fix)
+  if (!r0 || r0.error) {
+    msg.error((r0 && r0.error) || '没启动起来')
+    return null
+  }
+  for (let i = 0; i < 200; i++) {
+    await new Promise((z) => setTimeout(z, 1200))
+    let last = null
+    try { last = await api.coverAuditLast() } catch (e) { continue }
+    if (last && last.run_id === r0.run_id && !last.running) return last
+  }
+  return null
+}
+
+function showCoverAudit(res) {
+  const rows = res.rows || []
+  const bad = rows.filter((x) => x.status === 'fake' || x.status === 'noimg')
+  const need = bad.filter((x) => x.dir)
+  const tag = {
+    ok: '✓ 有图', fixed: '✓ 已补好', fake: '✗ 伪 WebP（解不出来）',
+    noimg: '✗ 一张图都没有', no_dir: '? 对不上游戏目录',
+    no_plugin: '? 插件没连上', check_failed: '? 查询失败',
+  }
+  const lines = [`共 ${res.checked || 0} 条 ｜ 游戏里有图 ${res.ok || 0} 条 ｜ 缺图/伪图 ${bad.length} 条 ｜ 对不上目录 ${res.no_dir || 0} 条`, '']
+  for (const x of rows) {
+    lines.push(String(x.name || '').slice(0, 24).padEnd(26, ' ')
+      + String(tag[x.status] || x.status).padEnd(16, ' ')
+      + (x.dir ? x.dir.slice(0, 30) : '—'))
+    if (x.detail) lines.push('    └ ' + x.detail)
+  }
+  if (res.fixed_now) lines.push('', `本次补了 ${res.fixed || 0} 条` + (res.failed ? `，失败 ${res.failed} 条` : ''))
+  dialog.info({
+    title: '封面体检：游戏里到底有没有图',
+    content: () => h('pre', {
+      style: 'white-space:pre-wrap;word-break:break-all;max-height:52vh;overflow:auto;font-size:12px;margin:0;line-height:1.5',
+    }, lines.join('\n')),
+    positiveText: need.length ? `给缺图的补上（${need.length} 条）` : '知道了',
+    negativeText: need.length ? '先不补' : undefined,
+    onPositiveClick: async () => {
+      if (!need.length) return
+      const d2 = dialog.info({
+        title: '正在补封面…',
+        content: `把封面直接写进游戏里那 ${need.length} 条目录（不用重装）`,
+        positiveText: '', closable: false, maskClosable: false,
+      })
+      coverBusy.value = true
+      try {
+        const r = await coverAuditRun(true)
+        d2.destroy()
+        if (r) { msg.success(`已补 ${r.fixed || 0} 条` + (r.failed ? `，失败 ${r.failed} 条` : '')); showCoverAudit(r) }
+        else msg.warning('补封面没拿到结果（看日志）')
+      } finally { coverBusy.value = false }
+    },
+  })
+}
+
+async function askCoverAudit() {
+  coverBusy.value = true
+  const d = dialog.info({
+    title: '封面体检', content: '正在问游戏里的插件（逐条看它那边那条目录有没有图）…',
+    positiveText: '', closable: false, maskClosable: false,
+  })
+  try {
+    const res = await coverAuditRun(false)
+    d.destroy()
+    if (!res) { msg.warning('体检没拿到结果（插件没开？看日志）'); return }
+    showCoverAudit(res)
+  } catch (e) {
+    try { d.destroy() } catch (_) { /* 忽略 */ }
+    msg.error('体检失败：' + e.message)
+  } finally { coverBusy.value = false }
+}
+
 /** 归档：上传到夸克 → 逐文件校验 → 通过才删本地载荷（所以要先确认一次） */
 async function archiveCloud(folders) {
   const list = (folders && folders.length) ? folders : cloudTargets()
@@ -1323,6 +1401,7 @@ async function copyPath() {
         <n-button size="small" :loading="cloudBusy" @click="archiveCloud()">归档到云盘</n-button>
         <n-button size="small" :loading="cloudBusy" @click="restoreCloud()">从云盘取回</n-button>
         <n-button size="small" :loading="cloudBusy" @click="askReconcile()">与网盘对账</n-button>
+            <n-button size="small" :loading="coverBusy" @click="askCoverAudit()">封面体检</n-button>
         <template v-if="updCount">
           <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
                     @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>

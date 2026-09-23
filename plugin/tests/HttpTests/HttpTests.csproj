@@ -17,6 +17,7 @@
     <Compile Include="..\..\ModBridge\Http\CoverWriter.cs" />
     <Compile Include="..\..\ModBridge\Http\HelioNaming.cs" />
     <Compile Include="..\..\ModBridge\Http\CoverLocator.cs" />
+    <Compile Include="..\..\ModBridge\Http\InstallTarget.cs" />
     <Compile Include="..\..\ModBridge\Requests\InstallRequest.cs" />
   </ItemGroup>
 
