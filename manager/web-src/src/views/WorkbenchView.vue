@@ -143,6 +143,9 @@ async function readInboxOnce(manual = false) {
 function onFocus() {
   readInboxOnce()
 }
+function onVisible() {
+  if (!document.hidden) readInboxOnce()
+}
 const parseErr = ref('')
 const parseWarn = ref('')
 const form = ref({ category: '', zone: 'SFW', subcat: '', author: '', name: '', seq: null,
@@ -212,9 +215,7 @@ onMounted(async () => {
   await load()
   readInboxOnce()
   window.addEventListener('focus', onFocus)
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) readInboxOnce()
-  })
+  document.addEventListener('visibilitychange', onVisible)
   // ?url=... 可以直接带链接进来并自动解析（方便收藏/分享）
   const u = new URLSearchParams(location.search).get('url')
   if (u) {
@@ -333,7 +334,10 @@ function doFetch() {
   })
 }
 
-onUnmounted(() => window.removeEventListener('focus', onFocus))
+onUnmounted(() => {
+  window.removeEventListener('focus', onFocus)
+  document.removeEventListener('visibilitychange', onVisible)
+})
 
 // ---------- ③ 手动流程 ----------
 async function openBrowser(url) {
@@ -471,6 +475,7 @@ const pendColumns = [
           </n-collapse>
 
           <n-alert v-if="parseErr" type="warning" :show-icon="false">{{ parseErr }}</n-alert>
+          <n-alert v-else-if="parseWarn" type="warning" :show-icon="false">{{ parseWarn }}</n-alert>
 
           <template v-if="parsed">
             <div class="found">
@@ -494,10 +499,10 @@ const pendColumns = [
                   </b>
                 </div>
                 <div class="dim">影响/替换：<b>{{ form.affects || '（页面没写，可自己填）' }}</b>
-              <span v-if="form.affectsFromPage && form.affects === form.affectsFromPage"
-                    style="opacity:.6">（自动读到）</span>
-            </div>
-            <div class="dim addr">{{ parsed.addr }}</div>
+                  <span v-if="form.affectsFromPage && form.affects === form.affectsFromPage"
+                        style="opacity:.6">（自动读到）</span>
+                </div>
+                <div class="dim addr">{{ parsed.addr }}</div>
               </div>
             </div>
 

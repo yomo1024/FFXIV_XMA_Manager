@@ -2568,16 +2568,23 @@ def api_fetch_parse(b):
         mm.log("用浏览器推来的页面信息解析：%s（不开内置浏览器）" % (pushed.get("addr") or ""))
         return result_from_page(pushed, "pushed")
 
-    # ② 没开"自动打开内置浏览器"就先别开
-    if not cfg.get("auto_open_browser"):
-        return {"error": "没开内置浏览器（默认不开）。你可以："
+    # ② 内置浏览器已经在跑就直接用它（跟「需要时自动打开」那个开关无关）；
+    #    没在跑 + 开关也关着，才提示 —— 原来只看开关，浏览器明明开着也报「没开内置浏览器」
+    already = mm.browser_running(cfg)
+    if not already and not cfg.get("auto_open_browser"):
+        return {"error": "内置浏览器没开，而且「需要时自动打开内置浏览器」也没勾。你可以："
                          "① 用书签小工具在**你自己的浏览器**里点一下，把页面信息推过来（不会开内置浏览器）；"
                          "② 或到「设置」勾选「需要时自动打开内置浏览器」再点解析；"
                          "③ 或直接点「打开内置浏览器」手动打开。",
                 "page": pushed if pushed_fresh else None}
 
     try:
-        mm.launch_browser(cfg, url)
+        if already:
+            # ★ 已在跑时 launch_browser() 只 return 端口、不会导航 —— 必须用 browser_goto，
+            #   否则读到的可能是浏览器里碰巧开着的**另一条 Mod**
+            mm.browser_goto(cfg, url)
+        else:
+            mm.launch_browser(cfg, url)
     except SystemExit as e:
         return {"error": str(e)}
     except Exception as e:
@@ -2590,6 +2597,18 @@ def api_fetch_parse(b):
         info = mm.browser_capture(cfg)
     except Exception as e:
         return {"error": "读取页面失败：%s" % e}
+    # ②.1 兜底：拿到的必须是**这一条** Mod（别把浏览器里另一条的信息当成这条）
+    if want_id and (info.get("modid") or "") != want_id:
+        try:
+            mm.browser_goto(cfg, url)
+            info = mm.browser_capture(cfg)
+        except Exception:
+            pass
+        if (info.get("modid") or "") != want_id and info.get("is_mod"):
+            return {"error": "内置浏览器现在停在 modid %s，不是你要的 %s。"
+                             "把它切到目标页面再点「解析链接」，或者直接用书签小工具把页面信息推过来。"
+                             % (info.get("modid"), want_id),
+                    "page": info}
     if not info.get("is_mod"):
         partial = {"name": info.get("name") or "", "author": info.get("author") or "",
                    "cover": info.get("cover") or "", "title": info.get("title") or "",
@@ -3321,7 +3340,13 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+        # 兜底：任何来源（含旧库里的脏数据、站点抓下来的怪字符）都不能让接口 500
+        obj = mm.fix_deep(obj)
+        try:
+            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            body = json.dumps(obj, ensure_ascii=True).encode("utf-8")
+        self._send(code, body)
 
     def _file(self, path: Path, ctype=None):
         if not path.is_file():

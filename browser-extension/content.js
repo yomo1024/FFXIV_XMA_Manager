@@ -63,7 +63,8 @@
 
   /* ---------------- 面板 ---------------- */
   const STATE_TXT = { queued: '排队中', downloading: '下载中', importing: '入库中', done: '已完成', error: '失败' };
-  let CATS = [], tagsTouched = false, affTouched = false, timerQ = null;
+  let CATS = [], tagsTouched = false, affTouched = false, zoneTouched = false, timerQ = null;
+  let fillSub = () => {};
 
   function panel() {
     let p = document.getElementById('ffmm-panel');
@@ -97,6 +98,8 @@
     const setSt = (t, bad) => { $('.mm-status').innerHTML = t; $('.mm-status').style.color = bad ? '#ff9a9a' : '#9ee6b5'; };
     $('#ffmm-tags').addEventListener('input', () => { tagsTouched = true; });
     $('#ffmm-aff').addEventListener('input', () => { affTouched = true; });
+    // 类型：用户选过就别让定时刷新再改回来（子分类候选也跟着这个类型过滤）
+    $('#ffmm-zone').addEventListener('change', () => { zoneTouched = true; fillSub(); });
     $('#ffmm-qhide').onclick = () => {
       const q = $('#ffmm-qlist');
       const hide = q.style.display !== 'none';
@@ -114,15 +117,42 @@
         names.map((n) => '<option>' + n.replace(/</g, '&lt;') + '</option>').join('');
       if (names.length) cat.value = names[0];
       CATS = (o.cats || []);
-      const fillSub = () => {
-        const one = CATS.filter((x) => x && x.name === cat.value)[0];
-        // 后端 subcats 是对象（{name,count,...}），disk_subcats 是字符串，两种都要能取到名字
-        const pick = (list) => (list || [])
-          .map((s) => (s && typeof s === 'object') ? String(s.name || '') : String(s || ''))
-          .filter(Boolean);
-        const subs = pick(one && one.subcats).concat(pick(one && one.disk_subcats))
-          .filter((v, i, a) => a.indexOf(v) === i);
-        $('#ffmm-sublist').innerHTML = subs.map((s) => '<option>' + s.replace(/</g, '&lt;') + '</option>').join('');
+      // 子分类候选：带上 SFW / NSFW 归属，并按上面选的「类型」过滤
+      fillSub = () => {
+        const one = CATS.filter((x) => x && x.name === cat.value)[0] || {};
+        const zone = String(($('#ffmm-zone').value || 'SFW')).toUpperCase();
+        const cands = [], seen = {};
+        const add = (name, z) => {
+          name = String(name == null ? '' : name).trim();
+          if (!name) return;
+          z = String(z || '').toUpperCase();
+          const k = name + '|' + z;
+          if (seen[k]) return;
+          seen[k] = 1;
+          cands.push({ name: name, zone: z });
+        };
+        const subsObj = (one.subcats || []).filter((s) => s && typeof s === 'object');
+        (one.subcats || []).forEach((s) => add(s && typeof s === 'object' ? s.name : s, s && s.zone));
+        (one.disk_subcats || []).forEach((nm) => {          // 字符串形态，类型从 subcats 里找
+          const hit = subsObj.filter((x) => x.name === String(nm))[0];
+          add(nm, hit ? hit.zone : '');
+        });
+        const mine = cands.filter((c) => c.zone === zone);
+        const root = cands.filter((c) => !c.zone);          // 分类根下的，两种类型都能用
+        const list = mine.concat(root.filter((c) => !mine.some((m) => m.name === c.name)));
+        const other = cands.filter((c) => c.zone && c.zone !== zone);
+        $('#ffmm-sublist').innerHTML = list.map((c) =>
+          '<option value="' + esc(c.name) + '" label="' + esc(c.name) +
+          (c.zone ? ' · ' + c.zone : ' · 分类根下') + '"></option>').join('');
+        const box = $('#ffmm-sub');
+        box.placeholder = list.length
+          ? '可空（选填）'
+          : (other.length
+            ? '（' + zone + ' 下没有子分类，' + other.map((c) => c.name + ' 是 ' + c.zone).join('、') + '）'
+            : '可空');
+        box.title = cands.length
+          ? ('候选（按类型过滤）：' + cands.map((c) => c.name + (c.zone ? '(' + c.zone + ')' : '(分类根下)')).join('、'))
+          : '这个分类还没有子分类目录';
       };
       cat.addEventListener('change', fillSub);
       fillSub();
@@ -135,7 +165,7 @@
       $('.mm-name').textContent = info.name || '（没读到名称）';
       $('.mm-sub').textContent = (info.author ? '作者：' + info.author + ' ' : '') +
         (info.dl ? '· 已找到下载链接' : '· 没找到下载链接（可能要登录）');
-      $('#ffmm-zone').value = info.nsfw ? 'NSFW' : 'SFW';
+      if (!zoneTouched) $('#ffmm-zone').value = info.nsfw ? 'NSFW' : 'SFW';
       if (!tagsTouched) $('#ffmm-tags').value = (info.tags || []).join(', ');
       if (!affTouched) $('#ffmm-aff').value = info.affects || '';
       $('.mm-tagsrc').textContent = (info.tags && info.tags.length)

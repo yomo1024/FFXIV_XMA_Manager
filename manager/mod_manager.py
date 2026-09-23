@@ -705,7 +705,11 @@ PAGE_INFO_JS = (
     "links.forEach(function(e){"
     "  if(!author&&(e.getAttribute('href')||'').indexOf('/user/')===0){author=e.innerText.trim();}});"
     "var h1=document.querySelector('h1');"
-    "var text=(document.body?document.body.innerText:'').slice(0,400);"
+    # 安全截断：直接 slice 会把 emoji 的代理对切成两半 → 落单的 \ud8xx 会让 Python 侧
+    # json.dumps().encode('utf-8') 抛 UnicodeEncodeError（实测某条 Mod 就因此解析失败）
+    "function cutS(s,n){s=String(s==null?'':s);if(s.length<=n)return s;var t2=s.slice(0,n);"
+    "var c2=t2.charCodeAt(n-1);if(c2>=0xD800&&c2<=0xDBFF)t2=t2.slice(0,n-1);return t2;}"
+    "var text=cutS(document.body?document.body.innerText:'',400);"
     "var low=text.toLowerCase();"
     # Files 标签页是页内 Bootstrap 标签（href="#files"）—— 只能点，不能跳 URL
     "var filesTabEl=document.querySelector('a[data-toggle=\"tab\"][href$=\"#files\"], a[href=\"#files\"]');"
@@ -1344,9 +1348,36 @@ def replace_mod_payload(cfg, folder, new_file, mode="same_name", to_recycle=True
             "added": [dst.name] if not new_file.is_dir() else ["（目录）" + dst.name]}
 
 
+def fix_text(s):
+    """修掉落单的代理字符（0xD800-0xDFFF）：
+    JS 里 slice() 截断会把 emoji 的代理对切成两半，这种字符串一进 json.dumps().encode('utf-8')
+    就抛 UnicodeEncodeError（表现为整个接口 500）。成对的还原成真字符，落单的换成 U+FFFD。
+    """
+    if not isinstance(s, str):
+        return s
+    if not any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+        return s
+    try:
+        return s.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    except Exception:
+        return "".join("\ufffd" if 0xD800 <= ord(c) <= 0xDFFF else c for c in s)
+
+
+def fix_deep(o):
+    """递归地对 dict / list / tuple / str 做 fix_text（给 JSON 输出层兜底用）"""
+    if isinstance(o, str):
+        return fix_text(o)
+    if isinstance(o, dict):
+        return {k: fix_deep(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [fix_deep(v) for v in o]
+    return o
+
+
 def browser_capture(cfg) -> dict:
     """读取当前页面的 网址/名称/作者/封面/下载直链（以及站点上的更新时间）"""
     info = json.loads(browser_eval(cfg, PAGE_INFO_JS) or "{}")
+    info = fix_deep(info)
     for k in ("lastUpdate", "firstRelease"):        # 转成本机时区的标准写法
         if info.get(k):
             info[k + "_iso"] = site_time_iso(info[k])
@@ -1462,7 +1493,10 @@ def browser_login_state(cfg):
                                  "https://static.xivmodarchive.com/"])["cookies"]
         names = sorted({c.get("name", "") for c in cks})
         low = [n.lower() for n in names]
-        logged = any(("session" in n) or n.startswith("xf_") or ("remember" in n) for n in low)
+        # XIV Mod Archive 的登录态就是 Express 的会话 Cookie「connect.sid」——
+        # 以前只认 session/xf_/remember，导致明明登录着也报「未登录」（主人看到的状态是错的）
+        logged = any(("session" in n) or ("connect.sid" in n) or n.endswith(".sid")
+                     or n.startswith("xf_") or ("remember" in n) for n in low)
         return {"running": True, "count": len(cks), "names": names[:12], "logged": logged}
     except SystemExit:
         raise
