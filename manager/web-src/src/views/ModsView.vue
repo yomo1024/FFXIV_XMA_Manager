@@ -16,9 +16,13 @@ const msg = useMessage()
 const dialog = useDialog()
 
 const cur = ref(null)
-const detmax = ref(false)          // 详情全屏：右栏铺满窗口，列表收起来（选中项不变，上下文不丢）
-function toggleDetmax() {
-  detmax.value = !detmax.value
+// 详情宽度三档：narrow=右栏窄栏(400px) / half=半屏(列表与详情各一半，展开的默认档) / full=全屏
+const detmode = ref('narrow')
+function setDetmode(m) {
+  detmode.value = m
+}
+function detBack() {
+  detmode.value = detmode.value === 'full' ? 'half' : 'narrow'
 }
 const q = ref('')
 const cat = ref('')
@@ -602,7 +606,7 @@ function onKey(e) {
       useAsPreview(shots.value[shotIdx.value])
       break
     case 'Escape':
-      if (detmax.value) detmax.value = false
+      if (detmode.value !== 'narrow') detBack()
       else if (focusArea.value === 'strip') focusArea.value = 'table'
       else q.value = ''
       break
@@ -765,7 +769,7 @@ const rowProps = (row) => ({
       shotsFor.value = row.folder
       loadShots(row.folder)
     }
-    detmax.value = true
+    detmode.value = 'half'
   },
 })
 
@@ -936,7 +940,7 @@ async function copyPath() {
 </script>
 
 <template>
-  <div class="wrap" :class="{ detmax }">
+  <div class="wrap" :class="'det-' + detmode">
     <div class="left">
       <div class="bar">
         <n-input ref="searchEl" v-model:value="q" placeholder="搜索 名称／作者／标签／影响替换／路径…" size="small"
@@ -1043,16 +1047,42 @@ async function copyPath() {
         </n-button>
       </div>
 
+      <!-- 展开时的标题条：照 XMA mod 页的样子（大标题 + 版本，第二行 分类 by 作者 + 站点链接） -->
+      <div v-if="detmode !== 'narrow'" class="dtitle">
+        <div class="r1">
+          <h2>{{ cur?.name || '未选择 Mod' }}</h2>
+          <span class="ver">
+            {{ cur?.site_latest || cur?.site_updated
+               ? '更新于 ' + (cur.site_latest || cur.site_updated) : '' }}
+          </span>
+        </div>
+        <div class="r2">
+          <span class="cat">{{ cur?.category || '—' }}</span>
+          <span>by</span>
+          <span class="au">{{ cur?.author || '—' }}</span>
+          <span class="grow"></span>
+          <a v-if="cur?.addr" class="lnk" :href="cur.addr" target="_blank" rel="noreferrer">
+            [ 站点页面 ]
+          </a>
+        </div>
+      </div>
+
       <!-- 操作：放最上面。主动作两列等宽，文件类收成一行小字按钮 → 又矮又不挤 -->
       <n-card size="small" title="操作" class="act-card">
         <template #header-extra>
-          <n-button size="tiny" quaternary
-                    :title="detmax ? '回到列表（窄栏）' : '全屏看这条详情（双击列表某一行也行）'"
-                    @click="toggleDetmax">{{ detmax ? '⤡ 收窄' : '⤢ 全屏' }}</n-button>
+          <n-button-group size="tiny">
+            <n-button :type="detmode === 'narrow' ? 'primary' : 'default'"
+                      title="窄栏：详情固定在右侧 400px" @click="setDetmode('narrow')">窄栏</n-button>
+            <n-button :type="detmode === 'half' ? 'primary' : 'default'"
+                      title="半屏：列表与详情各占一半（双击列表某一行也是这个）"
+                      @click="setDetmode('half')">半屏</n-button>
+            <n-button :type="detmode === 'full' ? 'primary' : 'default'"
+                      title="全屏：详情铺满窗口" @click="setDetmode('full')">全屏</n-button>
+          </n-button-group>
         </template>
 
         <div class="opgrid">
-          <n-button block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
+          <n-button class="opmain" block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
                     @click="updateOne(cur)">
             {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
           </n-button>
@@ -1078,7 +1108,7 @@ async function copyPath() {
         <div v-if="cur && !cur.addr" class="opnote">没有站点地址，这条只能手动替换</div>
       </n-card>
 
-      <n-card size="small" :title="cur ? cur.name : '预览'" class="pv-card">
+      <n-card size="small" :title="detmode === 'narrow' && cur ? cur.name : '预览'" class="pv-card">
         <template #header-extra>
           <n-button size="tiny" :disabled="!cur" @click="showAddImg = true">添加图片…</n-button>
         </template>
@@ -1111,7 +1141,8 @@ async function copyPath() {
       </n-card>
 
       <n-card size="small" class="desc-card">
-        <n-descriptions :column="2" label-placement="left" size="small" label-width="52"
+        <n-descriptions :column="detmode === 'narrow' ? 2 : 1"
+                        label-placement="left" size="small" label-width="52"
                         style="margin-bottom: 2px">
           <n-descriptions-item label="分类">{{ cur?.category || '—' }}</n-descriptions-item>
           <n-descriptions-item label="序号">{{ cur?.seq ?? '—' }}</n-descriptions-item>
@@ -1459,40 +1490,130 @@ async function copyPath() {
   /* 实在放不下时滚动，绝不把内容裁掉 */
   overflow: auto;
 }
-/* ---- 详情全屏：右栏铺满窗口（预览放大 + 信息单独一列），列表收起但上下文不丢 ---- */
-.wrap.detmax {
+/* ---- 详情展开：半屏 / 全屏（排布参考 XMA mod 页）----
+   半屏 = 列表与详情各占一半，详情内部仍单列 → 图片更大、影响/替换一行就放得下
+   全屏 = 详情铺满窗口，内部照 XMA 分两列：左大图 / 右操作+元信息 ---- */
+.wrap.det-half {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.wrap.det-full {
   grid-template-columns: minmax(0, 1fr);
 }
-.wrap.detmax .left {
+.wrap.det-full .left {
   display: none;
 }
-.wrap.detmax .right {
+/* 半屏：图片上限放宽（窄栏是 30vh），信息卡跟着整列滚、自己不滚 */
+.wrap.det-half :deep(.preview img) {
+  max-height: 42vh;
+}
+/* 主按钮整行突出（对应 XMA 那颗大 Download Mod） */
+.wrap.det-half .opgrid .opmain,
+.wrap.det-full .opgrid .opmain {
+  grid-column: 1 / -1;
+}
+/* 全屏：详情右栏改栅格 */
+.wrap.det-full .right {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   grid-template-areas:
     'bar bar'
-    'pv act'
-    'pv info';
+    'ttl ttl'
+    'pv  act'
+    'pv  info';
   gap: 10px;
 }
-.wrap.detmax .bridge-bar {
+.wrap.det-full .bridge-bar {
   grid-area: bar;
 }
-.wrap.detmax :deep(.pv-card) {
-  grid-area: pv;
+.wrap.det-full .dtitle {
+  grid-area: ttl;
 }
-.wrap.detmax .act-card {
+.wrap.det-full :deep(.pv-card) {
+  grid-area: pv;
+  min-height: 0;
+}
+.wrap.det-full .act-card {
   grid-area: act;
 }
-.wrap.detmax :deep(.desc-card) {
+.wrap.det-full :deep(.desc-card) {
   grid-area: info;
+  min-height: 0;
+  overflow: auto;
 }
-.wrap.detmax :deep(.preview) {
-  min-height: 32vh;
+.wrap.det-full :deep(.pv-card .n-card__content) {
+  min-height: 0;
 }
-.wrap.detmax :deep(.preview img) {
-  max-height: 58vh;
+.wrap.det-full :deep(.preview) {
+  flex: 1 1 auto;
+  min-height: 30vh;
+}
+.wrap.det-full :deep(.preview .n-image),
+.wrap.det-full :deep(.preview .pv-img) {
+  width: 100%;
+  height: 100%;
+}
+.wrap.det-full :deep(.preview img) {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+/* 展开时的标题条：照 XMA 的大标题 + 版本 / 分类 by 作者 + 站点链接 */
+.dtitle {
+  flex: 0 0 auto;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.07);
+}
+.dtitle .r1 {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.dtitle h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.dtitle .ver {
+  margin-left: auto;
+  font-size: 12px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.dtitle .r2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.dtitle .r2 .cat {
+  font-weight: 600;
+}
+.dtitle .r2 .au,
+.dtitle .r2 .lnk {
+  color: #63a4ff;
+}
+.dtitle .r2 .grow {
+  flex: 1 1 auto;
+}
+/* 窗口不够宽：全屏也退回单列，整列滚动 */
+@media (max-width: 1320px) {
+  .wrap.det-full .right {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    grid-template-areas: 'bar' 'ttl' 'pv' 'act' 'info';
+    overflow: auto;
+  }
+  .wrap.det-full :deep(.desc-card) {
+    overflow: visible;
+  }
 }
 
 /* 预览卡片：按内容高度（图 + 缩略图条），不会撑出一块空白 */
