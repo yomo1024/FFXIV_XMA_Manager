@@ -506,8 +506,35 @@ def list_installed(cfg):
     return names, raw, d
 
 
+_TOKEN_RE = re.compile(r"[0-9a-z\u4e00-\u9fff]+")
+
+
+def name_tokens(s) -> list:
+    """把名字切成 token（小写、只留字母数字中文）"""
+    return [t for t in _TOKEN_RE.findall((s or "").lower()) if t]
+
+
+def same_name_tokens(a, b) -> bool:
+    """token 判同：**短的一方的 token 必须全部出现在长的一方**。
+
+    这条专门挡"只共用一个通用词"的误判（主人 2026-09 报的）：
+      {botanica, ruffle}  vs  {botanica, bodychain, rue, pocky}  → 短方没被全覆盖 ⇒ 不是同一条 ✓
+      {wisp, 1}           vs  {ruby, blaire, wisp, 1}            → 全覆盖     ⇒ 是同一条 ✓
+    """
+    ta, tb = name_tokens(a), name_tokens(b)
+    if not ta or not tb:
+        return False
+    short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    return set(short) <= set(long_)
+
+
 def installed_match(m, names, raw=None) -> bool:
-    """按安装目录里的文件夹名判断这个 Mod 是否已安装"""
+    """按安装目录里的文件夹名判断这个 Mod 是否已安装。
+
+    `names` 是**归一化**集合（精确比对）；`raw` 是原始文件夹名列表（token 复核用）。
+    子串命中**不再直接算数** —— 还要 token 全覆盖，否则「Botanica Ruffle」会被当成
+    「Botanica Bodychain」已安装（2026-09 主人报的误判）。
+    """
     if not names:
         return False
     name = m.get("name") or ""
@@ -519,9 +546,21 @@ def installed_match(m, names, raw=None) -> bool:
     if cand & names:
         return True
     base = norm_name(name)
-    if base and len(base) >= 6:
+    if not base or len(base) < 3:      # 3 字符起：短名（如 Muse）也要能匹配（token 规则兜住误判）
+        return False
+    entries = [e for e in (raw or []) if e]
+    for e in entries:
+        n = norm_name(e)
+        if not n or not (base in n or n in base):
+            continue
+        if same_name_tokens(name, e):
+            return True
+        # 只共用了词（比如都叫 Botanica）→ 不算已安装，并记一行日志方便追
+        log("已安装判定：跳过「%s」——它和「%s」只是名字像（共用词，不是同一条）" % (e, name))
+    if not entries:
+        # 老调用没给原始名 → 退化成更严格的子串：短的要够长、且占长名一半以上
         for n in names:
-            if n and (base in n or n in base):
+            if n and (base in n or n in base) and len(base) >= 8 and len(base) >= 0.5 * len(n):
                 return True
     return False
 
