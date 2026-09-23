@@ -170,6 +170,20 @@ python scripts/check_versions.py --bump-plugin patch # 插件 Z+1（之后还要
 改了插件版本后必须补两步，否则 Dalamud 那边拿不到新包：
 `dotnet build -c Release` → `python plugin/pack-release.py plugin/ModBridge/bin/Release .`
 
+### 发布包（Releases）
+
+不用自己编译，直接下 [Releases](https://github.com/yomo1024/FFXIV_XMA_Manager/releases) 里的附件：
+
+| 附件 | 内容 |
+|---|---|
+| `XMA-Manager-v<版本>.zip` | 管理器部署包：exe + 前端产物 + `browser-extension/` + 源码（含版本校验脚本），解压双击 `启动Web版.bat` 即用 |
+| `ModBridge-<版本>.zip` | 游戏插件（也可以用上面的 Dalamud 自定义源自动更新） |
+| `XMA-Browser-Extension-v<版本>.zip` | 浏览器拓展，解压后「加载已解压的扩展程序」 |
+
+**tag 规则**：仓库 tag 跟**管理器版本**走（如 `v2.2.0`），一个 Release 一次带齐三件套的当前版本；
+小改只 push 代码、不打 tag，功能新增/重要修复才发 Release。附件名必须**纯 ASCII**
+（中文名会被 GitHub 吞成 `xxx_.zip`），所以打好的中文名部署包上传前要改名。
+
 ---
 
 ## 常见问题

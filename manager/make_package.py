@@ -66,7 +66,8 @@ DEPLOY_TEXT = """FFXIV Mod 管理工具 · Web 版   v{ver}   部署说明
   使用说明-Web版.txt          完整功能说明（每个页面做什么、快捷键、常见问题）
   使用说明.txt               原来 tkinter 版的说明（备用）
   web\\                       前端构建产物（后端直接serve，改前端后重新打包会覆盖）
-  源码\\                      源码 + 重新打包脚本
+  browser-extension\\         浏览器拓展（Chrome/Edge「加载已解压的扩展程序」选它）
+  源码\\                      源码 + 重新打包脚本 + scripts\\check_versions.py（版本校验）
 
 【四、运行后会生成（都在程序目录里）】
   mod_manager.json          配置（Mod 根目录、Excel 路径、浏览器…）
@@ -116,9 +117,25 @@ def add_tree(z, root: Path, arc_root: str, skip=None):
     return n
 
 
+def pick_dir(name):
+    """找目录：部署目录里在根下；仓库里 web-src/scripts 在 manager/ 下、browser-extension 在仓库根。"""
+    for p in (APP_DIR / name, APP_DIR.parent / name):
+        if p.is_dir():
+            return p
+    return None
+
+
+def find_exe():
+    """主程序位置：部署目录里摆在根下，仓库里 PyInstaller 默认扔 dist/ —— 两处都认。"""
+    for p in (APP_DIR / "ModManagerWeb.exe", APP_DIR / "dist" / "ModManagerWeb.exe"):
+        if p.is_file():
+            return p
+    return None
+
+
 def main():
-    exe = APP_DIR / "ModManagerWeb.exe"
-    if not exe.is_file():
+    exe = find_exe()
+    if exe is None:
         sys.exit("找不到 ModManagerWeb.exe，请先双击 build_web_exe.bat 打包主程序。")
 
     DIST.mkdir(exist_ok=True)
@@ -133,8 +150,11 @@ def main():
                                       time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
         written.append("部署说明.txt")
         for f in ROOT_FILES:
-            if (APP_DIR / f).is_file():
-                z.write(APP_DIR / f, "%s/%s" % (PKG_NAME, f))
+            src = APP_DIR / f
+            if f == "ModManagerWeb.exe":
+                src = exe                       # 根下没有就用 dist/ 里那份
+            if src.is_file():
+                z.write(src, "%s/%s" % (PKG_NAME, f))
                 written.append(f)
         n = add_tree(z, APP_DIR / WEB_DIR, "%s/%s" % (PKG_NAME, WEB_DIR))
         written.append("%s\\（%d 个文件）" % (WEB_DIR, n))
@@ -144,6 +164,14 @@ def main():
                 written.append("源码/" + f)
         n = add_tree(z, APP_DIR / SRC_WEB, "%s/源码/%s" % (PKG_NAME, SRC_WEB), SKIP_DIRS)
         written.append("源码/%s\\（%d 个文件，不含 node_modules）" % (SRC_WEB, n))
+        d = pick_dir("scripts")                          # 版本校验脚本
+        if d:
+            n = add_tree(z, d, "%s/源码/scripts" % PKG_NAME)
+            written.append("源码/scripts\\（%d 个文件：版本一致性校验）" % n)
+        d = pick_dir("browser-extension")                # 浏览器拓展（整包带走才叫三件套）
+        if d:
+            n = add_tree(z, d, "%s/browser-extension" % PKG_NAME)
+            written.append("browser-extension\\（%d 个文件）" % n)
 
     size = zip_path.stat().st_size / 1048576
     print("部署包已生成：")
