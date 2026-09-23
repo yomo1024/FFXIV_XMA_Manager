@@ -2507,6 +2507,17 @@ def collect_backup_items(cfg, include_mods=True, include_meta=True):
     return entries, stats
 
 
+def _archived_count() -> int:
+    """有多少条 Mod 的载荷已经归档到云端（写进备份 manifest，方便日后看懂这个包）"""
+    try:
+        st = Store()
+        n = st.cx.execute("SELECT COUNT(*) AS n FROM mods WHERE cloud_state='archived'").fetchone()["n"]
+        st.cx.close()
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
 def make_backup(cfg, dest=None, include_mods=True, include_meta=True, compress=False,
                 progress=None, should_cancel=None):
     """打包备份。返回统计 dict。"""
@@ -2527,6 +2538,10 @@ def make_backup(cfg, dest=None, include_mods=True, include_meta=True, compress=F
         "包含Mod文件夹": bool(include_mods), "包含索引和汇总表": bool(include_meta),
         "Mod数": stats["mods"], "文件数": stats["files"], "原始大小": stats["bytes"],
         "压缩": bool(compress),
+        # ---- 云存储：让备份包自己说清楚「载荷在哪」 ----
+        "已归档到云端": _archived_count(),
+        "归档说明": ("已归档的 Mod 载荷不在本包里（长期副本在夸克网盘）："
+                 "恢复后本地只有元数据+图，需要时点「从云盘取回」把载荷拉回来。"),
         "分类": sorted(d.name for d in root.iterdir() if d.is_dir()) if root.is_dir() else [],
     }
     comp = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED

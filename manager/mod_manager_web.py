@@ -1273,6 +1273,43 @@ def _cloud_index(drv, qd, fid, prefix="", depth=0) -> dict:
     return idx
 
 
+DUP_NAME_RE = None
+
+
+def _cloud_dedupe_dirs(drv, qd, dir_cache) -> tuple:
+    """清掉云端目录里残留的 `xxx(n).ext` 重复（前提：同名无后缀那份存在且大小一致）。
+
+    这是给「上传时没先查重」的历史版本擦屁股用的；新版上传前会先查，不会再产生重复。
+    返回 (清理个数, 字节数)
+    """
+    global DUP_NAME_RE
+    if DUP_NAME_RE is None:
+        DUP_NAME_RE = re.compile(r"^(?P<base>.+?)\((?P<n>\d+)\)(?P<ext>\.[^.]+)?$")
+    n_del, n_bytes = 0, 0
+    for fid_dir, idx in list(dir_cache.items()):
+        try:
+            items = drv.list_dir(fid_dir)          # 重新列一次，拿到真实文件名
+        except Exception:
+            continue
+        by_name = {}
+        for it in items:
+            by_name[qd.norm(it.get("file_name"))] = it
+        for it in items:
+            mo = DUP_NAME_RE.match(str(it.get("file_name") or ""))
+            if not mo:
+                continue
+            base = qd.norm(mo.group("base") + (mo.group("ext") or ""))
+            keep = by_name.get(base)
+            if keep and int(keep.get("size") or -1) == int(it.get("size") or -2):
+                try:
+                    drv.delete([it.get("fid")])
+                    n_del += 1
+                    n_bytes += int(it.get("size") or 0)
+                except Exception:
+                    mm.log(traceback.format_exc())
+    return n_del, n_bytes
+
+
 def _cloud_upload_one(drv, qd, pay, fid_dir) -> dict:
     """上传一个载荷文件并立刻校验（秒传命中 = 内容一致；否则比对云端大小）"""
     try:
@@ -1313,17 +1350,46 @@ def _job_cloud_archive(job: Job):
             continue
         cpath = mod_cloud_path(cfg, folder)
         recs, failed = [], []
+        skipped = 0
+        dir_cache = {}                      # 云端目录 fid -> {归一化名: 条目}，避免每个文件都列一遍
+
+        def cloud_index(fid_dir, force=False):
+            if force or fid_dir not in dir_cache:
+                dir_cache[fid_dir] = {qd.norm(i.get("file_name")): i for i in drv.list_dir(fid_dir)}
+            return dir_cache[fid_dir]
+
         for pay in pays:
             if job.cancelled():
                 break
             job.set(done, total, "%s：%s" % (str(name)[:22], str(pay["rel"])[:46]))
             sub_dir = os.path.dirname(pay["rel"].replace("\\", "/"))
             fid_dir = drv.ensure_dir(cpath + ("/" + sub_dir if sub_dir else ""))
+            idx = cloud_index(fid_dir)
+            base = qd.norm(os.path.basename(pay["rel"]))
+            hit = idx.get(base)
+            # ★ 云端已有**同名同大小**的文件 → 直接用，不再上传、不新建。
+            # 之前漏了这一步：夸克对同名冲突会另存成 xxx(1).pmp（真的占第二份空间），
+            # 实测把整库又多存了一遍（115 个重复 / 2571 MB）——主人一句「网盘里有就别再备份了」点出来的。
+            if hit is not None and int(hit.get("size") or -1) == int(pay["size"]):
+                md5, sha1 = qd.file_hashes(pay["abs"])
+                recs.append({"rel_path": pay["rel"], "size": pay["size"], "md5": md5,
+                             "sha1": sha1, "cloud_fid": str(hit.get("fid") or "")})
+                skipped += 1
+                done += 1
+                continue
+            if hit is not None:             # 同名但大小不同 = 云端那份是旧的 → 先删再传，保持一物一件
+                try:
+                    drv.delete([hit.get("fid")])
+                    mm.log("云端同名旧文件已删（准备覆盖）：%s" % os.path.basename(pay["rel"]))
+                except Exception:
+                    mm.log(traceback.format_exc())
+                idx.pop(base, None)
             out = _cloud_upload_one(drv, qd, pay, fid_dir)
             done += 1
             if out["ok"]:
                 recs.append({"rel_path": pay["rel"], "size": pay["size"], "md5": out["md5"],
                              "sha1": out["sha1"], "cloud_fid": out["fid"]})
+                idx[base] = {"fid": out["fid"], "size": pay["size"]}
             else:
                 failed.append({"rel": pay["rel"], "why": out["why"]})
         if failed:
@@ -1331,6 +1397,10 @@ def _job_cloud_archive(job: Job):
                             "failed": failed[:5],
                             "note": "%d 个文件没通过校验，本地不动" % len(failed)})
             continue
+        cleaned, cbytes = _cloud_dedupe_dirs(drv, qd, dir_cache)
+        if cleaned:
+            mm.log("归档顺带清理了 %d 个重复文件（%.1f MB）：%s"
+                   % (cleaned, cbytes / 1048576.0, name))
         st.set_payload_files(folder, recs, state="archived")
         st.set_cloud(folder, backend="quark", path=cpath, state="archived",
                      size=sum(p["size"] for p in pays), synced=now_str(),
@@ -1352,12 +1422,13 @@ def _job_cloud_archive(job: Job):
             mod_index(force=True)
         results.append({"folder": folder, "name": name, "ok": True, "files": len(recs),
                         "size": sum(p["size"] for p in pays), "deleted": deleted,
+                        "skipped": skipped, "cleaned": cleaned,
                         "cloud": cpath, "seconds": round(time.time() - job.t0, 1)})
     st.cx.close()
     okn = sum(1 for r in results if r.get("ok"))
-    mm.log("归档：%d 条（成功 %d）、共 %.1f MB、删本地 %d 个文件"
+    mm.log("归档：%d 条（成功 %d）、共 %.1f MB、跳过（云端已有）%d 个文件、删本地 %d 个文件"
            % (len(results), okn, sum(r.get("size") or 0 for r in results) / 1048576.0,
-              sum(r.get("deleted") or 0 for r in results)))
+              sum(r.get("skipped") or 0 for r in results), sum(r.get("deleted") or 0 for r in results)))
     return {"done": len(results), "ok": okn, "items": results,
             "bytes": sum(r.get("size") or 0 for r in results),
             "deleted": sum(r.get("deleted") or 0 for r in results)}
@@ -1930,7 +2001,13 @@ def api_mod_files(q):
         total += size
         items.append({"name": e.name, "dir": e.is_dir(), "size": size,
                       "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(stt.st_mtime))})
-    return {"ok": True, "folder": folder, "items": items, "count": len(items), "total": total}
+    st = mm.Store()
+    pfs = st.payload_files_of(folder, ["archived", "missing"])
+    st.cx.close()
+    return {"ok": True, "folder": folder, "items": items, "count": len(items), "total": total,
+            "cloud": [{"rel_path": p["rel_path"], "size": p["size"] or 0, "state": p["state"] or ""}
+                      for p in pfs],
+            "share_url": str(cfg_now().get("cloud_share_url") or "")}
 
 
 def api_mod_history(q):
@@ -3116,6 +3193,60 @@ class Handler(BaseHTTPRequestHandler):
             return
         mm.log("下载：%s（%.1f MB）" % (p.name, size / 1048576.0))
 
+    def api_cloud_file(self, q):
+        """把云端载荷**流式下载给浏览器**（文件页签里点云端文件名时用）。
+
+        云端直链必须带 Cookie，所以由后端代理转发（顺带不把有时效的直链暴露出去）。
+        """
+        import urllib.request
+        folder = (q.get("folder") or [""])[0]
+        rel = (q.get("rel") or [""])[0]
+        name = os.path.basename(str(rel).replace("\\", "/")) or "download.bin"
+        cfg = cfg_now()
+        drv = cloud_drive(cfg)
+        qd = _qd()
+        st = mm.Store()
+        row = st.cx.execute("SELECT cloud_path FROM mods WHERE folder=?", (str(folder),)).fetchone()
+        st.cx.close()
+        cpath = (row["cloud_path"] if row else "") or mod_cloud_path(cfg, folder)
+        fid_dir = drv.resolve(cpath)
+        if not fid_dir:
+            return self._json({"error": "云端目录找不到：%s" % cpath}, 404)
+        idx = _cloud_index(drv, qd, fid_dir)
+        want = qd.norm(str(rel).replace("\\", "/"))
+        it = idx.get(want)
+        if it is None:
+            base = qd.norm(name)
+            cands = [v for k, v in idx.items() if k.endswith(base)]
+            it = cands[0] if cands else None
+        if it is None:
+            return self._json({"error": "云端找不到这个文件：%s" % rel}, 404)
+        url = drv.download_url(it.get("fid"))
+        if not url:
+            return self._json({"error": "取不到云端直链（Cookie 可能失效）"}, 502)
+        size = int(it.get("size") or 0)
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", mimetypes.guess_type(name)[0] or "application/octet-stream")
+        if size:
+            self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition",
+                         "attachment; filename*=UTF-8''%s" % urllib.parse.quote(name))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        req = urllib.request.Request(url, headers={
+            "user-agent": qd.UA, "cookie": drv.cookie, "referer": "https://pan.quark.cn/"})
+        try:
+            with urllib.request.urlopen(req, timeout=1800) as r:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
+        mm.log("云端文件直传浏览器：%s" % name)
+
     # ---------- GET ----------
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
@@ -3158,6 +3289,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_cloud_check())
                 if u.path == "/api/cloud/state":
                     return self._json(api_cloud_state())
+                if u.path == "/api/cloud/file":
+                    return self.api_cloud_file(q)
                 if u.path == "/api/affects":
                     return self._json(api_affects())
                 if u.path == "/api/mod/files":
@@ -3700,7 +3833,7 @@ class Handler(BaseHTTPRequestHandler):
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
                  "auto_open_browser",
                  # ---- 云存储（夸克归档）----
-                 "cloud_backend", "cloud_cookie", "cloud_root")
+                 "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
         changed = {}
         for k in allow:
             if k in b:

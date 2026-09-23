@@ -202,6 +202,7 @@ async function save() {
       embed_images: s.value.embed_images, autofilter: s.value.autofilter,
       cloud_backend: s.value.cloud_backend || '', cloud_cookie: s.value.cloud_cookie || '',
       cloud_root: s.value.cloud_root || '/MOD',
+      cloud_share_url: s.value.cloud_share_url || '',
     }
     const r = await api.saveSettings(body)
     msg.success('已保存：' + (r.changed || []).join('、'))
@@ -350,6 +351,12 @@ async function save() {
             <span class="hint">
               开启后 Mod 载荷（.pmp / .zip 等）归档到夸克，本地只留元数据 + 预览图
             </span>
+          </div>
+          <div class="opt">
+            <span class="opt-lbl">分享链接</span>
+            <n-input v-model:value="s.cloud_share_url" size="small" style="width: 300px"
+                     placeholder="https://pan.quark.cn/s/xxxx（可选）" />
+            <span class="hint">填了之后，文件页签与详情里会出现「在网盘里打开」</span>
           </div>
           <div class="opt">
             <span class="opt-lbl">云端根目录</span>

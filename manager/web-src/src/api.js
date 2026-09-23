@@ -68,6 +68,8 @@ export const api = {
   files: (folder) => req('/api/mod/files?folder=' + encodeURIComponent(folder)),
   cloudCheck: () => req('/api/cloud/check'),
   cloudState: () => req('/api/cloud/state'),
+  cloudFileUrl: (folder, rel) => '/api/cloud/file?folder=' + encodeURIComponent(folder)
+    + '&rel=' + encodeURIComponent(rel),
   cloudArchive: (body) => req('/api/cloud/archive', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudRestore: (body) => req('/api/cloud/restore', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudVerify: (body) => req('/api/cloud/verify', { method: 'POST', body: JSON.stringify(body || {}) }),

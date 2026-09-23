@@ -327,6 +327,13 @@ async function checkUpdates() {
 }
 
 // ---------------- 云盘归档 / 取回 ----------------
+const shareUrl = ref('')            // 设置里可选填的「云端分享链接」（文件页签/详情里跳网盘用）
+onMounted(async () => {
+  try {
+    const cfg = await api.settings()
+    shareUrl.value = String(cfg.cloud_share_url || '')
+  } catch (e) { /* 没填就为空，不影响 */ }
+})
 const cloudBusy = ref(false)
 function cloudTargets() {
   return checked.value.length ? [...checked.value] : (cur.value ? [cur.value.folder] : [])
@@ -1327,6 +1334,30 @@ async function copyPath() {
                     共 {{ filesMap[cur.folder].count }} 项 ｜ 合计 {{ humanSize(filesMap[cur.folder].total) }}
                     ｜ 点文件名就能下载
                   </div>
+
+                  <!-- 云端载荷：归档后本地没有这些文件了，列出来、点了直接从云端下载 -->
+                  <template v-if="(filesMap[cur.folder].cloud || []).length">
+                    <div class="clabel">云端载荷（本地已归档 —— 点文件名从云端下载）</div>
+                    <div class="flist">
+                      <a v-for="c in filesMap[cur.folder].cloud" :key="c.rel_path"
+                         class="frow link" :href="api.cloudFileUrl(cur.folder, c.rel_path)"
+                         :download="c.rel_path.split('/').pop()"
+                         :title="'从云端下载 ' + c.rel_path">
+                        <n-tag size="tiny" :bordered="false" type="info"
+                               style="flex:0 0 auto;margin-right:4px">云</n-tag>
+                        <span class="fname">{{ c.rel_path }}</span>
+                        <span class="fsize">{{ humanSize(c.size) }}</span>
+                        <span class="fdl">⤓</span>
+                      </a>
+                    </div>
+                    <div class="ftotal">
+                      云端 {{ filesMap[cur.folder].cloud.length }} 个载荷文件
+                      <template v-if="filesMap[cur.folder].share_url">
+                        ｜ <a :href="filesMap[cur.folder].share_url" target="_blank"
+                              rel="noreferrer">在网盘里打开</a>
+                      </template>
+                    </div>
+                  </template>
                 </template>
                 <div v-else class="descempty">{{ filesMap[cur.folder].error || '读不到文件清单' }}</div>
               </template>
@@ -1404,12 +1435,11 @@ async function copyPath() {
           </div>
 
           <div v-if="cur" class="opcloud">
-          <n-button size="tiny" :loading="cloudBusy" :disabled="!cur.payload_size"
-                    @click="archiveCloud([cur.folder])">归档到云盘</n-button>
-          <n-button size="tiny" :loading="cloudBusy" :disabled="!cur.archived_files"
-                    @click="restoreCloud([cur.folder])">从云盘取回</n-button>
+          <!-- 归档 / 取回 只放在列表上方那个工具栏（能作用于选中项或全部），这里不再重复 -->
           <n-button size="tiny" quaternary :loading="cloudBusy" :disabled="!cur.archived_files"
-                    @click="verifyCloud([cur.folder])">校验</n-button>
+                    @click="verifyCloud([cur.folder])">校验云端</n-button>
+          <a v-if="shareUrl && cur.archived_files" class="oplink" :href="shareUrl" target="_blank"
+             rel="noreferrer">在网盘里打开</a>
           <span class="cl" :title="cur.cloud_path || ''">
             <template v-if="cur.cloud_state === 'archived'">
               已归档 {{ cur.archived_files }} 个文件 ｜ {{ humanMB(cur.cloud_size) }}
@@ -2114,6 +2144,19 @@ async function copyPath() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 文件页签里「云端载荷」分组的小标题 */
+.clabel {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(128, 128, 128, 0.22);
+  font-size: 11.5px;
+  opacity: 0.65;
+}
+.opcloud .oplink {
+  font-size: 11.5px;
+  color: #63a4ff;
+  text-decoration: none;
 }
 
 /* ---- ④ 操作区：作者行 + 统计格 ---- */
