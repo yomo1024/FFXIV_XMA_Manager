@@ -675,6 +675,62 @@ public static class Program
         Check("给了 coverDrawPath 时 images\\_MetaImage 用那份（jpg）",
             cvDraw.Ok && File.Exists(Path.Combine(mDraw, "images", "_MetaImage.jpg")), cvDraw.Error);
 
+        // ---------- 14. 真包实测（可选）：设 MODBRIDGE_TEST_PMP 就跑真实的 mod 包，
+        //     走一遍"封面注入 → 模拟 Penumbra 解包"，直接看装出来有没有图
+        var realPmp = Environment.GetEnvironmentVariable("MODBRIDGE_TEST_PMP");
+        if (!string.IsNullOrWhiteSpace(realPmp) && File.Exists(realPmp))
+        {
+            static bool IsWebpBytes(byte[] b) => b.Length >= 12
+                && b[0] == (byte)'R' && b[1] == (byte)'I' && b[2] == (byte)'F' && b[3] == (byte)'F'
+                && b[8] == (byte)'W' && b[9] == (byte)'E' && b[10] == (byte)'B' && b[11] == (byte)'P';
+
+            var cov = Environment.GetEnvironmentVariable("MODBRIDGE_TEST_COVER") ?? "";
+            var webp = Environment.GetEnvironmentVariable("MODBRIDGE_TEST_WEBP") ?? "";
+            Console.WriteLine();
+            Console.WriteLine("真包实测（真实的 mod 包：" + Path.GetFileName(realPmp) + "）：");
+            var shaBefore = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(realPmp)));
+            int cntBefore; using (var z0 = System.IO.Compression.ZipFile.OpenRead(realPmp)) cntBefore = z0.Entries.Count;
+            var outp = ModBridge.Http.CoverWriter.InjectIntoPackage(realPmp, cov, webp, cov);
+            Check("真包注入产出新包", outp is not null && File.Exists(outp), outp ?? "null");
+            Check("原包内容没被动过（sha256 一致）",
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(realPmp))) == shaBefore);
+            if (outp is not null)
+            {
+                int cntAfter; var meta = "";
+                using (var z = System.IO.Compression.ZipFile.OpenRead(outp))
+                {
+                    cntAfter = z.Entries.Count;
+                    var cvE = z.GetEntry("cover.webp");
+                    Check("包内有 cover.webp", cvE is not null);
+                    Check("cover.webp 内容是真 WebP", cvE is not null && IsWebpBytes(ReadAll(z, "cover.webp")));
+                    Check("包内有 cover.jpg", z.GetEntry("cover.jpg") is not null);
+                    Check("包内有 images/_MetaImage.jpg", z.GetEntry("images/_MetaImage.jpg") is not null);
+                    meta = z.GetEntry("meta.json") is null ? "" : Encoding.UTF8.GetString(ReadAll(z, "meta.json"));
+                    var m = System.Text.RegularExpressions.Regex.Match(meta, "\"Image\"\\s*:\\s*\"([^\"]*)\"");
+                    Check("meta.json 的 Image 指到 _MetaImage",
+                        m.Success && m.Groups[1].Value.Contains("_MetaImage"), m.Success ? m.Groups[1].Value : "没有 Image 字段");
+                    Check("原有内容一个没少（条目数只多不少）", cntAfter >= cntBefore, $"{cntBefore} → {cntAfter}");
+                }
+
+                // 模拟 Penumbra 解包成目录 → 看目录里到底有哪几张图
+                var sim = Path.Combine(root, "penumbra_sim");
+                if (Directory.Exists(sim)) Directory.Delete(sim, true);
+                System.IO.Compression.ZipFile.ExtractToDirectory(outp, sim);
+                var pics = Directory.GetFiles(sim, "*", SearchOption.AllDirectories)
+                    .Where(f => new[] { ".png", ".jpg", ".jpeg", ".webp" }
+                        .Contains(Path.GetExtension(f).ToLowerInvariant()))
+                    .OrderBy(f => f).ToArray();
+                Console.WriteLine($"     模拟 Penumbra 解包：{cntAfter} 个条目，其中**图片 {pics.Length} 张**");
+                foreach (var f in pics)
+                    Console.WriteLine($"        {Path.GetRelativePath(sim, f)}  {new FileInfo(f).Length / 1024} KB"
+                        + (IsWebpBytes(File.ReadAllBytes(f)) ? "  （真 WebP）" : ""));
+                var mm2 = System.Text.RegularExpressions.Regex.Match(meta, "\"Image\"\\s*:\\s*\"([^\"]*)\"");
+                Console.WriteLine("     meta.json 的 Image = " + (mm2.Success ? mm2.Groups[1].Value : "（没有）"));
+                Console.WriteLine("     解包目录: " + sim);
+                Check("解包后目录里有图（这才是游戏看到的样子）", pics.Length > 0, $"{pics.Length} 张");
+            }
+        }
+
         try { Directory.Delete(root, true); } catch { }
 
         Console.WriteLine();
