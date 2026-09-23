@@ -44,13 +44,15 @@ import traceback
 import zipfile
 from pathlib import Path
 
+from app_version import APP_VERSION                 # 版本号唯一来源（同目录 app_version.py）
+
 try:                      # 跟随控制台编码输出中文，避免乱码/报错
     sys.stdout.reconfigure(errors="replace")
     sys.stderr.reconfigure(errors="replace")
 except Exception:
     pass
 
-APP_VERSION = "1.0"
+# 管理器版本号见同目录 app_version.py（APP_VERSION），这里不再单独定义
 
 if getattr(sys, "frozen", False):        # PyInstaller 打包后，程序目录 = exe 所在目录
     APP_DIR = Path(sys.executable).resolve().parent

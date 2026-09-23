@@ -57,6 +57,7 @@ FFXIV Mod 管理工具 · Web 版  使用说明
   停止Web版.bat          把服务关掉
   mod_manager_web.py    网页版后端源码
   mod_manager.py        业务逻辑源码（和 tkinter 版共用同一份）
+app_version.py        版本号唯一来源（管理器/部署包/界面都读它，改版本只改这里）
   web/                  前端构建产物（exe 里已经内置一份）
   web-src/              前端源码（Vite + Vue 3 + Naive UI），改完跑 build_web_exe.bat 重新打包
   mod_manager.json      配置（Mod 根目录、Excel 路径…）

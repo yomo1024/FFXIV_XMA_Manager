@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-打包部署包 v2.0（Web 版）
+打包部署包（Web 版）· 版本号取自同目录 app_version.py
 =====================================================================
 把「Web 版整套」打成一个可以整包拷走的 zip：
 
-    dist\\ModManagerWeb_部署包_v2.0.zip
-        └── ModManagerWeb_部署包_v2.0\\
+    dist\\ModManagerWeb_部署包_v<版本>.zip
+        └── ModManagerWeb_部署包_v<版本>\\
                 部署说明.txt
                 ModManagerWeb.exe      ← 双击即用（内置界面文件）
                 启动Web版.bat / 停止Web版.bat
@@ -27,15 +27,17 @@ import sys
 import zipfile
 from pathlib import Path
 
+from app_version import APP_VERSION          # 版本号唯一来源
+
 APP_DIR = Path(__file__).resolve().parent
 DIST = APP_DIR / "dist"
-VERSION = "2.0"
+VERSION = APP_VERSION                         # 部署包版本跟管理器版本保持一致
 PKG_NAME = "ModManagerWeb_部署包_v%s" % VERSION
 
 ROOT_FILES = ["ModManagerWeb.exe", "启动Web版.bat", "停止Web版.bat",
               "使用说明-Web版.txt", "使用说明.txt", "app.ico"]
 WEB_DIR = "web"                                  # 前端产物整目录
-SRC_FILES = ["mod_manager.py", "mod_manager_web.py", "build_web_exe.bat", "build_exe.bat",
+SRC_FILES = ["mod_manager.py", "mod_manager_web.py", "app_version.py", "build_web_exe.bat", "build_exe.bat",
              "make_package.py", "打包部署包.bat", "requirements.txt"]
 SRC_WEB = "web-src"                              # 前端源码（跳过 node_modules/dist）
 SKIP_DIRS = {"node_modules", "dist", ".vite", "__pycache__"}

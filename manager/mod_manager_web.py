@@ -36,13 +36,14 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 import mod_manager as mm                      # noqa: E402
+import app_version                            # noqa: E402  版本号唯一来源
 
 mm.sys.excepthook = sys.__excepthook__        # 服务端不要弹错误对话框
 
 
 # --------------------------------------------------------------------- 版本监控
-MANAGER_VERSION = "2.1"        # 管理器自己的版本（界面/接口有改动就 +1）
-MIN_PLUGIN_VERSION = "0.2.6"   # 游戏内插件的最低要求版本（低于它就没有封面/目录命名这些新功能）
+MANAGER_VERSION = app_version.APP_VERSION                    # 管理器自己的版本（界面/接口有改动就 +1）
+MIN_PLUGIN_VERSION = app_version.MIN_PLUGIN_VERSION          # 游戏内插件的最低要求版本（低于它就没有封面/目录命名这些新功能）
 
 
 def _build_stamp():
