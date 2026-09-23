@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -2150,6 +2151,110 @@ def api_install():
             "missing": missing, "total": len(mods)}
 
 
+def _backup_dirs(cfg):
+    """备份文件可能在的目录：配置的备份目录 + 程序自带 backup 目录（Excel 快照写在这里）"""
+    out = []
+    for d in (mm.resolve_backup_dir(cfg), mm.BACKUP_DIR):
+        try:
+            rp = Path(d).resolve()
+        except Exception:
+            continue
+        if rp.is_dir() and rp not in out:
+            out.append(rp)
+    return out
+
+
+def _live_excel_name(cfg) -> str:
+    try:
+        return mm.excel_path(cfg).name.lower()
+    except Exception:
+        return ""
+
+
+def _ts_text(ts) -> str:
+    try:
+        return mm._dt.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _backup_snaps(cfg):
+    """汇总表历史快照（每次写 Excel 前自动留一份，程序自己只保留最近 5 份）"""
+    out, live = [], _live_excel_name(cfg)
+    for bd in _backup_dirs(cfg):
+        for q in sorted(bd.glob("*.xlsx")):
+            if q.name.lower() == live or q.name.startswith("~$"):
+                continue
+            try:
+                st = q.stat()
+            except OSError:
+                continue
+            out.append({"name": q.name, "path": str(q), "kind": "snap",
+                        "size": st.st_size, "human": mm.fmt_size(st.st_size),
+                        "mtime": st.st_mtime, "created": _ts_text(st.st_mtime),
+                        "dir": str(bd), "content": "汇总表（Excel）历史版本"})
+    return out
+
+
+def api_backup_delete(body):
+    """删除备份文件（默认移入回收站，能还原）。只允许删备份目录里的 .zip / .xlsx。"""
+    cfg = cfg_now()
+    names = body.get("files") or body.get("name") or []
+    if isinstance(names, str):
+        names = [names]
+    names = [str(n).strip() for n in names if str(n).strip()]
+    if not names:
+        return {"error": "没有指定要删除的文件"}
+    perm = bool(body.get("permanent"))
+    dirs = _backup_dirs(cfg)
+    live = _live_excel_name(cfg)
+    done, failed = [], []
+    for nm in names:
+        base = os.path.basename(nm.replace("\\", "/"))
+        if base != nm:
+            failed.append({"name": nm, "error": "只接受文件名，不接受路径"})
+            continue
+        if Path(base).suffix.lower() not in (".zip", ".xlsx"):
+            failed.append({"name": base, "error": "只允许删除 .zip / .xlsx"})
+            continue
+        if base.lower() == live:
+            failed.append({"name": base, "error": "这是正在用的汇总表，不能删"})
+            continue
+        target = None
+        for bd in dirs:
+            p = bd / base
+            if not p.is_file():
+                continue
+            try:
+                p.resolve().relative_to(bd)                 # 双保险：不能越出备份目录
+            except Exception:
+                continue
+            target = p
+            break
+        if target is None:
+            failed.append({"name": base, "error": "备份目录里找不到这个文件"})
+            continue
+        sz = target.stat().st_size
+        try:
+            if perm:
+                target.unlink()
+                how = "已永久删除"
+            else:
+                how = "已移入回收站" if mm.send_to_recycle_bin(str(target)) else ""
+                if not how:                                  # 回收站不可用（非固定盘等）
+                    target.unlink()
+                    how = "已删除（回收站不可用）"
+        except Exception as e:
+            failed.append({"name": base, "error": str(e)})
+            continue
+        done.append({"name": base, "size": sz, "human": mm.fmt_size(sz), "how": how})
+    msg = ("%s %d 个文件" % ("永久删除" if perm else "移入回收站", len(done))) if done else "什么都没删掉"
+    if failed:
+        msg += "，%d 个失败" % len(failed)
+    mm.log("  备份管理：%s ｜ %s" % (msg, "、".join(d["name"] for d in done)))
+    return {"ok": not failed, "deleted": done, "failed": failed, "message": msg}
+
+
 def api_backups():
     cfg = cfg_now()
     d = mm.resolve_backup_dir(cfg)
@@ -2168,7 +2273,19 @@ def api_backups():
             except Exception:
                 pass
             items.append(row)
-    return {"dir": str(d), "items": items}
+    for r in items:
+        r["kind"] = "zip"
+        if not r.get("created"):
+            r["created"] = _ts_text(r["mtime"])
+    snaps = sorted(_backup_snaps(cfg), key=lambda r: r["mtime"], reverse=True)
+    tot = sum(r["size"] for r in items)
+    tot_snap = sum(r["size"] for r in snaps)
+    return {"dir": str(d), "dirs": [str(x) for x in _backup_dirs(cfg)],
+            "items": items, "snaps": snaps,
+            "stats": {"count": len(items), "size": tot, "human": mm.fmt_size(tot),
+                      "snap_count": len(snaps), "snap_human": mm.fmt_size(tot_snap),
+                      "latest": (items[0].get("created") or _ts_text(items[0]["mtime"])) if items else "",
+                      "latest_name": items[0]["name"] if items else ""}}
 
 
 def api_inspect(q):
@@ -3409,6 +3526,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "没有在跑的任务"})
             if u.path == "/api/open":
                 return self.open_something(body)
+            if u.path == "/api/backup/delete":
+                r = api_backup_delete(body)
+                return self._json(r, 400 if r.get("error") else 200)
             if u.path == "/api/mod/add":
                 return self.mod_add(body)
             if u.path == "/api/mod/edit":
@@ -4250,6 +4370,32 @@ class Handler(BaseHTTPRequestHandler):
             if not m or not m.get("addr"):
                 return self._json({"error": "这条没有 Mod 地址"}, 400)
             mm.open_path(m["addr"])
+            return self._json({"ok": True})
+        if kind == "reveal":
+            p = str(body.get("f") or "").strip()
+            if not p or not Path(p).exists():
+                return self._json({"error": "文件不存在"}, 400)
+            rp = Path(p).resolve()
+            roots = list(_backup_dirs(cfg))
+            dl2, ib2 = mm.resolve_dirs(cfg) if cfg.get("root") else ("", "")
+            for extra in (cfg.get("root"), dl2, ib2, mm.find_install_dir(cfg),
+                          str(mm.LOG_PATH.parent)):
+                if extra:
+                    try:
+                        roots.append(Path(extra).resolve())
+                    except Exception:
+                        pass
+            hit = False
+            for rt in roots:
+                try:
+                    rp.relative_to(rt)
+                    hit = True
+                    break
+                except Exception:
+                    continue
+            if not hit:
+                return self._json({"error": "这个位置不在允许打开的范围内"}, 403)
+            subprocess.Popen(["explorer", "/select,", str(rp)])
             return self._json({"ok": True})
         dl, ib = mm.resolve_dirs(cfg) if cfg.get("root") else ("", "")
         table = {"root": cfg.get("root"), "excel": cfg.get("excel"),
