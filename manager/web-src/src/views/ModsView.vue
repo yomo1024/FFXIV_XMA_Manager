@@ -335,9 +335,16 @@ function askReconcile(folders) {
       + '用在：换电脑后 / 索引库丢了云状态 / 你在网盘里手工整理过。\n'
       + (list.length ? `只对选中的 ${list.length} 条对账。` : '没勾选 → 对全部 Mod 对账。')
       + '\n不下载、不删除任何文件，只改索引库里的记录。',
-    positiveText: '只看不改（预览）',
-    negativeText: '取消',
-    onPositiveClick: () => { startJob('cloud_reconcile', { folders: list, write: false }) },
+    positiveText: '对账并修正（写回索引）',
+    negativeText: '只看不改（预览）',
+    onPositiveClick: () => {
+      startJob('cloud_reconcile', { folders: list, write: true })
+      msg.info('开始对账并写回索引库；跑完列表会自动刷新，没变就 Ctrl+F5', { duration: 12000 })
+    },
+    onNegativeClick: () => {
+      startJob('cloud_reconcile', { folders: list, write: false })
+      msg.info('只看不改：跑完会告诉你云端有多少条、哪些对不上，不会动索引库')
+    },
   })
 }
 
