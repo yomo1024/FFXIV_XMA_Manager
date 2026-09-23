@@ -4808,6 +4808,9 @@ class Handler(BaseHTTPRequestHandler):
             segs = [s for s in raw.split("/") if s]
             if not segs or any(s in (".", "..") for s in segs):
                 return None, "路径不合法"
+            bad = [s for s in segs if s != mm.safe_name(s, fallback="")]
+            if bad:
+                return None, "路径里有 Windows 不允许的字符：%s" % bad[0]
             if segs[-1].upper() in ("SFW", "NSFW") or segs[0].upper() in ("SFW", "NSFW") and len(segs) == 1:
                 return None, "SFW / NSFW 目录不能改名或删除"
             if mm.MOD_RE.match(segs[-1]):
@@ -4827,6 +4830,10 @@ class Handler(BaseHTTPRequestHandler):
             name = str(b.get("name") or "").strip()
             if not name or "/" in name or "\\" in name:
                 return self._json({"error": "分类名不合法"}, 400)
+            fixed = mm.safe_name(name, fallback="")
+            if fixed != name:
+                mm.log("分类名里有 Windows 不允许的字符，已替换：%s → %s" % (name, fixed))
+                name = fixed
             if (root / name).exists():
                 return self._json({"error": "这个分类已经存在了"}, 400)
             (root / name / "SFW").mkdir(parents=True, exist_ok=True)
@@ -4839,6 +4846,10 @@ class Handler(BaseHTTPRequestHandler):
             new = str(b.get("new_name") or "").strip()
             if not old or not new or "/" in new or "\\" in new:
                 return self._json({"error": "名字不合法"}, 400)
+            fixed = mm.safe_name(new, fallback="")
+            if fixed != new:
+                mm.log("分类新名里有 Windows 不允许的字符，已替换：%s → %s" % (new, fixed))
+                new = fixed
             if not (root / old).is_dir():
                 return self._json({"error": "原分类不存在"}, 400)
             if (root / new).exists():
@@ -4901,6 +4912,12 @@ class Handler(BaseHTTPRequestHandler):
             (base / name).mkdir(parents=True, exist_ok=True)
             return self._json({"ok": True, "path": str(base / name)})
 
+        if act == "subdir":                       # 新建子分类：名字里非法字符先替换
+            _nm = str(b.get("name") or "").strip()
+            _fx = mm.safe_name(_nm, fallback="")
+            if _fx != _nm:
+                mm.log("子分类名里有 Windows 不允许的字符，已替换：%s → %s" % (_nm, _fx))
+                b["name"] = _fx
         if act in ("subdir-rename", "subdir-delete"):
             tgt, err = sub_target(b.get("category"), b.get("path"))
             if tgt is None:

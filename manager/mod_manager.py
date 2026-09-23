@@ -1780,8 +1780,35 @@ def split_mod_name(text: str):
     return a, re.sub(r"^-\s*", "", n)
 
 
+_WIN_ILLEGAL = '<>:"/\\|?*'
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {"COM%d" % i for i in range(1, 10)} | {"LPT%d" % i for i in range(1, 10)}
+
+
+def safe_name(text, fallback="未命名", maxlen=120) -> str:
+    r"""把一段文字变成 **Windows 能当文件名** 的名字（非法字符 → `_`）。
+
+    为什么必须有：XMA 的标题里常带 `|`（例："Botanica Bodychain | Rue-YAB-Lava-LaRue | Pocky"），
+    直接拿来做文件夹名 → `[WinError 123] 文件名、目录名或卷标语法不正确`（2026-09 主人现场）。
+    非法字符表与 save_upload() 保持一致：<>:"/\|?* 以及控制字符；另去结尾的点/空格、避开保留设备名。
+    """
+    s = "".join(("_" if (c in _WIN_ILLEGAL or ord(c) < 32) else c) for c in str(text or ""))
+    s = re.sub(r"\s+", " ", s).strip().strip(" .")
+    s = re.sub(r"_{2,}", "_", s).strip(" _")
+    if not s:
+        return fallback
+    if s.split(".")[0].upper() in _WIN_RESERVED:
+        s = "_" + s
+    if len(s) > maxlen:
+        s = s[:maxlen].rstrip(" ._")
+    return s or fallback
+
+
 def mod_folder_name(seq: int, author: str, name: str) -> str:
-    return "%d.[%s] %s" % (seq, author, name) if author else "%d.%s" % (seq, name)
+    raw = "%d.[%s] %s" % (seq, author, name) if author else "%d.%s" % (seq, name)
+    fixed = safe_name(raw, fallback="%d.未命名" % seq)
+    if fixed != raw:
+        log("名字里有 Windows 不允许的字符，已自动替换：%s → %s" % (raw, fixed))
+    return fixed
 
 
 def import_mod(cfg, src, category, zone="SFW", subdir="", author=None, name=None,
@@ -1797,12 +1824,7 @@ def import_mod(cfg, src, category, zone="SFW", subdir="", author=None, name=None
     author, name = (author or "").strip(), (name or "").strip()
     if not name:
         raise SystemExit("Mod 名称不能为空")
-    parent = Path(cfg["root"]) / category
-    if zone:
-        parent = parent / zone
-    for part in re.split(r"[\\/]+", (subdir or "").strip()):
-        if part:
-            parent = parent / part
+    parent = mod_parent(cfg, category, zone, subdir)      # 统一走这里（含非法字符清洗）
     seq = next_seq(parent) if seq in (None, "", 0) else int(seq)
     target = parent / mod_folder_name(seq, author, name)
     if target.exists():
@@ -1843,12 +1865,14 @@ def parse_mod_folder(root, folder: Path):
 
 
 def mod_parent(cfg, category, zone, subdir):
-    parent = Path(cfg["root"]) / (category or "").strip()
+    base = Path(cfg["root"])
+    cat = safe_name(category, fallback="") if (category or "").strip() else ""
+    parent = (base / cat) if cat else base
     if zone:
-        parent = parent / zone
+        parent = parent / safe_name(zone, fallback="SFW")
     for part in re.split(r"[\\/]+", (subdir or "").strip()):
         if part:
-            parent = parent / part
+            parent = parent / safe_name(part, fallback="_")
     return parent
 
 
