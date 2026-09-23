@@ -327,7 +327,7 @@ async function checkUpdates() {
 }
 
 // ---------------- 与网盘对账：以云端实况为准重建归档状态 ----------------
-function askReconcile() {
+function askReconcile(folders) {
   const list = (folders && folders.length) ? folders : cloudTargets()
   dialog.warning({
     title: '与网盘对账',
@@ -1246,7 +1246,7 @@ async function copyPath() {
         <n-button size="small" :loading="updateChecking" @click="checkUpdates">检查更新</n-button>
         <n-button size="small" :loading="cloudBusy" @click="archiveCloud()">归档到云盘</n-button>
         <n-button size="small" :loading="cloudBusy" @click="restoreCloud()">从云盘取回</n-button>
-        <n-button size="small" :loading="cloudBusy" @click="askReconcile">与网盘对账</n-button>
+        <n-button size="small" :loading="cloudBusy" @click="askReconcile()">与网盘对账</n-button>
         <template v-if="updCount">
           <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
                     @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>
