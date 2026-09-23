@@ -60,6 +60,11 @@ export const api = {
     req('/api/mod/tags/add', { method: 'POST', body: JSON.stringify({ folders, tags }) }),
   removeTags: (folders, tags) =>
     req('/api/mod/tags/remove', { method: 'POST', body: JSON.stringify({ folders, tags }) }),
+
+  // ---- 影响/替换（这条 Mod 替换游戏里的哪些装备/部位） ----
+  affects: () => req('/api/affects'),
+  setAffects: (folder, affects) =>
+    req('/api/mod/affects', { method: 'POST', body: JSON.stringify({ folder, affects }) }),
   category: (body) => req('/api/category', { method: 'POST', body: JSON.stringify(body) }),
   saveSettings: (body) => req('/api/settings', { method: 'POST', body: JSON.stringify(body) }),
   open: (kind, f) => req('/api/open', { method: 'POST', body: JSON.stringify({ kind, f }) }),

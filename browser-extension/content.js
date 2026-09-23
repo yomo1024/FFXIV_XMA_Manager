@@ -33,7 +33,7 @@
     });
     const text = (document.body ? document.body.innerText : '').slice(0, 1200);
     // 站点标签：页面上是 "Tags : a, b, c" 的纯文本（.mod-meta-block 里）
-    const tags = [], meta = { races: '', genders: '', mtype: '' };
+    const tags = [], meta = { races: '', genders: '', mtype: '', affects: '' };
     [].slice.call(document.querySelectorAll('.mod-meta-block,div,p,li')).forEach((e) => {
       if (e.children.length > 3) return;
       const t = (e.innerText || '').trim();
@@ -45,11 +45,13 @@
       if (!meta.races && (m3 = t.match(/^Races?\s*:\s*(.+)$/i))) meta.races = m3[1].trim();
       if (!meta.genders && (m3 = t.match(/^Genders?\s*:\s*(.+)$/i))) meta.genders = m3[1].trim();
       if (!meta.mtype && (m3 = t.match(/^Type\s*:\s*(.+)$/i))) meta.mtype = m3[1].trim();
+      // 「影响/替换」：站点上的 Affects / Replaces（这条 mod 替换游戏里的哪件装备/哪个部位）
+      if (!meta.affects && (m3 = t.match(/^Affects\s*\/\s*Replaces\s*:\s*(.+)$/i))) meta.affects = m3[1].trim();
     });
     const m = location.href.match(/\/modid\/(\d+)/);
     return {
       v: 2, url: location.href, modid: m ? m[1] : '',
-      tags: tags, races: meta.races, genders: meta.genders, mtype: meta.mtype,
+      tags: tags, races: meta.races, genders: meta.genders, mtype: meta.mtype, affects: meta.affects,
       name: h1 ? h1.innerText.trim() : document.title.replace(/\s*\|.*$/, ''),
       author: ua ? ua.innerText.trim() : '',
       cover: img ? img.src : (imgs[0] || ''),
@@ -61,7 +63,7 @@
 
   /* ---------------- 面板 ---------------- */
   const STATE_TXT = { queued: '排队中', downloading: '下载中', importing: '入库中', done: '已完成', error: '失败' };
-  let CATS = [], tagsTouched = false, timerQ = null;
+  let CATS = [], tagsTouched = false, affTouched = false, timerQ = null;
 
   function panel() {
     let p = document.getElementById('ffmm-panel');
@@ -77,6 +79,7 @@
       '  <label>子分类 <input id="ffmm-sub" list="ffmm-sublist" placeholder="可空"><datalist id="ffmm-sublist"></datalist></label>' +
       '  <label>类型 <select id="ffmm-zone"><option>SFW</option><option>NSFW</option></select></label>' +
       '  <label>标签 <input id="ffmm-tags" placeholder="自动带出站点标签，可改"></label>' +
+      '  <label>影响/替换 <input id="ffmm-aff" placeholder="自动带出该 mod 替换的东西，可改"></label>' +
       '  <div class="mm-tagsrc"></div>' +
       '  <button id="ffmm-dl" disabled>⬇ 加入队列（下载并导入）</button>' +
       '  <button id="ffmm-push">只送信息到管理器</button>' +
@@ -93,6 +96,7 @@
     const $ = (id) => p.querySelector(id);
     const setSt = (t, bad) => { $('.mm-status').innerHTML = t; $('.mm-status').style.color = bad ? '#ff9a9a' : '#9ee6b5'; };
     $('#ffmm-tags').addEventListener('input', () => { tagsTouched = true; });
+    $('#ffmm-aff').addEventListener('input', () => { affTouched = true; });
     $('#ffmm-qhide').onclick = () => {
       const q = $('#ffmm-qlist');
       const hide = q.style.display !== 'none';
@@ -129,6 +133,7 @@
         (info.dl ? '· 已找到下载链接' : '· 没找到下载链接（可能要登录）');
       $('#ffmm-zone').value = info.nsfw ? 'NSFW' : 'SFW';
       if (!tagsTouched) $('#ffmm-tags').value = (info.tags || []).join(', ');
+      if (!affTouched) $('#ffmm-aff').value = info.affects || '';
       $('.mm-tagsrc').textContent = (info.tags && info.tags.length)
         ? ('站点标签 ' + info.tags.length + ' 个（已自动填入，可修改）')
         : '这个页面没读到标签（可能要登录）';
@@ -148,9 +153,10 @@
       const cat = $('#ffmm-cat').value, zone = $('#ffmm-zone').value;
       const subdir = ($('#ffmm-sub').value || '').trim();
       const tags = ($('#ffmm-tags').value || '').split(/[,，、]/).map((s) => s.trim()).filter(Boolean);
+      const affects = ($('#ffmm-aff').value || '').trim();
       const r = await send({
-        type: 'enqueue', page: Object.assign({}, info, { tags: tags }),
-        category: cat, zone: zone, subdir: subdir, tags: tags
+        type: 'enqueue', page: Object.assign({}, info, { tags: tags, affects: affects }),
+        category: cat, zone: zone, subdir: subdir, tags: tags, affects: affects
       });
       if (!r.ok) return setSt('加入队列失败：' + r.error, true);
       setSt(r.dup ? '这条已经在队列里了' : ('已加入队列 ✓ 会自动下载并入库到「' + (cat || '待导入') + '」'));

@@ -657,11 +657,15 @@ def _job_fetch(job: Job):
     job.set(4, 5, "重扫索引、写标签、生成 Excel…")
     mm.cmd_scan(cfg, quiet=True)
     mod_index(force=True)
-    _tags = apply_tags_after_import(cfg, target, info.get("tags") or q.get("tags") or [])
+    _meta = apply_meta_after_import(
+        cfg, target,
+        tags=info.get("tags") or q.get("tags") or [],
+        affects=q.get("affects") if q.get("affects") is not None else info.get("affects"))
     if q.get("export", True):
         _job_export(job)
     return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
-            "tags": _tags, "file": Path(path).name, "cover": bool(got),
+            "tags": _meta.get("tags") or [], "affects": _meta.get("affects") or "",
+            "file": Path(path).name, "cover": bool(got),
             "size": _size, "human": mm.fmt_size(_size),
             "addr": mm.norm_addr(addr), "target": str(target)}
 
@@ -774,11 +778,15 @@ def _job_selfdownload(job: Job):
         job.set(3, 4, "重扫索引、写标签、生成 Excel…")
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
-        got_tags = apply_tags_after_import(cfg, target, info.get("tags") or q.get("tags") or [])
+        _meta = apply_meta_after_import(
+            cfg, target,
+            tags=info.get("tags") or q.get("tags") or [],
+            affects=q.get("affects") if q.get("affects") is not None else info.get("affects"))
         if q.get("export", True):
             _job_export(job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
-                "file": hit.name, "cover": bool(got), "tags": got_tags,
+                "file": hit.name, "cover": bool(got), "tags": _meta.get("tags") or [],
+                "affects": _meta.get("affects") or "",
                 "target": str(target), "dir": str(dl_dir)}
 
     ib = Path(mm.resolve_dirs(cfg)[1])
@@ -792,25 +800,55 @@ def _job_selfdownload(job: Job):
     return {"inbox": str(tgt), "file": hit.name, "dir": str(dl_dir), "no_category": True}
 
 
-def apply_tags_after_import(cfg, target, tags):
-    """入库后给这个 Mod 打标签（folder 用索引库里的键，保证和前端一致）。
+def apply_meta_after_import(cfg, target, tags=None, affects=None):
+    """入库后给这个 Mod 写「标签」和「影响/替换」（folder 用索引库里的键，保证和前端一致）。
 
-    tags 来自 Mod 站的 Tags 区（扩展 / 书签 / 内置浏览器解析都会带过来）。
+    两项都来自 Mod 站的页面信息（扩展 / 书签小工具 / 内置浏览器解析都会带过来）：
+      tags    = 站点的 Tags 区
+      affects = 站点的「Affects / Replaces」——它替换的是游戏里哪件装备/哪个部位
+    None = 这项不动；"" = 明确清空。
     """
-    want = mm.norm_tags(list(tags or []))
-    if not want:
-        return []
+    want_tags = mm.norm_tags(list(tags or [])) if tags is not None else None
+    want_aff = mm.norm_affects(affects) if affects is not None else None
+    out = {"tags": [], "affects": ""}
+    if not want_tags and want_aff is None:
+        return out
     name = Path(target).name
     try:
         mm.cmd_scan(cfg, quiet=True)
         st = mm.Store()
-        for m in st.all():
-            if m.get("folder") == name or Path(str(m.get("folder") or "")).name == name:
-                return st.set_tags(m["folder"], want)
-        mm.log("打标签：索引里没找到 %s，标签先没写" % name)
+        rows = st.all()
+        want = str(target).rstrip("\\/")
+        hit = None
+        for m in rows:                      # ① 先按完整路径精确匹配（最可靠）
+            if str(m.get("folder") or "").rstrip("\\/").lower() == want.lower():
+                hit = m
+                break
+        if hit is None:                     # ② 路径形式对不上，才退回按文件夹名找，且必须唯一
+            same = [m for m in rows if Path(str(m.get("folder") or "")).name == name]
+            if len(same) == 1:
+                hit = same[0]
+            elif len(same) > 1:
+                mm.log("写页面信息：有 %d 个同名文件夹、路径又没匹配上，跳过 %s（免得写错行）"
+                       % (len(same), name))
+        if hit is not None:
+            m = hit
+            if want_tags:
+                out["tags"] = st.set_tags(m["folder"], want_tags)
+            if want_aff is not None:
+                out["affects"] = st.set_affects(m["folder"], want_aff)
+            st.cx.close()
+            return out
+        st.cx.close()
+        mm.log("写页面信息：索引里没找到 %s，先跳过" % name)
     except Exception as e:
-        mm.log("打标签失败（%s）：%s" % (name, e))
-    return []
+        mm.log("写页面信息失败（%s）：%s" % (name, e))
+    return out
+
+
+def apply_tags_after_import(cfg, target, tags):
+    """兼容旧名字：只打标签"""
+    return apply_meta_after_import(cfg, target, tags=tags or []).get("tags") or []
 
 
 def _job_import_file(job: Job):
@@ -858,11 +896,15 @@ def _job_import_file(job: Job):
         job.set(3, 3, "重扫索引、写标签、生成 Excel…")
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
-        got_tags = apply_tags_after_import(cfg, target, q.get("tags") or info.get("tags") or [])
+        _meta = apply_meta_after_import(
+            cfg, target,
+            tags=q.get("tags") or info.get("tags") or [],
+            affects=q.get("affects") if q.get("affects") is not None else info.get("affects"))
         if q.get("export", True):
             _job_export(job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
-                "file": src.name, "cover": bool(got), "tags": got_tags, "size": size,
+                "file": src.name, "cover": bool(got), "tags": _meta.get("tags") or [],
+                "affects": _meta.get("affects") or "", "size": size,
                 "human": mm.fmt_size(size), "target": str(target)}
 
     job.set(1, 2, "放到「待导入」…")
@@ -965,6 +1007,7 @@ def api_mods():
             "has_img": bool(m.get("img")) and Path(m["img"]).is_file(),
             "ih": (m.get("img_hash") or "")[:16],
             "tags": tag_map.get(m["folder"], []),
+            "affects": m.get("affects") or "",
             "installed": inst.get(m["folder"]) if inst_dir else None,
         })
     return {"mods": out, "install_dir": inst_dir or ""}
@@ -984,6 +1027,27 @@ def _tag_folders(b) -> list:
         return [str(x) for x in fs]
     f = b.get("folder")
     return [str(f)] if f else []
+
+
+def api_affects():
+    """所有已录过的「影响/替换」取值 + 条数（界面做建议/筛选）"""
+    st = mm.Store()
+    items = st.affects_all()
+    st.cx.close()
+    return {"items": items, "total": len(items)}
+
+
+def api_mod_set_affects(b):
+    """设置某条 Mod 的「影响/替换」（空串 = 清空）"""
+    folder = str(b.get("folder") or "")
+    if not folder:
+        raise SystemExit("缺少 folder")
+    st = mm.Store()
+    got = st.set_affects(folder, b.get("affects"))
+    st.cx.close()
+    mod_index(force=True)
+    mm.log("设置影响/替换：%s -> %s" % (Path(folder).name, got or "（空）"))
+    return {"ok": True, "folder": folder, "affects": got}
 
 
 def api_mod_set_tags(b):
@@ -1302,6 +1366,7 @@ def api_inbox_page_put(payload):
         "tags": mm.norm_tags(payload.get("tags") or []),
         "races": str(payload.get("races") or "").strip(),
         "genders": str(payload.get("genders") or "").strip(),
+        "affects": mm.norm_affects(payload.get("affects")),
         "challenge": False,
         "from": "browser",
     }
@@ -1328,7 +1393,8 @@ def api_fetch_parse(b):
         return {"ok": True, "page": info, "url": info.get("url") or url, "from": source,
                 "has_download": bool(info.get("dl")), "warn": "",
                 "suggest": {"name": info.get("name") or "", "author": info.get("author") or "",
-                            "addr": info.get("addr") or "", "cover": info.get("cover") or ""}}
+                            "addr": info.get("addr") or "", "cover": info.get("cover") or "",
+                            "affects": info.get("affects") or ""}}
 
     # ① 先看你自己浏览器（书签小工具）推过来的那条页面信息 —— 够用就绝不碰内置浏览器
     pushed = LAST_PAGE.get("data") or {}
@@ -1413,7 +1479,8 @@ def api_fetch_parse(b):
             "has_download": bool(info.get("dl")),
             "warn": warn,
             "suggest": {"name": info.get("name") or "", "author": info.get("author") or "",
-                        "addr": info.get("addr") or "", "cover": info.get("cover") or ""}}
+                        "addr": info.get("addr") or "", "cover": info.get("cover") or "",
+                        "affects": info.get("affects") or ""}}
 
 
 def api_pending():
@@ -2069,6 +2136,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_bridge())
                 if u.path == "/api/tags":
                     return self._json(api_tags())
+                if u.path == "/api/affects":
+                    return self._json(api_affects())
                 if u.path == "/api/bridge/requests":
                     return self._json(api_bridge_requests())
                 if u.path == "/api/images":
@@ -2148,6 +2217,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.mod_fix_cover(body)
             if u.path == "/api/mod/tags":
                 return self._json(api_mod_set_tags(body))
+            if u.path == "/api/mod/affects":
+                return self._json(api_mod_set_affects(body))
             if u.path == "/api/mod/tags/add":
                 return self._json(api_mod_add_tags(body))
             if u.path == "/api/mod/tags/remove":
@@ -2253,9 +2324,12 @@ class Handler(BaseHTTPRequestHandler):
                           int(b["seq"]) if b.get("seq") else None,
                           mm.norm_addr(b.get("addr") or ""), bool(b.get("move")))
         mm.cmd_scan(cfg, quiet=True)
+        got_aff = ""
+        if b.get("affects"):
+            got_aff = apply_meta_after_import(cfg, t, affects=b.get("affects")).get("affects") or ""
         mod_index(force=True)
         return self._json({"ok": True, "target": str(t),
-                           "rel": safe_rel(t, cfg["root"])})
+                           "rel": safe_rel(t, cfg["root"]), "affects": got_aff})
 
     def mod_edit(self, b):
         cfg = cfg_now()
@@ -2270,8 +2344,13 @@ class Handler(BaseHTTPRequestHandler):
                           int(b["seq"]) if b.get("seq") not in (None, "") else None,
                           b.get("addr") if b.get("addr") is not None else None)
         mm.cmd_scan(cfg, quiet=True)
+        # 「影响/替换」不在文件夹名里，改名/移动之后按新路径单独写一次
+        got_aff = ""
+        if b.get("affects") is not None:
+            got_aff = apply_meta_after_import(cfg, t, affects=b.get("affects")).get("affects") or ""
         mod_index(force=True)
-        return self._json({"ok": True, "target": str(t), "rel": safe_rel(t, cfg["root"])})
+        return self._json({"ok": True, "target": str(t), "rel": safe_rel(t, cfg["root"]),
+                           "affects": got_aff})
 
     def mod_batch_edit(self, b):
         """批量改分类/类型/子分类（一次扫描，不做 N 次）"""
@@ -2298,6 +2377,19 @@ class Handler(BaseHTTPRequestHandler):
                 bad.append("%s：%s" % (Path(folder).name, e))
         if done:
             mm.cmd_scan(cfg, quiet=True)
+            # 「影响/替换」：文件夹改名后路径变了，按重扫后的新记录来写
+            if f.get("affects") is not None:
+                wanted = mm.norm_affects(f.get("affects"))
+                st = mm.Store()
+                hit = 0
+                for m in st.all():
+                    if (m.get("rel") or "") in set(done) or Path(m["folder"]).name in \
+                            {Path(d).name for d in done}:
+                        st.cx.execute("UPDATE mods SET affects=? WHERE folder=?", (wanted, m["folder"]))
+                        hit += 1
+                st.cx.commit()
+                st.cx.close()
+                mm.log("批量设置影响/替换（%d 条）：%s" % (hit, wanted or "（清空）"))
             mod_index(force=True)
         return self._json({"ok": done, "failed": bad})
 

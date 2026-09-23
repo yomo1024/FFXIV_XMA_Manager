@@ -74,7 +74,8 @@ async function enqueue(msg) {
     id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7),
     modid: page.modid || '', name: page.name || page.title || page.url || '(未命名)',
     category: msg.category || '', zone: msg.zone || 'SFW', subdir: msg.subdir || '',
-    tags: msg.tags || page.tags || [], page: page,
+    tags: msg.tags || page.tags || [],
+    affects: msg.affects != null ? msg.affects : (page.affects || ''), page: page,
     state: 'queued', pct: 0, detail: '排队中…', ts: Date.now()
   };
   q.push(it);
@@ -105,6 +106,7 @@ async function runOne(it) {
     }
     await jpost('/api/push/downloaded', {
       file: doneDl.filename, page: it.page, tags: it.tags || it.page.tags || [],
+      affects: it.affects != null ? it.affects : (it.page.affects || ''),
       name: it.page.name || '', author: it.page.author || '', addr: it.page.addr || '',
       cover_url: it.page.cover || '', category: it.category, zone: it.zone,
       subdir: it.subdir, export: true

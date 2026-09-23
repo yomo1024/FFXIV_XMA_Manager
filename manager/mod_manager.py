@@ -104,9 +104,9 @@ def split_author_name(text: str):
     return "", s
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 ADDR_NAME = "地址.txt"
-HEADERS = ["序号", "作者", "NSFW/SFW", "Mod名称", "Mod地址", "预览图"]
-COL_WIDTHS = [7.7, 15.9, 15.9, 55.1, 63.0, 28.0]
-PREVIEW_COL = 6                  # 预览图所在列(F)
+HEADERS = ["序号", "作者", "NSFW/SFW", "影响/替换", "Mod名称", "Mod地址", "预览图"]
+COL_WIDTHS = [7.7, 15.9, 15.9, 30.0, 50.0, 63.0, 28.0]
+PREVIEW_COL = 7                  # 预览图所在列(G)
 PREVIEW_COL_PX = 201
 ROW_HEIGHT_PT = 80
 EMU_PER_PX = 9525
@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS mods (
     img_hash    TEXT,
     file_mtime  REAL,
     file_size   INTEGER,
-    updated_at  TEXT
+    updated_at  TEXT,
+    affects     TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 -- 标签单独一张表：按 folder 关联，重扫描/upsert 都不可能冲掉它
@@ -684,12 +685,15 @@ PAGE_INFO_JS = (
     "  var t2=(e.innerText||'').trim();"
     "  var m2=t2.match(/^Tags\\s*:\\s*([\\s\\S]*)$/i);"
     "  if(m2){m2[1].split(',').forEach(function(x){x=x.trim(); if(x&&tags.indexOf(x)<0)tags.push(x);});}});"
-    "var races='',genders='',mtype='';"
+    "var races='',genders='',mtype='',affects='';"
     "[].slice.call(document.querySelectorAll('.mod-meta-block,div,p,li')).forEach(function(e){"
     "  if(e.children.length>3)return;var t3=(e.innerText||'').trim();var m3;"
     "  if(!races&&(m3=t3.match(/^Races?\\s*:\\s*(.+)$/i)))races=m3[1].trim();"
     "  if(!genders&&(m3=t3.match(/^Genders?\\s*:\\s*(.+)$/i)))genders=m3[1].trim();"
-    "  if(!mtype&&(m3=t3.match(/^Type\\s*:\\s*(.+)$/i)))mtype=m3[1].trim();});"
+    "  if(!mtype&&(m3=t3.match(/^Type\\s*:\\s*(.+)$/i)))mtype=m3[1].trim();"
+    # XIV Mod Archive 的「Affects / Replaces」：可能是单件"Eerie Tights"，
+    # 也可能是多件（逗号/斜杠分隔），原样读回来给用户改
+    "  if(!affects&&(m3=t3.match(/^Affects\\s*\\/\\s*Replaces\\s*:\\s*(.+)$/i)))affects=m3[1].trim();});"
     "var dlc=[];"
     "links.forEach(function(e){var h2=abs(e.getAttribute('href')||'');"
     "  if(h2&&/\\/files\\/|\\.pmp|\\.ttmp2?|\\.zip|\\.7z/i.test(h2)&&dlc.indexOf(h2)<0)dlc.push(h2);});"
@@ -701,7 +705,7 @@ PAGE_INFO_JS = (
     "return {url:location.href,title:document.title,"
     "name:h1?h1.innerText.trim():'',author:author,cover:img?img.src:'',"
     "dl:dl?abs(href):'',dlRaw:href,dlCands:dlc.slice(0,5),filesTab:filesTab,"
-    "tags:tags.slice(0,40),races:races,genders:genders,mtype:mtype,"
+    "tags:tags.slice(0,40),races:races,genders:genders,mtype:mtype,affects:affects,"
     "login:(location.href.indexOf('/login')>-1)||(low.indexOf('log in')>-1)||(low.indexOf('sign in')>-1),"
     "hidden:(low.indexOf('hidden')>-1)||(low.indexOf('not authorized')>-1)||(low.indexOf('no files')>-1),"
     "ready:document.readyState,body:text};"
@@ -1553,6 +1557,20 @@ def norm_tag(t) -> str:
     return s[:TAG_MAX_LEN]
 
 
+AFFECTS_MAX = 200          # 「影响/替换」原文照抄，只做长度上限保护
+
+
+def norm_affects(text) -> str:
+    """规范化「影响/替换」：去首尾空白、把连续空白压成一个空格、限长。
+
+    值来自 XIV Mod Archive 的 `Affects / Replaces` 一栏，可能是
+    "Eerie Tights" 这种单件，也可能是 "Eastern Technogaskins, Eastern Technojacket"
+    这种多件 —— 原样保留（不做结构拆分），只清掉换行和多余空格。
+    """
+    s = re.sub(r"\s+", " ", str(text or "")).strip().strip(",;、；")
+    return s[:AFFECTS_MAX]
+
+
 def norm_tags(tags) -> list:
     """一组标签：去空、大小写不敏感去重（保留输入写法）、限个数"""
     out, seen = [], set()
@@ -1578,7 +1596,7 @@ class Store:
         self.cx.row_factory = sqlite3.Row
         self.cx.executescript(SCHEMA)
         have = {r["name"] for r in self.cx.execute("PRAGMA table_info(mods)")}
-        for col, typ in (("img_source", "TEXT"), ("subcat", "TEXT")):
+        for col, typ in (("img_source", "TEXT"), ("subcat", "TEXT"), ("affects", "TEXT")):
             if col not in have:
                 self.cx.execute("ALTER TABLE mods ADD COLUMN %s %s" % (col, typ))
         self.cx.commit()
@@ -1598,17 +1616,21 @@ class Store:
                 img_hash = md5_of(img)
         self.cx.execute(
             """INSERT INTO mods (folder,category,seq,author,nsfw,subcat,name,addr,addr_source,
-                                 img,img_source,img_hash,file_mtime,file_size,updated_at)
+                                 img,img_source,img_hash,file_mtime,file_size,updated_at,affects)
                VALUES (:folder,:category,:seq,:author,:nsfw,:subcat,:name,:addr,:addr_source,
-                       :img,:img_source,:img_hash,:file_mtime,:file_size,:updated_at)
+                       :img,:img_source,:img_hash,:file_mtime,:file_size,:updated_at,:affects)
                ON CONFLICT(folder) DO UPDATE SET
                  category=excluded.category, seq=excluded.seq, author=excluded.author,
                  nsfw=excluded.nsfw, subcat=excluded.subcat, name=excluded.name, addr=excluded.addr,
                  addr_source=excluded.addr_source, img=excluded.img,
                  img_source=excluded.img_source, img_hash=excluded.img_hash,
                  file_mtime=excluded.file_mtime, file_size=excluded.file_size,
+                 -- 重扫描时记录里没有 affects（它不在文件夹名里），给 NULL 就保留库里已有的；
+                 -- 手动清空传的是 ""（不是 NULL），所以照样能清掉。
+                 affects=COALESCE(excluded.affects, mods.affects),
                  updated_at=excluded.updated_at""",
             {**m, "img_hash": img_hash, "file_mtime": mtime, "file_size": size,
+             "affects": m.get("affects"),
              "updated_at": _dt.datetime.now().isoformat(timespec="seconds")})
         return img_hash
 
@@ -1629,6 +1651,30 @@ class Store:
     def all_tags(self) -> list:
         return [{"tag": r["tag"], "count": r["n"]} for r in self.cx.execute(
             "SELECT tag, COUNT(*) AS n FROM mod_tags GROUP BY tag ORDER BY n DESC, tag")]
+
+    # ------------------------------------------------------- 影响/替换（affects）
+    def set_affects(self, folder, text) -> str:
+        """手工设置「影响/替换」（空串 = 清空）"""
+        f = str(folder)
+        val = norm_affects(text)
+        self.cx.execute("UPDATE mods SET affects=? WHERE folder=?", (val, f))
+        self.cx.commit()
+        return val
+
+    def set_affects_many(self, folders, text) -> int:
+        """批量写「影响/替换」（空串 = 清空），返回改了几条"""
+        val = norm_affects(text)
+        n = 0
+        for f in folders:
+            n += self.cx.execute("UPDATE mods SET affects=? WHERE folder=?", (val, str(f))).rowcount
+        self.cx.commit()
+        return n
+
+    def affects_all(self) -> list:
+        """已有取值 + 条数（给界面做建议/筛选）"""
+        return [{"affects": r["affects"], "count": r["n"]} for r in self.cx.execute(
+            "SELECT affects, COUNT(*) AS n FROM mods WHERE affects IS NOT NULL AND affects<>'' "
+            "GROUP BY affects ORDER BY n DESC, affects")]
 
     def set_tags(self, folder, tags) -> list:
         f = str(folder)
@@ -1793,8 +1839,8 @@ def write_excel(mods: list, cfg: dict, out_path: Path, use_store_hash=None, prog
         # 这个分类里有子分类时，表格里多加一列「子分类」
         show_sub = any((m.get("subcat") or "") for m in rows)
         if show_sub:
-            heads = ["序号", "子分类", "作者", "NSFW/SFW", "Mod名称", "Mod地址", "预览图"]
-            cws = [7.7, 15.857, 15.857, 15.857, 50.0, 63.0, 28.0]
+            heads = ["序号", "子分类", "作者", "NSFW/SFW", "影响/替换", "Mod名称", "Mod地址", "预览图"]
+            cws = [7.7, 15.857, 15.857, 15.857, 26.0, 50.0, 63.0, 28.0]
         else:
             heads = list(HEADERS)
             cws = list(COL_WIDTHS)
@@ -1810,8 +1856,9 @@ def write_excel(mods: list, cfg: dict, out_path: Path, use_store_hash=None, prog
             ws.column_dimensions[get_column_letter(i)].width = w
         for r, m in enumerate(rows, start=2):
             vals = ([m["seq"], m.get("subcat") or "", m["author"], m["nsfw"],
-                     m["name"], m["addr"], None] if show_sub else
-                    [m["seq"], m["author"], m["nsfw"], m["name"], m["addr"], None])
+                     m.get("affects") or "", m["name"], m["addr"], None] if show_sub else
+                    [m["seq"], m["author"], m["nsfw"], m.get("affects") or "",
+                     m["name"], m["addr"], None])
             for i, v in enumerate(vals, 1):
                 c = ws.cell(r, i, v)
                 c.font, c.alignment, c.border = f_body, center, border
@@ -2648,7 +2695,8 @@ def gui(cfg):
             st["photo"] = None
             return
         vals = {"分类": m["category"], "序号": str(m["seq"]), "作者": m["author"],
-                "类型": m["nsfw"], "Mod 名称": m["name"],
+                "类型": m["nsfw"], "影响/替换": m.get("affects") or "—",
+                "Mod 名称": m["name"],
                 "Mod 地址": m["addr"] or "(缺失)", "文件夹": m["folder"]}
         for k, v in vals.items():
             detail_vars[k].set(v)
@@ -4398,7 +4446,7 @@ def gui(cfg):
     df = ttk.LabelFrame(right, text="详情")
     df.pack(fill="x", padx=6)
     detail_vars = {}
-    order = ("分类", "序号", "作者", "类型", "Mod 名称", "Mod 地址", "文件夹", "预览图")
+    order = ("分类", "序号", "作者", "类型", "影响/替换", "Mod 名称", "Mod 地址", "文件夹", "预览图")
     for i, k in enumerate(order):
         ttk.Label(df, text=k, foreground="#666").grid(row=i, column=0, sticky="e", padx=(6, 4), pady=1)
         var = tk.StringVar()

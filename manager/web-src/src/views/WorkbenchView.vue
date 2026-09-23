@@ -81,7 +81,12 @@ const bookmarklet = computed(() => {
     + "if(tg.length||e.children.length>3)return;var t=(e.innerText||'').trim();"
     + "var mx=t.match(/^Tags\\s*:\\s*([\\s\\S]*)$/i);"
     + "if(mx){mx[1].split(',').forEach(function(x){x=x.trim();if(x&&tg.indexOf(x)<0)tg.push(x)})}});"
-    + 'var o={v:4,url:location.href,modid:m,name:h?h.innerText.trim():document.title,author:au,imgs:g,tags:tg,'
+    // 「影响/替换」= 站点上的 Affects / Replaces 一栏（这条 mod 替换游戏里的哪件装备/哪个部位）
+    + "var af='';[].slice.call(d.querySelectorAll('.mod-meta-block,div,p,li')).forEach(function(e){"
+    + "if(af||e.children.length>3)return;var t2=(e.innerText||'').trim();"
+    + "var low=t2.toLowerCase();var i=low.indexOf('affects / replaces');"
+    + "if(i===0){var j=t2.indexOf(':');if(j>0)af=t2.slice(j+1).trim()}});"
+    + 'var o={v:5,url:location.href,modid:m,name:h?h.innerText.trim():document.title,author:au,imgs:g,tags:tg,affects:af,'
     + "cover:img?img.src:'',dl:dh,title:document.title};"
     + "fetch('http://127.0.0.1:" + port + "/api/inbox/page',{method:'POST',mode:'no-cors',"
     + "headers:{'Content-Type':'text/plain'},body:JSON.stringify(o)});"
@@ -141,7 +146,7 @@ function onFocus() {
 const parseErr = ref('')
 const parseWarn = ref('')
 const form = ref({ category: '', zone: 'SFW', subcat: '', author: '', name: '', seq: null,
-                   cover: true, export: true })
+                   affects: '', affectsFromPage: '', cover: true, export: true })
 
 // 封面走后端代理（后端会先直连、再借内置浏览器 cookie）
 const coverSrc = (u, w = 400, bust = 0) =>
@@ -223,6 +228,9 @@ function applyParsed(page) {
   parseErr.value = ''
   form.value.name = page.name || ''
   form.value.author = page.author || ''
+  // 站点上的「Affects / Replaces」：自动填进来，主人仍可改
+  form.value.affectsFromPage = String(page.affects || '').trim()
+  form.value.affects = form.value.affectsFromPage
 }
 
 async function parse() {
@@ -300,6 +308,7 @@ function downloadWithMyBrowser() {
     category: form.value.category || '',
     zone: form.value.zone || 'SFW',
     subdir: form.value.subcat || '',
+    affects: form.value.affects || '',
     seconds: 900, export: form.value.export,
   })
   msg.info('已让「你自己的浏览器」开始下载；下完我会自动入库到「' +
@@ -319,7 +328,8 @@ function doFetch() {
   startJob('fetch', {
     url: u, category: form.value.category, zone: form.value.zone,
     subdir: form.value.subcat, author: form.value.author, name: form.value.name,
-    seq: form.value.seq, cover: form.value.cover, export: form.value.export,
+    seq: form.value.seq, affects: form.value.affects || '',
+    cover: form.value.cover, export: form.value.export,
   })
 }
 
@@ -362,7 +372,8 @@ async function saveBrowserPath(v) {
 function useAsNewMod() {
   const p = parsed.value || info.value?.page || {}
   if (!p.addr) return msg.warning('当前页面不是 Mod 详情页')
-  bus.prefillAdd = { addr: p.addr, name: p.name || p.title || '', author: p.author || '' }
+  bus.prefillAdd = { addr: p.addr, name: p.name || p.title || '', author: p.author || '',
+                     affects: String(p.affects || form.value.affects || '') }
   msg.info('已带到「添加 Mod」里，去 Mod 列表确认一下')
 }
 function doImport() {
@@ -482,7 +493,11 @@ const pendColumns = [
                     {{ parsed.dl ? '找到了' : '页面上没有（可能要登录）' }}
                   </b>
                 </div>
-                <div class="dim addr">{{ parsed.addr }}</div>
+                <div class="dim">影响/替换：<b>{{ form.affects || '（页面没写，可自己填）' }}</b>
+              <span v-if="form.affectsFromPage && form.affects === form.affectsFromPage"
+                    style="opacity:.6">（自动读到）</span>
+            </div>
+            <div class="dim addr">{{ parsed.addr }}</div>
               </div>
             </div>
 
@@ -499,6 +514,13 @@ const pendColumns = [
                        style="width: 200px" />
               <n-input-number v-model:value="form.seq" size="small" :min="1" placeholder="序号"
                               style="width: 110px" />
+            </div>
+            <div class="formrow">
+              <n-input v-model:value="form.affects" size="small"
+                       placeholder="影响/替换：它替换游戏里的什么（自动从页面读，可改）"
+                       style="width: 420px" />
+              <n-button v-if="form.affectsFromPage" size="tiny" quaternary
+                        @click="form.affects = form.affectsFromPage">用页面读到的值</n-button>
             </div>
 
             <n-space align="center">

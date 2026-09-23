@@ -31,7 +31,7 @@ const mode = ref('edit')
 
 function blank() {
   return { src: '', folder: '', category: '', zone: 'SFW', subcat: '', seq: null,
-           author: '', name: '', addr: '', move: true }
+           author: '', name: '', addr: '', affects: '', move: true }
 }
 
 const catOptions = computed(() =>
@@ -63,6 +63,7 @@ async function loadMeta() {
 }
 checkBridge()
 loadTags()
+loadAffects()
 bus.refresh = loadMeta
 onMounted(() => {
   // ?q=xxx 可以直接带搜索词打开（方便收藏特定 Mod 的筛选视图）
@@ -80,6 +81,15 @@ watch(
     form.value.addr = v.addr || ''
     form.value.name = v.name || ''
     form.value.author = v.author || ''
+    form.value.affects = v.affects || ''
+  },
+)
+
+// 换选中行时，把「已保存的影响/替换」记下来，失焦保存时才知道有没有改动
+watch(
+  () => cur.value && cur.value.folder,
+  () => {
+    if (cur.value) cur.value._affects_saved = cur.value.affects || ''
   },
 )
 const pickOnce = ref(null)
@@ -109,10 +119,13 @@ const fInst = ref('')               // '' / yes / no / unknown
 const fImg = ref('')                // '' / yes / no
 const fTagState = ref('')           // '' / has / none
 const fFields = ref(['name', 'author', 'addr', 'folder'])
+const fAffects = ref([])            // 选中的「影响/替换」值（命中任意一个即显示）
 const allTags = ref([])             // [{tag, count}]
+const allAffects = ref([])          // [{affects, count}]
 const advCount = computed(() =>
   (fTags.value.length ? 1 : 0) + (fCats.value.length ? 1 : 0) + (fAuthor.value ? 1 : 0) +
-  (fAddr.value ? 1 : 0) + (fInst.value ? 1 : 0) + (fImg.value ? 1 : 0) + (fTagState.value ? 1 : 0))
+  (fAddr.value ? 1 : 0) + (fInst.value ? 1 : 0) + (fImg.value ? 1 : 0) + (fTagState.value ? 1 : 0) +
+  (fAffects.value.length ? 1 : 0))
 
 async function loadTags() {
   try {
@@ -124,6 +137,27 @@ async function loadTags() {
 }
 
 const tagOptions = computed(() => allTags.value.map((t) => ({ label: `${t.tag}（${t.count}）`, value: t.tag })))
+const affectsOptions = computed(() =>
+  allAffects.value.map((t) => ({ label: `${t.affects}（${t.count}）`, value: t.affects })))
+
+async function loadAffects() {
+  try {
+    const r = await api.affects()
+    allAffects.value = r.items || []
+  } catch (e) {
+    console.warn('读影响/替换取值失败', e)
+  }
+}
+
+/** 点列里的值 = 直接按它筛选 */
+function toggleAffectsFilter(v) {
+  const s = String(v || '').trim()
+  if (!s) return
+  advOpen.value = true
+  const i = fAffects.value.findIndex((x) => x.toLowerCase() === s.toLowerCase())
+  if (i >= 0) fAffects.value.splice(i, 1)
+  else fAffects.value.push(s)
+}
 
 const instOptions = [
   { label: '已安装', value: 'yes' }, { label: '未安装', value: 'no' }, { label: '未知', value: 'unknown' },
@@ -134,11 +168,12 @@ const fieldOptions = [
   { label: '名称', value: 'name' }, { label: '作者', value: 'author' },
   { label: '地址', value: 'addr' }, { label: '路径', value: 'folder' },
   { label: '分类', value: 'category' }, { label: '标签', value: 'tags' },
+  { label: '影响/替换', value: 'affects' },
 ]
 
 function clearAdv() {
   fTags.value = []; fCats.value = []; fAuthor.value = ''; fAddr.value = ''
-  fInst.value = ''; fImg.value = ''; fTagState.value = ''
+  fInst.value = ''; fImg.value = ''; fTagState.value = ''; fAffects.value = []
   q.value = ''; cat.value = ''; sub.value = ''; zone.value = ''
 }
 
@@ -162,7 +197,7 @@ function fieldHit(m, needle) {
   return fields.some((f) => {
     if (f === 'tags') return (m.tags || []).some((t) => String(t).toLowerCase().includes(needle))
     const v = { name: m.name, author: m.author, addr: m.addr, folder: m.rel || m.folder,
-                category: m.category, subcat: m.subcat }[f] || ''
+                category: m.category, subcat: m.subcat, affects: m.affects }[f] || ''
     return String(v).toLowerCase().includes(needle)
   })
 }
@@ -178,6 +213,23 @@ async function saveTags(list) {   // 单条：整条覆盖
     emit('changed')
   } catch (e) {
     msg.error('保存标签失败：' + e.message)
+  }
+}
+
+async function saveAffects() {          // 失焦/回车即保存（和标签一样的即时反馈）
+  if (!cur.value) return
+  const want = String(cur.value.affects || '').trim()
+  const old = String(cur.value._affects_saved ?? '').trim()
+  if (want === old) return
+  try {
+    const r = await api.setAffects(cur.value.folder, want)
+    cur.value.affects = r.affects
+    cur.value._affects_saved = r.affects
+    await loadAffects()
+    msg.success(r.affects ? `已保存影响/替换：${r.affects}` : '已清空影响/替换')
+    emit('changed')
+  } catch (e) {
+    msg.error('保存影响/替换失败：' + e.message)
   }
 }
 
@@ -394,7 +446,7 @@ watch(showAddImg, (v) => {
 })
 
 const wall = ref(new URLSearchParams(location.search).has('wall'))   // 表格 / 图片墙
-const batch = ref({ category: '', zone: '', subcat: '', tags: [] })
+const batch = ref({ category: '', zone: '', subcat: '', tags: [], affectsOn: false, affects: '' })
 const searchEl = ref(null)
 
 async function applyBatch() {
@@ -403,6 +455,7 @@ async function applyBatch() {
   if (batch.value.category) f.category = batch.value.category
   if (batch.value.zone) f.zone = batch.value.zone
   if (batch.value.subcat !== '') f.subcat = batch.value.subcat
+  if (batch.value.affectsOn) f.affects = batch.value.affects || ''      // 开了开关才动它（空 = 清空）
   if (!Object.keys(f).length) return msg.warning('上面至少选一样要改的')
   busy.value = true
   try {
@@ -410,7 +463,7 @@ async function applyBatch() {
     msg.success(`批量改了 ${r.ok.length} 个` + (r.failed.length ? `，失败 ${r.failed.length} 个` : ''))
     if (r.failed.length) console.warn(r.failed)
     checked.value = []
-    batch.value = { category: '', zone: '', subcat: '' }
+    batch.value = { category: '', zone: '', subcat: '', tags: [], affectsOn: false, affects: '' }
     emit('changed')
     await loadMeta()
   } catch (e) {
@@ -512,6 +565,10 @@ const view = computed(() =>
     if (fAddr.value.trim() &&
         !String(m.addr || '').toLowerCase().includes(fAddr.value.trim().toLowerCase())) return false
     if (!hitTags(m, fTags.value, tagMode.value)) return false
+    if (fAffects.value.length) {
+      const mine = String(m.affects || '').toLowerCase()
+      if (!fAffects.value.some((v) => mine.includes(String(v).toLowerCase()))) return false
+    }
     if (fTagState.value === 'has' && !(m.tags || []).length) return false
     if (fTagState.value === 'none' && (m.tags || []).length) return false
     if (fInst.value === 'yes' && m.installed !== true) return false
@@ -570,6 +627,18 @@ const columns = computed(() => [
     render: (r) => h(NTag, { size: 'small', bordered: false, type: r.nsfw === 'NSFW' ? 'warning' : 'success' },
       { default: () => r.nsfw }),
   },
+  {
+    title: '影响/替换', key: 'affects', width: 190, minWidth: 120, resizable: true,
+    render: (r) => {
+      const v = String(r.affects || '').trim()
+      if (!v) return h('span', { style: 'opacity:.35' }, '—')
+      return h('span', {
+        style: 'cursor:pointer;border-bottom:1px dashed currentColor',
+        title: '点一下按它筛选',
+        onClick: (e) => { e.stopPropagation(); toggleAffectsFilter(v) },
+      }, v)
+    },
+  },
   { title: 'Mod 名称', key: 'name', minWidth: 260, ellipsis: { tooltip: true }, resizable: true },
   {
     title: '是否安装', key: 'installed', width: 96, align: 'center',
@@ -606,7 +675,8 @@ function openEdit() {
   const m = cur.value
   form.value = { src: '', folder: m.folder, category: m.category, zone: m.nsfw,
                  subcat: m.subcat || '', seq: m.seq, author: m.author, name: m.name,
-                 addr: m.addr || '', move: false }
+                 addr: m.addr || '', affects: m.affects || '', move: false }
+  m._affects_saved = m.affects || ''
   mode.value = 'edit'
   showForm.value = true
 }
@@ -622,8 +692,12 @@ async function submitForm() {
     } else {
       const r = await api.editMod({
         folder: f.folder, category: f.category, zone: f.zone, subcat: f.subcat || '',
-        author: f.author, name: f.name, seq: f.seq, addr: f.addr,
+        author: f.author, name: f.name, seq: f.seq, addr: f.addr, affects: f.affects || '',
       })
+      if (cur.value && cur.value.folder === f.folder) {
+        cur.value.affects = r.affects ?? (f.affects || '')
+        cur.value._affects_saved = cur.value.affects
+      }
       msg.success('已更新：' + r.rel)
     }
     showForm.value = false
@@ -818,6 +892,9 @@ async function copyPath() {
           <span class="lbl">预览图</span>
           <n-select v-model:value="fImg" :options="imgOptions" size="small" clearable
                     placeholder="预览图" style="width: 130px" />
+          <span class="lbl">影响/替换</span>
+          <n-select v-model:value="fAffects" :options="affectsOptions" multiple filterable clearable
+                    size="small" placeholder="选它替换的对象（可多选）" style="width: 240px" />
           <span class="lbl">关键字范围</span>
           <n-checkbox-group v-model:value="fFields" size="small">
             <n-checkbox v-for="f in fieldOptions" :key="f.value" :value="f.value" :label="f.label"
@@ -827,9 +904,19 @@ async function copyPath() {
         <div class="row">
           <n-button size="small" @click="clearAdv">清空全部条件</n-button>
           <n-button size="small" quaternary @click="loadTags">刷新标签列表</n-button>
+          <n-button size="small" quaternary @click="loadAffects">刷新影响/替换列表</n-button>
           <span class="dim">当前显示 {{ view.length }} / {{ mods.length }} 条</span>
           <div class="grow"></div>
           <span class="dim">提示：点表格里的小标签，可以快速按它筛选</span>
+        </div>
+        <div v-if="allAffects.length" class="row tagcloud">
+          <span class="lbl">影响/替换</span>
+          <n-tag v-for="af in allAffects" :key="af.affects" size="tiny" checkable
+                 :checked="fAffects.some((x) => x.toLowerCase() === af.affects.toLowerCase())"
+                 style="margin: 1px 4px 1px 0"
+                 @update:checked="toggleAffectsFilter(af.affects)">
+            {{ af.affects }} <span style="opacity:.5">{{ af.count }}</span>
+          </n-tag>
         </div>
         <div v-if="allTags.length" class="row tagcloud">
           <span class="lbl">全部标签</span>
@@ -848,6 +935,11 @@ async function copyPath() {
         <n-select v-model:value="batch.zone" size="small" clearable placeholder="改成类型"
                   style="width: 120px"
                   :options="[{ label: 'SFW', value: 'SFW' }, { label: 'NSFW', value: 'NSFW' }]" />
+        <n-checkbox v-model:checked="batch.affectsOn" size="small">影响/替换</n-checkbox>
+        <n-select v-model:value="batch.affects" :options="affectsOptions" :disabled="!batch.affectsOn"
+                  size="small" filterable tag clearable
+                  :placeholder="batch.affectsOn ? '填/选替换对象（留空 = 清空）' : '勾上左边才改'"
+                  style="width: 210px" />
         <n-input v-model:value="batch.subcat" size="small" placeholder="改成子分类（可留空）"
                  style="width: 150px" />
         <n-button size="small" type="primary" @click="applyBatch">应用到选中</n-button>
@@ -877,7 +969,7 @@ async function copyPath() {
           :columns="columns" :data="view" :row-class-name="rowClassName" :row-props="rowProps"
           :row-key="(r) => r.folder" :checked-row-keys="checked"
           @update:checked-row-keys="(k) => (checked = k)"
-          :max-height="'100%'" :scroll-x="1240" size="small" striped flex-height
+          :max-height="'100%'" :scroll-x="1410" size="small" striped flex-height
         />
         <n-empty v-else style="margin: auto" description="还没有索引数据，点右上角「重新扫描」" />
       </div>
@@ -947,6 +1039,15 @@ async function copyPath() {
           <span class="lbl">标签</span>
           <n-dynamic-tags :value="(cur && cur.tags) || []" size="small"
                           :disabled="!cur" @update:value="saveTags" />
+        </div>
+        <div class="tagedit">
+          <span class="lbl" title="这条 Mod 替换/影响游戏里的哪些东西（来自 XMA 的 Affects / Replaces）">
+            影响/替换
+          </span>
+          <n-input :value="(cur && cur.affects) || ''" size="small" :disabled="!cur"
+                   placeholder="例如：Eerie Tights ／ Skin, Body（改完点空白处即保存）"
+                   @update:value="(v) => cur && (cur.affects = v)"
+                   @blur="saveAffects" @keyup.enter="saveAffects" />
         </div>
         <n-descriptions :column="1" label-placement="left" size="small" label-width="56">
           <n-descriptions-item label="地址">
@@ -1082,6 +1183,10 @@ async function copyPath() {
         </n-form-item>
         <n-form-item label="Mod 地址">
           <n-input v-model:value="form.addr" placeholder="https://www.xivmodarchive.com/modid/12345" />
+        </n-form-item>
+        <n-form-item label="影响/替换">
+          <n-select v-model:value="form.affects" :options="affectsOptions" filterable clearable tag
+                    placeholder="它替换游戏里的什么（留空 = 不设置；下载/解析时会自动填）" />
         </n-form-item>
         <n-form-item v-if="mode === 'add'" label="处理方式">
           <n-switch v-model:value="form.move" />
