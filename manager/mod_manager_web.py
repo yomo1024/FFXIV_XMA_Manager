@@ -272,7 +272,7 @@ class Job:
 
 JOB_LOCK = threading.Lock()
 JOBS = {"cur": None}
-JOB_TITLES = {"cover_audit": "封面体检", "cover_inject": "封面插包", "scan": "扫描目录", "export": "生成 Excel", "run": "扫描并生成 Excel", "selfdownload": "在自己浏览器里下载 → 自动入库", "importfile": "入库（浏览器下好的文件）",
+JOB_TITLES = {"cover_inject": "封面插包", "scan": "扫描目录", "export": "生成 Excel", "run": "扫描并生成 Excel", "selfdownload": "在自己浏览器里下载 → 自动入库", "importfile": "入库（浏览器下好的文件）",
               "backup": "打包备份", "restore": "导入备份", "import": "导入下载",
               "renumber": "重排序号", "download": "从页面下载", "watch": "监视下载",
               "fetch": "解析并下载入库",
@@ -2061,9 +2061,6 @@ def _job_import_file(job: Job):
             "no_category": True}
 
 
-LAST_COVER_AUDIT = {}          # 最近一次封面体检的结果（前端轮询用）
-
-
 def _job_cover_inject(job: Job):
     """封面插包：给选中的（或全部）mod 各输出一个**带封面的包**，输出到 `_封面已注入`（原包不动）。
 
@@ -2106,122 +2103,6 @@ def _job_cover_inject(job: Job):
             "dest": dest, "items": out}
 
 
-def _job_cover_audit(job: Job):
-    """封面体检：逐条摆出「库里有图 / 云端有图 / **Penumbra 那条目录里有没有图**」，可选一键补上。
-
-    为什么需要（2026-09 主人现场）：mod 装进游戏后目录里没图，而管理器/云端看都正常 ——
-    真相只在"游戏那边那条目录"里。重装很麻烦，但**补封面是直接写进已存在的那条目录**，
-    不需要重装；所以体检 + 一键补 = 一次把缺图的都补上。
-    """
-    folders = [str(f) for f in (job.params.get("folders") or [])]
-    do_fix = bool(job.params.get("fix"))
-    run_id = str(job.params.get("run_id") or "")
-    st = mm.Store()
-    rows = [r for r in st.all() if (not folders or r["folder"] in set(folders))]
-    st.cx.close()
-
-    plugin_ok, plugin_err, plist = True, "", []
-    try:
-        plug = bridge_call("/mods", timeout=25) or {}
-        plist = plug.get("mods") or []
-    except SystemExit as e:
-        plugin_ok, plugin_err = False, str(e)[:200]
-    except Exception as e:
-        plugin_ok, plugin_err = False, str(e)[:200]
-
-    out = []
-    total = max(1, len(rows))
-    for i, r in enumerate(rows, 1):
-        if job.cancelled():
-            raise mm.BackupCancelled()
-        folder = r["folder"]
-        job.set(i - 1, total, "看封面：" + str(r.get("name") or Path(folder).name)[:26])
-        lib = local_covers(folder)
-        st = mm.Store()
-        crows = st.payload_files_of(folder, ["cover"])
-        st.cx.close()
-        pkg = package_cover_info(folder)
-        item = {"folder": folder, "name": r.get("name") or Path(folder).name,
-                "lib": len(lib), "cloud": len(crows), "dir": "", "matched_by": "",
-                "pkg_cover": pkg["cover"], "pkg_images": len(pkg["images"]), "pkg_helio": pkg["helio"],
-                "pkg_found": bool(pkg.get("found")),
-                "cover_webp": "", "has_cover_webp": False, "real_webp": False, "pics": 0,
-                "status": "", "detail": ""}
-        if not plugin_ok:
-            item["status"] = "no_plugin"
-            item["detail"] = "游戏内插件没连上：%s" % plugin_err[:120]
-            out.append(item)
-            continue
-        targets, how = _bridge_targets(r, folder, plist)
-        item["dir"], item["matched_by"] = (targets[0] if targets else ""), how
-        if not targets:
-            item["status"] = "no_dir"
-            item["detail"] = "没能对上 Penumbra 里的目录（点「选目录补封面」挑一次就会记住）"
-            out.append(item)
-            continue
-        try:
-            chk = _bridge_get("/cover-check?dir=" + urllib.parse.quote(str(targets[0]))) or {}
-        except Exception as e:
-            item["status"] = "check_failed"
-            item["detail"] = str(e)[:140]
-            out.append(item)
-            continue
-        pics = chk.get("imagesInMod") or []
-        item["has_cover_webp"] = bool(chk.get("coverWebpExists"))
-        item["real_webp"] = bool(chk.get("coverWebpReal"))
-        item["pics"] = len(pics)
-        fake = item["has_cover_webp"] and not item["real_webp"]
-        has_drawable = bool(chk.get("imageExists"))
-        if fake:
-            item["status"] = "fake"
-            item["detail"] = "目录里的 cover.webp 是伪装的（不是真 WebP，Penumbra 解不出来）→ 补一次即修好"
-        elif has_drawable or item["real_webp"]:
-            item["status"] = "ok"
-            item["detail"] = "游戏里这条目录已经有图"
-        elif item["pics"] > 0:
-            item["status"] = "ok"
-            item["detail"] = "目录里有 %d 张图，但 meta.json 的 Image 没指向它们 → 建议补一次" % item["pics"]
-        else:
-            item["status"] = "noimg"
-            item["detail"] = ("游戏里这条目录**一张图都没有**"
-                              + ("（包里也没图 → 全靠插件写，这条就是需要补的）" if not pkg["images"] else ""))
-        out.append(item)
-
-    fixed = failed = 0
-    if do_fix and plugin_ok:
-        todo = [x for x in out if x["status"] in ("fake", "noimg", "ok") and x["dir"]
-                and not (x["status"] == "ok" and x["real_webp"])]
-        for k, x in enumerate(todo, 1):
-            if job.cancelled():
-                raise mm.BackupCancelled()
-            job.set(k - 1, max(1, len(todo)), "补封面：" + x["name"][:26])
-            try:
-                rr = api_bridge_fix_cover(x["folder"], x["dir"])
-                if rr.get("ok"):
-                    fixed += 1
-                    x["status"], x["detail"] = "fixed", "已写进 " + x["dir"]
-                else:
-                    failed += 1
-                    x["detail"] = str(rr.get("error") or rr.get("results") or rr)[:140]
-            except Exception as e:
-                failed += 1
-                x["detail"] = str(e)[:140]
-
-    n_ok = sum(1 for x in out if x["status"] in ("ok", "fixed"))
-    n_need = sum(1 for x in out if x["status"] in ("fake", "noimg"))
-    n_dir = sum(1 for x in out if x["status"] == "no_dir")
-    mm.log("封面体检：%d 条 → 有图 %d、缺图 %d、对不上目录 %d%s"
-           % (len(out), n_ok, n_need, n_dir,
-              ("（这次补了 %d 条，失败 %d）" % (fixed, failed)) if do_fix else "（只看不改）"))
-    ret = {"checked": len(out), "ok": n_ok, "need_fix": n_need, "no_dir": n_dir,
-           "fixed": fixed, "failed": failed, "plugin_ok": plugin_ok, "plugin_error": plugin_err,
-           "fixed_now": do_fix, "rows": out, "run_id": run_id, "running": False,
-           "at": now_str()}
-    if run_id:
-        globals()["LAST_COVER_AUDIT"] = ret
-    return ret
-
-
 JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "backup": _job_backup, "restore": _job_restore,
              "import": _job_import, "renumber": _job_renumber,
@@ -2231,7 +2112,7 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "update_check": _job_update_check, "mod_update": _job_mod_update,
              "cloud_reconcile": _job_cloud_reconcile,
              "cloud_archive": _job_cloud_archive, "cloud_restore": _job_cloud_restore,
-             "cloud_verify": _job_cloud_verify, "cover_audit": _job_cover_audit, "cover_inject": _job_cover_inject}
+             "cloud_verify": _job_cloud_verify, "cover_inject": _job_cover_inject}
 
 
 def start_job(kind: str, params: dict | None = None):
@@ -3539,7 +3420,7 @@ def inject_cover_into_package(folder, dest_dir, m=None) -> dict:
 def _bridge_cover_fields(folder):
     """只算封面相关的三个路径（**不取回载荷**）。
 
-    补封面/封面体检只关心图，没必要把几十 MB 的 .pmp 从云端拉回来（以前是这么干的，
+    安装到游戏只关心封面相关的三个路径（**不取回载荷**），没必要把几十 MB 的 .pmp 从云端拉回来（以前是这么干的，
     批量补 29 条时会白拉一堆包）。库里没图时会自动从云端把图取回库中。
     """
     m = one_mod(cfg_now(), folder)
@@ -3779,148 +3660,6 @@ def api_bridge_autopair(b=None):
     }
 
 
-def api_bridge_installed():
-    """游戏里 Penumbra 已装的 mod 列表（name + Penumbra 目录名），给「手动指定目录」用"""
-    try:
-        plug = bridge_call("/mods", timeout=25) or {}
-    except SystemExit as e:
-        return {"ok": False, "error": str(e), "items": []}
-    items = [{"name": (p.get("name") or ""), "dir": (p.get("dir") or "")}
-             for p in (plug.get("mods") or [])]
-    items.sort(key=lambda x: x["name"].lower())
-    return {"ok": True, "items": items, "count": len(items)}
-
-
-def _bridge_get(path_qs, timeout=25):
-    """插件有几个只读接口是 GET（/cover-check、/status），bridge_call 只发 POST → 单独走这条"""
-    cfg = cfg_now()
-    base = (cfg.get("bridge_url") or "http://127.0.0.1:42100").rstrip("/")
-    req = urllib.request.Request(base + path_qs,
-                                 headers={"X-ModBridge-Token": cfg.get("bridge_token") or ""})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
-
-
-def _bridge_targets(m, folder, plist, dir_name=""):
-    """挑出这条 mod 在 Penumbra 里对应的目录：① 手填 ② 库里记住的 ③ 名字/文件夹名匹配。
-
-    为什么要「记住」：Penumbra 的目录名来自包内 meta.json，跟库里的名字经常对不上，
-    光靠猜永远猜不中 → 第一次用「选目录补封面」挑一次，之后自动用这个目录（2026-09 主人现场）。
-    """
-    if dir_name:
-        return [str(dir_name)], "指定"
-    remembered = str((m or {}).get("installed_dir") or "")
-    if remembered and any(str(p.get("dir") or "") == remembered for p in plist):
-        return [remembered], "记住的目录"
-    keys_all = _bridge_norm((m or {}).get("name") or "", Path(str(folder)).name)
-    hits = [p.get("dir") for p in plist
-            if any(_bridge_name_match(a, c) for a in keys_all
-                   for c in _bridge_norm(p.get("name"), p.get("dir")))]
-    return hits, ("名字匹配" if hits else "")
-
-
-def api_bridge_cover_check(folder, dir_name=""):
-    """封面诊断：把整条链路的实况摆出来，一眼看出卡在哪一步。
-
-    链路：管理器找到的图 → 转好的 webp → 转好的可解码 jpg → 插件里这条 mod 的 cover.webp / meta.json.Image
-    """
-    folder = str(folder or "")
-    if not folder:
-        raise SystemExit("没指定 Mod")
-    m = one_mod(cfg_now(), folder)
-    if not m:
-        raise SystemExit("找不到这条 Mod（先点一下「重新扫描」）")
-    cov_pull = {"ok": True, "why": "库里已有图"}
-    if not local_covers(m["folder"]):                    # 库里没图 → 先从云端取回来
-        cov_pull = pull_cover_from_cloud(cfg_now(), m["folder"])
-    cover = _bridge_find_cover(Path(m["folder"]))
-    webp = cover_to_webp(cover) if cover else None
-    draw = cover_to_decodable(cover) if cover else None
-    pkg = package_cover_info(m["folder"])
-    out = {"ok": True, "mod": m.get("name"), "folder": folder, "cover_pull": cov_pull,
-           "pkg": pkg, "pkg_cover": pkg["cover"], "pkg_images": pkg["images"],
-           "pkg_helio": pkg["helio"], "pkg_files": pkg["files"],
-           "pkg_found": bool(pkg.get("found")),
-           "cover": str(cover) if cover else "",
-           "cover_exists": bool(cover and Path(cover).is_file()),
-           "webp": str(webp) if webp else "", "webp_exists": bool(webp and Path(webp).is_file()),
-           "draw": str(draw) if draw else "", "draw_exists": bool(draw and Path(draw).is_file()),
-           "installed_dirs": [], "checks": [], "hint": ""}
-    try:
-        plug = bridge_call("/mods", timeout=25) or {}
-    except SystemExit as e:
-        out["hint"] = "游戏内插件没连上：%s" % e
-        return out
-    plist = plug.get("mods") or []
-    targets, how = _bridge_targets(m, folder, plist, dir_name)
-    out["matched_by"] = how
-    out["remembered_dir"] = str(m.get("installed_dir") or "")
-    out["installed_dirs"] = targets
-    out["installed_count"] = len(plist)
-    out["installed_sample"] = [(p.get("name") or "")[:28] for p in plist[:20]]
-    if not targets:
-        out["hint"] = ("游戏里没找到同名的已装 mod（还没装进去？或 Penumbra 里的目录名/显示名和库里对不上）。"
-                       "点「选目录补封面」挑一次，我会记住这个目录，以后自动用。")
-        return out
-    for d in targets:
-        try:
-            out["checks"].append({"dir": d, "plugin": _bridge_get(
-                "/cover-check?dir=" + urllib.parse.quote(str(d)))})
-        except Exception as e:
-            out["checks"].append({"dir": d, "error": str(e)[:160]})
-    mm.log("封面诊断「%s」：cover=%s webp=%s draw=%s dirs=%s"
-           % (m.get("name"), bool(cover), bool(webp), bool(draw), targets))
-    return out
-
-
-def api_bridge_fix_cover(folder, dir_name=""):
-    """把某一条 mod 的封面补进游戏（写进它在 Penumbra 里的那个 mod 文件夹）。
-    folder 是管理器里的 mod 路径；dir_name 可选，直接指定 Penumbra 里的目录名。"""
-    folder = str(folder or "")
-    if not folder:
-        raise SystemExit("没指定 Mod")
-    _m, payload = _bridge_cover_fields(folder)              # 只要封面（不再把包拉回来）
-    plug = bridge_call("/mods", timeout=25) or {}
-    plist = plug.get("mods") or []
-    libname = payload.get("name") or ""
-
-    mrow = one_mod(cfg_now(), folder) or {}
-    targets, how = _bridge_targets(mrow, folder, plist, dir_name)
-    if not targets:
-        return {"ok": False, "need_dir": True,
-                "error": "在游戏里没找到同名的已装 mod（名字对不上）。"
-                         "点「选目录补封面」挑一次，我会记住这个目录，以后自动用。",
-                "mod": libname,
-                "installed": [{"name": p.get("name") or "", "dir": p.get("dir") or ""} for p in plist],
-                "installed_names": [p.get("name") for p in plist][:20]}
-
-    results = []
-    for d in targets:
-        try:
-            r = bridge_call("/fix-cover", {"dir": d, "coverPath": payload.get("coverPath") or "",
-                                           "coverWebpPath": payload.get("coverWebpPath") or "",
-                                           "coverDrawPath": payload.get("coverDrawPath") or ""}, timeout=40)
-            results.append({"dir": d, "status": (r or {}).get("status") or ("written" if (r or {}).get("ok") else "error"),
-                            "error": (r or {}).get("error"), "cover": (r or {}).get("relPath")})
-        except SystemExit as e:
-            results.append({"dir": d, "status": "error", "error": str(e)})
-    written = sum(1 for x in results if x["status"] == "written")
-    skipped = sum(1 for x in results if x["status"] == "skipped")
-    # 记住这次用到的目录（手挑的 / 猜中的都记），下次直接用它，不再"名字对不上"
-    if written > 0 and len(targets) == 1:
-        try:
-            st = mm.Store()
-            st.set_installed_dir(folder, targets[0])
-            st.cx.close()
-        except Exception:
-            mm.log(traceback.format_exc())
-    mm.log("补封面「%s」→ %s（%s）" % (libname, results, how))
-    return {"ok": written > 0 or skipped > 0, "mod": libname, "matched_by": how,
-            "remembered_dir": targets[0] if (written > 0 and len(targets) == 1) else "",
-            "cover": Path(payload.get("coverDrawPath") or payload.get("coverPath") or "").name,
-            "written": written, "skipped": skipped, "results": results}
-
-
 def api_bridge_requests():
     return bridge_call("/requests", timeout=10)
 
@@ -3930,119 +3669,6 @@ def api_bridge_decide(b):
     if not rid:
         raise SystemExit("缺少 requestId")
     return bridge_call("/decide", {"requestId": rid, "approve": bool(b.get("approve", True))})
-
-
-def _bridge_norm(*parts):
-    """把 mod 名归一化，用于把管理器里的 Mod 和游戏里已装的 Mod 对上号。
-    去掉 [作者]、前导序号、空格连字符下划线、大小写，尽量让两边相等。"""
-    out = []
-    for s in parts:
-        s = re.sub(r"\[[^\]]*\]", " ", str(s or ""))
-        s = re.sub(r"[\s\-_.·|,，。()（）]+", "", s)
-        s = re.sub(r"^(?:hs|helio)+", "", s, flags=re.I)   # Heliosphere 的 hs- 前缀不算名字的一部分
-        s = re.sub(r"^\d+", "", s)
-        out.append(s.lower())
-    return out
-
-
-def _bridge_match_installed(plist):
-    """把插件里的已装 mod 和管理器库对上号。返回 (tasks, nocover, unmatched, installed 数)"""
-    lib = []
-    for m in mod_index().values():
-        folder = Path(m["folder"])
-        lib.append({"key": _bridge_norm(m.get("name"), folder.name),
-                    "name": m.get("name") or folder.name,
-                    "cover": _bridge_find_cover(folder)})
-    tasks, nocover, unmatched = [], [], []
-    for p in plist:
-        want = [k for k in _bridge_norm(p.get("name"), p.get("dir")) if k]
-        hit = None
-        best = 0.0
-        for e in lib:
-            for a in want:
-                if len(a) < 4:
-                    continue
-                for c in e["key"]:
-                    if len(c) < 4:
-                        continue
-                    if _bridge_name_match(a, c):
-                        import difflib
-                        score = difflib.SequenceMatcher(None, a, c).ratio()
-                        if score > best:
-                            best, hit = score, e
-        if hit is None:
-            unmatched.append({"dir": p.get("dir"), "name": p.get("name")})
-            continue
-        e = hit
-        if not e["cover"]:
-            nocover.append({"dir": p.get("dir"), "mod": e["name"]})
-        else:
-            w = cover_to_webp(e["cover"])
-            d = cover_to_decodable(e["cover"])
-            tasks.append({"dir": p.get("dir"), "mod": e["name"], "cover": str(e["cover"]),
-                          "coverWebp": str(w) if w else "", "coverDraw": str(d) if d else ""})
-    return tasks, nocover, unmatched, len(plist)
-
-
-def _bridge_name_match(a, b):
-    """判断两个 mod 名是不是同一条。
-    先看归一化后互相包含；再兜底做一次模糊比对 ——
-    因为作者/管理器那边的名字常有拼写差异（例如 Azrael vs Azreal）。"""
-    a = (a or "").strip()
-    b = (b or "").strip()
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
-    if len(short) >= 4 and long_.startswith(short):
-        return True
-    if len(a) >= 6 and len(b) >= 6:
-        import difflib
-        short, long_ = (a, b) if len(a) <= len(b) else (b, a)
-        if difflib.SequenceMatcher(None, short, long_).ratio() >= 0.82:
-            return True
-        # 名字后面挂了后缀的情况（如 Azreal (For Shiloh)、hs-…-1.0.0-EXXk）：
-        # 拿短的跟长的**开头几段**逐段比，取最高分（容忍 azrael / azreal 这种少一个字母）
-        for i in range(0, min(3, max(1, len(long_) - len(short) + 1))):
-            window = long_[i:i + len(short)]
-            if len(window) == len(short) \
-                    and difflib.SequenceMatcher(None, short, window).ratio() >= 0.82:
-                return True
-    return False
-
-
-def api_bridge_sync_covers(b=None):
-    """把管理器里每条 Mod 的封面同步进游戏里已装的 Mod（写 cover.jpg + images\\_MetaImage）。
-    body: {dryRun: true/false} —— 默认先预览，确认了再真同步。"""
-    b = b or {}
-    dry = bool(b.get("dryRun", True))
-    plug = bridge_call("/mods", timeout=25)
-    plist = (plug or {}).get("mods") or []
-    tasks, nocover, unmatched, inst = _bridge_match_installed(plist)
-    base = {"ok": True, "installed": inst, "willFix": len(tasks),
-            "noCover": len(nocover), "unmatched": len(unmatched),
-            "noCoverList": nocover[:30], "unmatchedList": unmatched[:30]}
-    if dry:
-        base.update(dryRun=True, tasks=tasks[:60])
-        return base
-    results = []
-    for t in tasks:
-        try:
-            r = bridge_call("/fix-cover", {"dir": t["dir"], "coverPath": t["cover"],
-                                           "coverWebpPath": t.get("coverWebp") or "",
-                                           "coverDrawPath": t.get("coverDraw") or ""}, timeout=40)
-            st = (r or {}).get("status") or ("written" if (r or {}).get("ok") else "error")
-            results.append({"dir": t["dir"], "mod": t["mod"], "status": st,
-                            "error": (r or {}).get("error")})
-        except SystemExit as e:
-            results.append({"dir": t["dir"], "mod": t["mod"], "status": "error", "error": str(e)})
-    written = sum(1 for x in results if x["status"] == "written")
-    skipped = sum(1 for x in results if x["status"] == "skipped")
-    failed = [x for x in results if x["status"] == "error"]
-    base.update(dryRun=False, written=written, skipped=skipped, failed=len(failed),
-                results=results[:120])
-    return base
 
 
 def api_browser():
@@ -4305,13 +3931,6 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/mod/download":
                     return self.api_mod_download(q)
 
-                if u.path == "/api/bridge/cover-audit/last":
-                    last = globals().get("LAST_COVER_AUDIT") or {}
-                    if not last:
-                        return self._json({"ok": False, "error": "还没跑过封面体检"})
-                    return self._json(dict({"ok": True}, **last))
-                if u.path == "/api/bridge/installed":
-                    return self._json(api_bridge_installed())
                 if u.path == "/api/bridge/requests":
                     return self._json(api_bridge_requests())
                 if u.path == "/api/images":
@@ -4476,32 +4095,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api_bridge_decide(body))
             if u.path == "/api/bridge/autopair":
                 return self._json(api_bridge_autopair(body))
-            if u.path == "/api/bridge/sync-covers":
-                return self._json(api_bridge_sync_covers(body))
-            if u.path == "/api/bridge/installed":
-                return self._json(api_bridge_installed())
-            if u.path == "/api/bridge/cover-check":
-                return self._json(api_bridge_cover_check(body.get("folder") or "",
-                                                         body.get("dir") or ""))
             if u.path == "/api/bridge/cover-inject":
                 jb, err = start_job("cover_inject", body or {})
                 if err:
                     return self._json({"error": err})
                 return self._json({"ok": True, "kind": "cover_inject", "title": JOB_TITLES.get("cover_inject")})
-            if u.path == "/api/bridge/cover-audit":
-                body = body or {}
-                rid = "%d" % int(time.time() * 1000)
-                body["run_id"] = rid
-                globals()["LAST_COVER_AUDIT"] = {"run_id": rid, "running": True, "rows": [],
-                                                 "checked": 0, "ok": 0, "need_fix": 0, "no_dir": 0,
-                                                 "fixed": 0, "failed": 0, "fixed_now": bool(body.get("fix"))}
-                jb, err = start_job("cover_audit", body)
-                if err:
-                    return self._json({"error": err})
-                return self._json({"ok": True, "kind": "cover_audit", "run_id": rid,
-                                   "title": JOB_TITLES.get("cover_audit")})
-            if u.path == "/api/bridge/fix-cover":
-                return self._json(api_bridge_fix_cover(body.get("folder"), body.get("dir") or body.get("dirName") or ""))
             if u.path == "/api/push/downloaded":
                 job, err = start_job("importfile", body or {})
                 if job is None:
@@ -4953,8 +4551,7 @@ class Handler(BaseHTTPRequestHandler):
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
                  "auto_open_browser",
                  # ---- 云存储（夸克归档）----
-                 "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url",
-                 "auto_cover_fix")
+                 "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
         changed = {}
         for k in allow:
             if k in b:
@@ -5417,39 +5014,6 @@ def pick_port(prefer):
     return None
 
 
-def _auto_cover_fix_on_start():
-    """启动后**自动**体检一遍：游戏里那条目录没图的，直接补进去（不用主人点，每天最多一次）。
-
-    插件没连上就静默跳过；结果写进日志，也能在「封面体检」里回看。
-    """
-    try:
-        time.sleep(25)                       # 等服务/浏览器/插件都就绪
-        cfg = cfg_now()
-        if not bool(cfg.get("auto_cover_fix", True)):
-            mm.log("自动封面体检：设置里关掉了，跳过")
-            return
-        today = time.strftime("%Y-%m-%d")
-        if str(cfg.get("auto_cover_fix_at") or "") == today:
-            return
-        try:
-            plug = bridge_call("/mods", timeout=15) or {}
-        except BaseException as e:
-            mm.log("自动封面体检：游戏内插件没连上（%s），这次跳过" % str(e)[:80])
-            return
-        if not isinstance(plug.get("mods"), list):
-            mm.log("自动封面体检：插件没返回已装列表，这次跳过")
-            return
-        _jb, err = start_job("cover_audit", {"fix": True, "auto": True})
-        if err:
-            mm.log("自动封面体检：这次没启动起来（%s），下次再试" % err)
-            return
-        cfg["auto_cover_fix_at"] = today
-        save_cfg(cfg)
-        mm.log("自动封面体检：已开始（每天最多一次）→ 没图的会直接补进游戏；结果看「封面体检」")
-    except Exception:
-        mm.log(traceback.format_exc())
-
-
 def main(argv=None):
     global ROOT_OVERRIDE
     ap = argparse.ArgumentParser(description="FFXIV Mod 管理工具 · 本地 Web 服务")
@@ -5501,7 +5065,6 @@ def main(argv=None):
     print("=" * 62)
 
     httpd = Server(("127.0.0.1", port), Handler)
-    threading.Thread(target=_auto_cover_fix_on_start, daemon=True).start()   # ★ 启动后自动体检+补
     if not a.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:

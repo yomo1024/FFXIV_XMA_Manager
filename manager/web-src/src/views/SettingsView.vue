@@ -15,10 +15,7 @@ const resolved = ref({})
 const busy = ref(false)
 const testing = ref(false)
 const bridgeMsg = ref(null)
-const syncMsg = ref(null)
 const verInfo = ref(null)
-const syncInfo = ref(null)
-const syncing = ref(false)
 
 async function autoPair() {
   testing.value = true
@@ -80,41 +77,6 @@ async function testBridge() {
   }
 }
 
-async function syncCoversPreview() {
-  syncing.value = true
-  syncMsg.value = null
-  syncInfo.value = null
-  try {
-    const r = await api.bridgeSyncCovers(true)
-    syncInfo.value = r
-    syncMsg.value = {
-      ok: true,
-      text: `游戏里已装 ${r.installed} 个 mod：能补封面 ${r.willFix} 个，管理器里没封面图 ${r.noCover} 个，` +
-        `对不上号 ${r.unmatched} 个。确认无误就点「开始同步」。`,
-    }
-  } catch (e) {
-    syncMsg.value = { ok: false, text: e.message }
-  } finally {
-    syncing.value = false
-  }
-}
-
-async function syncCoversRun() {
-  syncing.value = true
-  syncMsg.value = null
-  try {
-    const r = await api.bridgeSyncCovers(false)
-    syncMsg.value = {
-      ok: r.failed === 0,
-      text: `同步完成：写入 ${r.written} 个，本来就有封面跳过 ${r.skipped} 个，失败 ${r.failed} 个。` +
-        `去游戏里看 Penumbra 的「模组描述」页（没变就重启一次游戏）。`,
-    }
-  } catch (e) {
-    syncMsg.value = { ok: false, text: e.message }
-  } finally {
-    syncing.value = false
-  }
-}
 
 async function load() {
   try {
@@ -273,32 +235,8 @@ async function save() {
         </n-form>
       </n-card>
 
-      <!-- ② 封面同步 -->
-      <n-card size="small" class="sec" title="封面同步到游戏">
-        <div class="hint">
-          Penumbra 认的是 mod 文件夹里的 <code>cover.webp</code>（Heliosphere 的包就是这个文件名）；新装的 mod 会自动带上。
-          已经装好的那些可以用这里一次补上（按 mod 名对号入座，只写封面，不动 mod 内容）。
-        </div>
-        <n-space align="center" style="margin-top: 8px">
-          <n-button size="small" :loading="syncing" @click="syncCoversPreview">预览能同步哪些</n-button>
-          <n-button size="small" type="primary" :loading="syncing"
-                    :disabled="!syncInfo || !syncInfo.willFix" @click="syncCoversRun">开始同步</n-button>
-        </n-space>
-        <n-alert v-if="syncMsg" :type="syncMsg.ok ? 'success' : 'warning'" :show-icon="false"
-                 style="margin-top: 8px">{{ syncMsg.text }}</n-alert>
-        <div v-if="syncInfo && syncInfo.noCoverList && syncInfo.noCoverList.length" class="hint" style="margin-top: 6px">
-          还没封面图的（先去 Mod 列表点「补预览图」）：
-          {{ syncInfo.noCoverList.map((x) => x.mod).slice(0, 8).join('、') }}
-          <span v-if="syncInfo.noCoverList.length > 8">…</span>
-        </div>
-        <div v-if="syncInfo && syncInfo.unmatchedList && syncInfo.unmatchedList.length" class="hint" style="margin-top: 4px">
-          对不上号的（游戏里装了、管理器里没有）：
-          {{ syncInfo.unmatchedList.map((x) => x.dir).slice(0, 6).join('、') }}
-          <span v-if="syncInfo.unmatchedList.length > 6">…</span>
-        </div>
-      </n-card>
 
-      <!-- ③ 目录 -->
+      <!-- ② 目录 -->
       <n-card size="small" class="sec" title="目录">
         <div class="hint">路径直接粘绝对路径（浏览器拿不到本机文件夹选择框）；留空表示用默认值（灰色字是实际生效的值）。</div>
         <n-form label-placement="left" label-width="108" size="small" style="margin-top: 8px">
@@ -342,7 +280,7 @@ async function save() {
         </n-form>
       </n-card>
 
-      <!-- ④ 云存储（夸克网盘）：载荷归档，本地只留元数据 + 图 -->
+      <!-- ③ 云存储（夸克网盘）：载荷归档，本地只留元数据 + 图 -->
       <n-card size="small" class="sec" title="云存储（夸克网盘）">
         <template #header-extra>
           <n-button size="tiny" :loading="cloudBusy" @click="testCloud">测试连接</n-button>
@@ -384,7 +322,7 @@ async function save() {
         </n-alert>
       </n-card>
 
-      <!-- ⑤ 内置浏览器 -->
+      <!-- ④ 内置浏览器 -->
       <n-card size="small" class="sec" title="内置浏览器">
         <n-form label-placement="left" label-width="108" size="small">
           <n-form-item label="浏览器程序">

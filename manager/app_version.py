@@ -12,5 +12,5 @@
     浏览器拓展          在 browser-extension/manifest.json 的 "version"
 """
 
-APP_VERSION = "2.23.9"          # 管理器版本（tkinter 版 / Web 版共用）
+APP_VERSION = "2.24.0"          # 管理器版本（tkinter 版 / Web 版共用）
 MIN_PLUGIN_VERSION = "0.2.6"   # 游戏内插件最低要求版本（低于它就没有封面/目录命名这些新功能）
