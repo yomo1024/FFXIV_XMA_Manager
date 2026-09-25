@@ -660,6 +660,8 @@ def _job_fetch(job: Job):
             got = ext
         except Exception:
             got = ""
+        if got:
+            cover_land_inside(tdir)
 
     job.set(4, 5, "重扫索引、写标签、生成 Excel…")
     mm.cmd_scan(cfg, quiet=True)
@@ -785,6 +787,8 @@ def _job_selfdownload(job: Job):
                 got = ext if ok else ""
             except Exception:
                 got = ""
+            if got:
+                cover_land_inside(tdir)
         job.set(3, 4, "重扫索引、写标签、生成 Excel…")
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
@@ -1348,6 +1352,23 @@ def ensure_cover_inside(folder) -> dict:
         return {"ok": False, "why": str(e)[:160]}
 
 
+def cover_land_inside(folder) -> str:
+    """封面刚落到「mod 文件夹**同级**」之后，再复制一份进文件夹本身（让文件夹自包含）。
+
+    为什么必须做（主人现场）：下载/入库时封面只写成同级大图，文件夹里没有图；而
+    local_covers() 只看文件夹**内** → inject_cover_into_package 判定「库里没有可用的图」
+    → **封面插包直接失败** → 装进游戏的 mod 没封面。这里落盘后就补一份，堵住断层。
+    只复制、不删同级那张（无副作用）；文件夹里本来就有图时什么都不做。
+    """
+    try:
+        r = ensure_cover_inside(folder)
+        if r.get("copied"):
+            return str(r["copied"])
+    except Exception:
+        mm.log(traceback.format_exc())
+    return ""
+
+
 def _qd():
     import quark_drive as qd
     return qd
@@ -1777,6 +1798,7 @@ def _ensure_payload_for_install(cfg, folder) -> str:
     # 一开始没接住它，导致归档后的 Mod 点「安装到游戏」直接报「没有包」，永远走不到自动取回（踩过）。
     # 推送前先确保「本地有封面」——库里没图就去云端取回来（换机/重装后靠这条自愈）
     try:
+        ensure_cover_inside(folder)              # ★ 同级大图先补进文件夹，再判断「库里有图没图」
         if not local_covers(folder):
             pull_cover_from_cloud(cfg, folder)
     except Exception:
@@ -2031,6 +2053,8 @@ def _job_import_file(job: Job):
                 got = ext if ok else ""
             except Exception:
                 got = ""
+            if got:
+                cover_land_inside(tdir)
         job.set(3, 3, "重扫索引、写标签、生成 Excel…")
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
@@ -3359,6 +3383,7 @@ def inject_cover_into_package(folder, dest_dir, m=None) -> dict:
     pkg = find_local_package(f)
     if not pkg:
         return {"ok": False, "why": "本地没有包（还没取回？先在「与网盘对账/取回」或装一次让它取回）"}
+    ensure_cover_inside(f)          # ★ 同级大图先补进文件夹；否则这里会误判「库里没有可用的图」
     lib = local_covers(f)
     cover = Path(lib[0]["abs"]) if lib else None
     if cover is None:
@@ -3426,6 +3451,7 @@ def _bridge_cover_fields(folder):
     m = one_mod(cfg_now(), folder)
     if not m:
         raise SystemExit("找不到这条 Mod（先点一下「重新扫描」）")
+    ensure_cover_inside(m["folder"])          # ★ 同级大图先补进文件夹，再判断「库里有图没图」
     if not local_covers(m["folder"]):
         pull_cover_from_cloud(cfg_now(), m["folder"])
     cover = _bridge_find_cover(Path(m["folder"]))
@@ -4791,6 +4817,7 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.copy2(str(src), str(dest))
         except OSError as e:
             return self._json({"error": "写入失败：%s" % e}, 500)
+        cover_land_inside(fdir)
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
         return self._json({"ok": True, "saved": str(dest), "name": dest.name})
@@ -4876,6 +4903,7 @@ class Handler(BaseHTTPRequestHandler):
             n = mm.browser_fetch(cfg, img, dest)
         except Exception as e:
             return self._json({"error": "抓封面失败：%s" % e}, 400)
+        cover_land_inside(folder)
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
         return self._json({"ok": True, "saved": str(dest), "bytes": n})
