@@ -17,6 +17,36 @@ const msg = useMessage()
 const dialog = useDialog()
 
 const cur = ref(null)
+
+// ---- NSFW 显示开关（设置 → 显示）----
+// 列表里哪些行出现、由后端按 /api/settings 的 show_nsfw 决定（后端一处判据，五处共用）；
+// 这里只管两件事：封面要不要打码、被藏起来时给条提示 + 一键打开。
+const revealed = ref([])                       // 这一次会话里点开过的 NSFW 封面（刷新即恢复模糊）
+const blurOn = computed(() => !!(state.value && state.value.blur_nsfw_covers))
+const nsfwHidden = computed(() => (state.value && state.value.hidden_nsfw) || 0)
+function isNsfw(m) {
+  return !!m && String(m.nsfw || '').toUpperCase() === 'NSFW'
+}
+function isBlur(m) {
+  return blurOn.value && isNsfw(m) && !revealed.value.includes(m.folder)
+}
+function reveal(m) {
+  if (!isBlur(m)) return
+  revealed.value = [...revealed.value, m.folder]
+}
+function selectAndReveal(m) {
+  cur.value = m
+  reveal(m)
+}
+async function showNsfwNow() {
+  try {
+    await api.saveSettings({ show_nsfw: true })
+    msg.success('已打开 NSFW 显示（列表这就刷新）')
+    emit('changed')
+  } catch (e) {
+    msg.error(e.message)
+  }
+}
 // 详情宽度三档：narrow=右栏窄栏(400px) / half=半屏(列表与详情各一半，展开的默认档) / full=全屏
 const detmode = ref('narrow')
 function setDetmode(m) {
@@ -1195,9 +1225,19 @@ const columns = computed(() => [
   },
   {
     title: '', key: 'thumb', width: 78,
-    render: (r) => r.has_img
-      ? h('img', { class: 'cell-thumb', src: api.thumb(r.folder, 120, r.ih), loading: 'lazy' })
-      : null,
+    render: (r) => {
+      if (!r.has_img) return null
+      const blur = isBlur(r)
+      // ★ 这里用**内联样式**做模糊，别用 scoped class：h() 造出来的节点拿不到 scoped 的
+      //   `data-v-xxx` 属性，`.nsfw-blur[data-v-…]` 根本选不中（2026-09 实测 filter 仍是 none）。
+      return h('img', {
+        class: 'cell-thumb',
+        style: blur ? 'filter: blur(12px); cursor: pointer' : '',
+        src: api.thumb(r.folder, 120, r.ih), loading: 'lazy',
+        title: blur ? 'NSFW 封面已模糊：点一下看这张' : '',
+        onClick: blur ? (e) => { e.stopPropagation(); reveal(r) } : undefined,
+      })
+    },
   },
   { title: '分类', key: 'category', width: 76 },
   { title: '子分类', key: 'subcat', width: 104, resizable: true, render: (r) => r.subcat || '' },
@@ -1544,12 +1584,21 @@ async function copyPath() {
         <div class="grow"></div>
         <span class="dim">快捷键：↑↓ 选中 ／ Enter 编辑 ／ Delete 删除 ／ Ctrl+F 搜索 ／ Esc 清空搜索</span>
       </div>
+      <n-alert v-if="nsfwHidden" type="warning" :show-icon="false" style="margin-bottom: 8px">
+        已隐藏 <b>{{ nsfwHidden }}</b> 条 NSFW 的 Mod（设置 → 显示 → 「显示 NSFW」；库里什么都没删）。
+        <n-button size="tiny" type="primary" ghost style="margin-left: 8px" @click="showNsfwNow">
+          现在显示
+        </n-button>
+      </n-alert>
       <div class="table">
         <div v-if="wall && mods.length" class="wall">
           <div v-for="m in view" :key="m.folder" class="cell"
                :class="{ sel: cur && cur.folder === m.folder, ins: m.installed }"
                @click="cur = m">
-            <img v-if="m.has_img" :src="api.thumb(m.folder, 320, m.ih)" loading="lazy" alt="" />
+            <img v-if="m.has_img" :src="api.thumb(m.folder, 320, m.ih)" loading="lazy" alt=""
+                 :class="{ 'nsfw-blur': isBlur(m) }"
+                 :title="isBlur(m) ? 'NSFW 封面已模糊：点一下看这张' : ''"
+                 @click.stop="selectAndReveal(m)" />
             <div v-else class="noimg">无预览图</div>
             <div class="cap">
               <b>{{ m.seq }}. {{ m.name }}
@@ -1636,7 +1685,10 @@ async function copyPath() {
                      :src="shotPath ? api.imgUrl(shotPath, 1000)
                                    : api.thumb(cur.folder, 900, cur.ih)"
                      object-fit="contain" class="pv-img"
-                     :img-props="{ style: 'width:100%;height:100%;object-fit:contain' }" />
+                     :class="{ 'pv-blur': isBlur(cur) }"
+                     :title="isBlur(cur) ? 'NSFW 封面已模糊：点一下看这张' : ''"
+                     :img-props="{ style: 'width:100%;height:100%;object-fit:contain' }"
+                     @click="reveal(cur)" />
             <div v-else class="ph">← 左侧点一条看预览图</div>
             <template v-if="shots.length > 1">
               <button class="navbtn prev" title="上一张（← 键）" @click.stop="selectShot(shotIdx - 1)">‹</button>
@@ -1647,8 +1699,10 @@ async function copyPath() {
           <div v-if="shots.length" class="shots" :class="{ kbfocus: focusArea === 'strip' }">
             <div v-for="im in shots" :key="im.path" class="shot"
                  :class="{ active: im.path === shotPath, current: im.is_current }"
-                 :title="im.rel + ' · ' + im.human" @click="selectShot(shots.indexOf(im))">
-              <img :src="im.thumb" loading="lazy" alt="" />
+                 :title="im.rel + ' · ' + im.human"
+                 @click="selectShot(shots.indexOf(im)); reveal(cur)">
+              <img :src="im.thumb" loading="lazy" alt=""
+                   :class="{ 'nsfw-blur': isBlur(cur) }" />
               <button class="delbtn" title="删除这张图（进回收站）"
                       @click.stop="delImage(im)">✕</button>
               <span v-if="im.is_current" class="tag">当前</span>
@@ -2213,6 +2267,18 @@ async function copyPath() {
     </n-modal>
   </div>
 </template>
+
+<!-- 兜底：h()/子组件根节点可能没有 scoped 属性，这条放全局（选择器名字够独特，不会误伤） -->
+<style>
+.nsfw-blur {
+  filter: blur(14px);
+  cursor: pointer;
+}
+.pv-blur img {
+  filter: blur(18px);
+  cursor: pointer;
+}
+</style>
 
 <style scoped>
 .wrap {

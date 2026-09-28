@@ -176,9 +176,13 @@ async function save() {
       cloud_share_url: s.value.cloud_share_url || '',
       auto_archive_after_import: !!s.value.auto_archive_after_import,
       excel_auto: !!s.value.excel_auto,
+      show_nsfw: !!s.value.show_nsfw,
+      blur_nsfw_covers: !!s.value.blur_nsfw_covers,
     }
     const r = await api.saveSettings(body)
-    msg.success('已保存：' + (r.changed || []).join('、'))
+    const ch = r.changed || []
+    if (ch.length) msg.success('已保存：' + ch.join('、'))
+    else msg.info('设置没有变化')
     await load()
     emit('changed')
   } catch (e) {
@@ -370,6 +374,33 @@ async function save() {
                 默认<b>关闭</b>：用书签小工具在你自己浏览器里把页面推过来就够了 ——「解析链接」和「抓封面」都不会再自作主张去开内置浏览器。
                 只有必须让工具自己去过 Cloudflare、或要现抓整页画廊时，才勾上它。
                 <br />顺手一提：NSFW 的 Mod 想自动检查更新／下载，需要在<b>内置浏览器里登录一次</b> XIVModArchive。
+              </div>
+            </div>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
+      <!-- ⑤ 显示 -->
+      <n-card size="small" class="sec" title="显示">
+        <n-form label-placement="left" label-width="108" size="small">
+          <n-form-item label="显示 NSFW">
+            <div style="flex: 1 1 auto">
+              <n-switch v-model:value="s.show_nsfw" />
+              <span class="dim" style="margin-left: 10px">默认关闭 —— 关着时 NSFW 的 Mod 一律不显示</span>
+              <div class="hint" style="margin-top: 4px">
+                关掉之后：Mod 列表、分类计数、高级搜索、待办、检查报告、查重、安装检查里
+                <b>都不会出现</b> NSFW 的 Mod。库里和磁盘上什么都没删，打开就回来。
+                <br />Mod 列表里被藏起来时会有一条提示，写着藏了几条、点一下就能开。
+              </div>
+            </div>
+          </n-form-item>
+          <n-form-item label="模糊 NSFW 封面">
+            <div style="flex: 1 1 auto">
+              <n-switch v-model:value="s.blur_nsfw_covers" :disabled="!s.show_nsfw" />
+              <span class="dim" style="margin-left: 10px">开着时 NSFW 的封面打码，想看清点一下那张图</span>
+              <div class="hint" style="margin-top: 4px">
+                只影响界面上的显示（列表缩略图 / 卡片墙 / 详情大图 / 画廊）；<b>不动磁盘上的图</b>，
+                也不影响 Excel 汇总表和网盘里的那份。点开是临时的，刷新页面就恢复模糊。
               </div>
             </div>
           </n-form-item>

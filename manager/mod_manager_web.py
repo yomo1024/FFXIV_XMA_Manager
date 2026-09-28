@@ -2898,9 +2898,34 @@ def start_job(kind: str, params: dict | None = None):
 
 
 # --------------------------------------------------------------------- 只读接口
+# ------------------------------------------------- NSFW 显示开关（设置 → 显示）
+def show_nsfw(cfg) -> bool:
+    """NSFW 总开关。**默认关**：关着时 NSFW 的 Mod 一律不显示（列表 / 统计 / 待办 / 检查）。"""
+    return bool(cfg.get("show_nsfw", False))
+
+
+def blur_nsfw_covers(cfg) -> bool:
+    """NSFW 封面是否模糊显示（默认开；只在 NSFW 总开关打开时才看得到封面）。"""
+    return bool(cfg.get("blur_nsfw_covers", True))
+
+
+def visible_mods(cfg, mods) -> list:
+    """按 NSFW 总开关筛一遍 —— **一处判据，五处共用**（列表/统计/检查/查重/安装检查）。
+
+    为什么放这儿：主人 2026-09 要「只有打开开关才能显示 NSFW」，
+    要是各接口各筛一套，很容易出现「列表里没有、待办里还在」这种自相矛盾。
+    """
+    mods = list(mods)
+    if show_nsfw(cfg):
+        return mods
+    return [m for m in mods if str(m.get("nsfw") or "").strip().upper() != "NSFW"]
+
+
 def api_state():
     cfg = cfg_now()
-    mods = mm.Store().all()
+    all_mods = mm.Store().all()
+    mods = visible_mods(cfg, all_mods)
+    hidden_nsfw = len(all_mods) - len(mods)
     by = {}
     for m in mods:
         by[m["category"]] = by.get(m["category"], 0) + 1
@@ -2919,13 +2944,17 @@ def api_state():
             "install_dir": mm.find_install_dir(cfg) or "",
             "download_dir": dl, "inbox_dir": ib,
             "total": len(mods), "cats": cats, "cat_counts": {c: by[c] for c in cats},
+            "show_nsfw": show_nsfw(cfg), "blur_nsfw_covers": blur_nsfw_covers(cfg),
+            "hidden_nsfw": hidden_nsfw,
             "log": str(mm.LOG_PATH), "temp_root": bool(ROOT_OVERRIDE)}
 
 
 def api_mods():
     cfg = cfg_now()
     _st = mm.Store()
-    mods = _st.all()
+    all_mods = _st.all()
+    mods = visible_mods(cfg, all_mods)          # NSFW 总开关关着 → 只放 SFW 出来
+    hidden_nsfw = len(all_mods) - len(mods)
     tag_map = _st.tags_map()
     _st.cx.close()
     inst_dir = mm.find_install_dir(cfg)
@@ -2977,14 +3006,24 @@ def api_mods():
             # 本地到底有没有文件夹（归档/认领回来的只有元数据+封面）—— 界面要据此说话
             "local_exists": Path(m["folder"]).is_dir(),
         })
-    return {"mods": out, "install_dir": inst_dir or ""}
+    return {"mods": out, "install_dir": inst_dir or "",
+            "hidden_nsfw": hidden_nsfw, "show_nsfw": show_nsfw(cfg),
+            "blur_nsfw_covers": blur_nsfw_covers(cfg)}
 
 
 # ---------------------------------------------------------------- 标签
 def api_tags():
+    """标签 + 条数。条数按**当前看得见的那批 Mod**算（NSFW 藏起来时不算进来）"""
+    cfg = cfg_now()
     st = mm.Store()
-    tags = st.all_tags()
+    mods = visible_mods(cfg, st.all())
+    tmap = st.tags_map()
     st.cx.close()
+    cnt = {}
+    for m in mods:
+        for tg in (tmap.get(m["folder"]) or []):
+            cnt[tg] = cnt.get(tg, 0) + 1
+    tags = [{"tag": k, "count": v} for k, v in sorted(cnt.items(), key=lambda x: (-x[1], x[0]))]
     return {"tags": tags, "total": len(tags)}
 
 
@@ -3349,7 +3388,7 @@ def api_categories():
 
 
 def api_dupes():
-    groups = mm.find_duplicates(mm.Store().all())
+    groups = mm.find_duplicates(visible_mods(cfg_now(), mm.Store().all()))
     out = []
     for g in groups:
         # mod_manager.find_duplicates 返回 (原因, 说明, [记录...])
@@ -3372,7 +3411,7 @@ def api_dupes():
 def api_install():
     cfg = cfg_now()
     d = mm.find_install_dir(cfg)
-    mods = mm.Store().all()
+    mods = visible_mods(cfg, mm.Store().all())
     ok = bool(d and Path(d).is_dir())
     names, raw, _ = mm.list_installed(cfg) if ok else (set(), [], "")
     missing = []
@@ -3874,7 +3913,7 @@ def api_check():
     """
     cfg = cfg_now()
     root = cfg.get("root") or ""
-    mods = mm.Store().all()
+    mods = visible_mods(cfg, mm.Store().all())      # NSFW 藏起来时，它的毛病也先不报
     problems = []
     for m in mods:
         issues, actions = [], []
@@ -4066,6 +4105,8 @@ def api_settings():
     out["auto_archive_after_import"] = auto_archive_enabled(cfg)
     out["auto_archive_default"] = cfg.get("auto_archive_after_import", None) is None
     out["excel_auto"] = excel_auto_on(cfg)          # 汇总表：操作后是否自动重生成（默认关）
+    out["show_nsfw"] = show_nsfw(cfg)               # NSFW 总开关（默认关）
+    out["blur_nsfw_covers"] = blur_nsfw_covers(cfg)  # NSFW 封面模糊（默认开）
     out["auto_install_after_import"] = auto_install_mode(cfg)
     out["auto_install_default"] = cfg.get("auto_install_after_import", None) is None
     return out
@@ -5659,6 +5700,7 @@ class Handler(BaseHTTPRequestHandler):
                  "browser_path", "browser_dir", "browser_port", "thumb_width",
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
                  "auto_open_browser", "auto_archive_after_import", "auto_install_after_import", "excel_auto",
+                 "show_nsfw", "blur_nsfw_covers",
                  # ---- 云存储（夸克归档）----
                  "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
         changed = {}
@@ -5675,7 +5717,8 @@ class Handler(BaseHTTPRequestHandler):
                 changed["browser_port"] = int(changed["browser_port"])
             except Exception:
                 changed.pop("browser_port")
-        for k in ("embed_images", "autofilter", "auto_archive_after_import", "excel_auto"):
+        for k in ("embed_images", "autofilter", "auto_archive_after_import", "excel_auto",
+                  "show_nsfw", "blur_nsfw_covers"):
             if k in changed:
                 changed[k] = bool(changed[k])
         for k in ("root", "excel"):
@@ -5683,6 +5726,9 @@ class Handler(BaseHTTPRequestHandler):
                 p = Path(str(changed[k]))
                 if k == "root" and not p.is_dir():
                     return self._json({"error": "Mod 根目录不存在：%s" % p}, 400)
+        # 只报**真的变了**的项：以前把整份设置都算「已保存」，提示里一串十来项，
+        # 看不出到底改了啥（主人 2026-09 反馈的观感问题）
+        changed = {k: v for k, v in changed.items() if str(cfg.get(k, "")) != str(v)}
         cfg.update(changed)
         if not cfg.get("excel") and cfg.get("root"):
             cfg["excel"] = str(Path(cfg["root"]).parent / "Mod信息汇总表.xlsx")
