@@ -803,9 +803,15 @@ def _mirror_cover_sibling(folder: Path, inside: Path) -> None:
             return
         sib = Path(folder).parent / (Path(folder).name + inside.suffix.lower())
         if sib.exists():
-            return
+            # 同级已经有一张：只有当它是**更小的旧图**（低清兜底那种）时才覆盖升级，
+            # 否则保持不动（2026-09 踩到：旧小图存在就 return，紧接着旧小图进回收站 → 同级空了）
+            try:
+                if sib.stat().st_size >= inside.stat().st_size:
+                    return
+            except OSError:
+                return
         shutil.copy2(inside, sib)
-        log("封面同时放到同级：%s" % sib.name)
+        log("封面同时放到同级：%s（%d B）" % (sib.name, sib.stat().st_size))
     except Exception as e:
         log("封面放同级失败（不影响使用）：%s" % e)
 
