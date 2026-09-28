@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -129,18 +130,52 @@ def pick_dir(name):
     return None
 
 
+def ts_of(p) -> str:
+    return datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def find_exe():
-    """主程序位置：部署目录里摆在根下，仓库里 PyInstaller 默认扔 dist/ —— 两处都认。"""
-    for p in (APP_DIR / "ModManagerWeb.exe", APP_DIR / "dist" / "ModManagerWeb.exe"):
-        if p.is_file():
-            return p
-    return None
+    """主程序位置：部署目录里摆在根下，仓库里 PyInstaller 默认扔 dist/ —— 两处都认。
+
+    ★ 两处都有时取**较新的那个**。以前是死板「优先根下」，踩过一次：
+      新构建落在 dist/、根下还躺着上次那份旧 exe → 部署包里塞的是旧程序（假包）。
+    """
+    cands = [p for p in (APP_DIR / "ModManagerWeb.exe", APP_DIR / "dist" / "ModManagerWeb.exe")
+             if p.is_file()]
+    if not cands:
+        return None
+    cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if len(cands) > 1:
+        print("  [i] 有两份 exe，用较新的这份：%s（%s）" % (cands[0], ts_of(cands[0])))
+        print("      更旧的那份被忽略：%s（%s）" % (cands[1], ts_of(cands[1])))
+    return cands[0]
+
+
+def embedded_sources() -> list:
+    """exe 里真正内嵌的东西（源码 + 前端产物）—— 用来判断 exe 是不是旧的。"""
+    out = [APP_DIR / f for f in ("mod_manager_web.py", "mod_manager.py", "app_version.py",
+                                 "quark_drive.py")]
+    web = APP_DIR / WEB_DIR
+    if web.is_dir():
+        for dp, dn, fn in os.walk(web):
+            out += [Path(dp) / n for n in fn]
+    return [p for p in out if p.is_file()]
 
 
 def main():
     exe = find_exe()
     if exe is None:
         sys.exit("找不到 ModManagerWeb.exe，请先双击 build_web_exe.bat 打包主程序。")
+
+    # ★ 旧 exe 闸门：exe 必须比它内嵌的源码/前端都新，否则就是拿旧程序打包（假包）。
+    #   AGENTS.md 里那条「npm run build rc≠0 就不要再打包 exe」防的就是这一类。
+    newest = max(embedded_sources(), key=lambda p: p.stat().st_mtime)
+    if exe.stat().st_mtime < newest.stat().st_mtime:
+        sys.exit("  [X] 拒绝打包：exe（%s）比它内嵌的内容还旧 ——\n"
+                 "      内嵌内容里最新的是 %s（%s）\n"
+                 "      说明这份 exe 是上一次的旧程序。请先双击 源码\\build_web_exe.bat 重新打包。"
+                 % (ts_of(exe), newest, ts_of(newest)))
+    print("  主程序：%s（%s，%.1f MB）" % (exe, ts_of(exe), exe.stat().st_size / 1048576))
 
     DIST.mkdir(exist_ok=True)
     zip_path = DIST / (PKG_NAME + ".zip")

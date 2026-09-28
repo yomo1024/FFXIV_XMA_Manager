@@ -165,6 +165,7 @@ async function save() {
       cloud_backend: s.value.cloud_backend || '', cloud_cookie: s.value.cloud_cookie || '',
       cloud_root: s.value.cloud_root || '/MOD',
       cloud_share_url: s.value.cloud_share_url || '',
+      auto_archive_after_import: !!s.value.auto_archive_after_import,
     }
     const r = await api.saveSettings(body)
     msg.success('已保存：' + (r.changed || []).join('、'))
@@ -291,6 +292,17 @@ async function save() {
             <n-switch v-model:value="cloudOn" size="small" />
             <span class="hint">
               开启后 Mod 载荷（.pmp / .zip 等）归档到夸克，本地只留元数据 + 预览图
+            </span>
+          </div>
+          <div class="opt">
+            <span class="opt-lbl">导入后自动归档</span>
+            <n-switch v-model:value="s.auto_archive_after_import" size="small" />
+            <span class="hint">
+              导入/入库完成后，立刻把刚进的载荷归档到云盘 —— 省掉每导入一条再点一次「归档」。
+              <span v-if="s.auto_archive_default" style="opacity: .8">
+                （当前是<b>跟随云存储</b>推出来的默认值：云存储配好就自动开；拨一下开关即固定下来）
+              </span>
+              归档有硬闸：<b>上传 + 逐文件校验通过才删本地</b>，删的进回收站；装进游戏时会自动从云端取回。
             </span>
           </div>
           <div class="opt">

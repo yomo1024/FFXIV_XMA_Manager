@@ -374,7 +374,7 @@ def _job_import(job: Job):
         raise RuntimeError("没有要导入的文件")
     if not cat:
         raise RuntimeError("请先选分类")
-    done, errors = [], []
+    done, errors, targets = [], [], []
     for i, f in enumerate(files, 1):
         if job.cancelled():
             raise mm.BackupCancelled()
@@ -382,13 +382,15 @@ def _job_import(job: Job):
         try:
             t = mm.import_mod(cfg, str(f), cat, zone, subdir, None, None, None, "", move)
             done.append(safe_rel(t, cfg["root"]))
+            targets.append(str(t))
         except Exception as e:
             errors.append("%s：%s" % (Path(str(f)).name, e))
     job.set(len(files), len(files), "重扫索引并重新生成 Excel…")
     if done:
         _job_scan(job)
         _job_export(job)
-    return {"ok": done, "failed": errors}
+    aa = auto_archive_after_import(cfg, targets, job)
+    return {"ok": done, "failed": errors, "targets": targets, "auto_archive": aa}
 
 
 def _job_renumber(job: Job):
@@ -674,12 +676,13 @@ def _job_fetch(job: Job):
     _site = record_site_update(cfg, target, addr)
     if q.get("export", True):
         _job_export(job)
+    aa = auto_archive_after_import(cfg, [str(target)], job)
     return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
             "updated_existing": bool(_exist), "removed": _removed,
             "tags": _meta.get("tags") or [], "affects": _meta.get("affects") or "",
             "file": Path(path).name, "cover": bool(got),
             "size": _size, "human": mm.fmt_size(_size),
-            "addr": mm.norm_addr(addr), "target": str(target)}
+            "addr": mm.norm_addr(addr), "target": str(target), "auto_archive": aa}
 
 
 def _job_selfdownload(job: Job):
@@ -800,11 +803,12 @@ def _job_selfdownload(job: Job):
         record_site_update(cfg, target, addr)
         if q.get("export", True):
             _job_export(job)
+        aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
                 "updated_existing": bool(_exist), "removed": _removed,
                 "file": hit.name, "cover": bool(got), "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "",
-                "target": str(target), "dir": str(dl_dir)}
+                "target": str(target), "dir": str(dl_dir), "auto_archive": aa}
 
     ib = Path(mm.resolve_dirs(cfg)[1])
     ib.mkdir(parents=True, exist_ok=True)
@@ -1580,10 +1584,17 @@ def _job_cloud_reconcile(job: Job):
 def _job_cloud_archive(job: Job):
     """归档：整条 mod 的载荷树上传到夸克 → 逐文件校验 → 通过后才删本地载荷"""
     cfg = cfg_now()
+    return cloud_archive_core(cfg, [str(f) for f in (job.params.get("folders") or [])],
+                              bool(job.params.get("delete_local", True)), job)
+
+
+def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
+    """归档的实干部分（单拆出来，是为了「导入后自动归档」复用同一套硬闸逻辑，不另写一份）。
+
+    硬闸不变：**上传成功 + 逐文件校验通过**，才允许删本地载荷（删的是进回收站，可还原）。
+    """
     drv = cloud_drive(cfg)
     qd = _qd()
-    folders = [str(f) for f in (job.params.get("folders") or [])]
-    delete_local = bool(job.params.get("delete_local", True))
     st = mm.Store()
     rows = {r["folder"]: r for r in st.all()}
     # ★ 预览图也要跟着载荷一起上云。原来只传 PAYLOAD_EXT，图从来没上过云 →
@@ -1721,6 +1732,52 @@ def _job_cloud_archive(job: Job):
             "bytes": sum(r.get("size") or 0 for r in results),
             "covers": sum(r.get("covers") or 0 for r in results),
             "deleted": sum(r.get("deleted") or 0 for r in results)}
+
+
+def auto_archive_enabled(cfg) -> bool:
+    """「导入后自动归档」是否生效。
+
+    三态：没设置过 → **跟着云存储走**（云端配好了就默认开，配好云存储本身就等于选了
+    「载荷放云端」）；主人动过开关 → 以他写的为准（True/False 都固定下来，不再猜）。
+    """
+    v = cfg.get("auto_archive_after_import", None)
+    if v is None:
+        return bool(str(cfg.get("cloud_backend") or "") and str(cfg.get("cloud_cookie") or ""))
+    return bool(v)
+
+
+def auto_archive_after_import(cfg, folders, job):
+    """导入/入库完成后，把刚入库的载荷**自动归档到云盘**（省本地空间）。
+
+    为什么放这儿：主人库里 29/29 条都是「已归档、本地零载荷」—— 也就是每导入一条都要
+    再点一次「归档」，这是整条链上最后一个人工动作。归档本身有硬闸（上传+校验通过才删），
+    删的是进回收站，装进游戏时会自动从云端取回，所以自动做掉是安全的。
+
+    **绝不因为它失败就毁掉导入**：所有异常都吞掉记日志，只回一个 error 字段让人看得见。
+    """
+    if not auto_archive_enabled(cfg):
+        return None
+    try:
+        if not (str(cfg.get("cloud_backend") or "") and str(cfg.get("cloud_cookie") or "")):
+            mm.log("导入后自动归档：云存储没启用或没填 Cookie → 跳过")
+            return {"skipped": "云存储没启用"}
+        fs = []
+        for f in (folders or []):
+            try:
+                if f and local_payloads(f):
+                    fs.append(str(f))
+            except Exception:
+                mm.log(traceback.format_exc())
+        if not fs:
+            return {"skipped": "刚入库的没有本地载荷"}
+        job.set(0, 1, "导入后自动归档 %d 条（省本地空间）…" % len(fs))
+        mm.log("导入后自动归档：%d 条" % len(fs))
+        out = cloud_archive_core(cfg, fs, True, job, tag="导入后自动归档")
+        out["auto"] = True
+        return out
+    except Exception:
+        mm.log("导入后自动归档失败（**导入本身已完成**，不影响）：\n" + traceback.format_exc())
+        return {"error": "自动归档失败，看日志"}
 
 
 def _cloud_download(drv, cfg, fid) -> bytes:
@@ -2066,11 +2123,12 @@ def _job_import_file(job: Job):
         record_site_update(cfg, target, addr)
         if q.get("export", True):
             _job_export(job)
+        aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
                 "updated_existing": bool(_exist), "removed": _removed,
                 "file": src.name, "cover": bool(got), "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "", "size": size,
-                "human": mm.fmt_size(size), "target": str(target)}
+                "human": mm.fmt_size(size), "target": str(target), "auto_archive": aa}
 
     job.set(1, 2, "放到「待导入」…")
     ib = Path(mm.resolve_dirs(cfg)[1])
@@ -3246,6 +3304,9 @@ def api_settings():
     out["db"] = str(mm.DB_PATH)
     out["temp_root"] = bool(ROOT_OVERRIDE)
     out.setdefault("auto_open_browser", False)      # 默认不开内置浏览器
+    # 自动归档是三态：界面要显示**实际生效值**，并标出「这是跟着云存储推出来的默认，不是你定的」
+    out["auto_archive_after_import"] = auto_archive_enabled(cfg)
+    out["auto_archive_default"] = cfg.get("auto_archive_after_import", None) is None
     return out
 
 
@@ -4673,7 +4734,7 @@ class Handler(BaseHTTPRequestHandler):
         allow = ("root", "excel", "download_dir", "inbox_dir", "install_dir", "backup_dir",
                  "browser_path", "browser_dir", "browser_port", "thumb_width",
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
-                 "auto_open_browser",
+                 "auto_open_browser", "auto_archive_after_import",
                  # ---- 云存储（夸克归档）----
                  "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
         changed = {}
@@ -4690,7 +4751,7 @@ class Handler(BaseHTTPRequestHandler):
                 changed["browser_port"] = int(changed["browser_port"])
             except Exception:
                 changed.pop("browser_port")
-        for k in ("embed_images", "autofilter"):
+        for k in ("embed_images", "autofilter", "auto_archive_after_import"):
             if k in changed:
                 changed[k] = bool(changed[k])
         for k in ("root", "excel"):

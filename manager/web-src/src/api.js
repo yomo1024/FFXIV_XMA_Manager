@@ -137,6 +137,18 @@ export const JOB_TITLES = {
   mod_update: '更新 Mod（覆盖下载）',
 }
 
+// 「导入后自动归档」的结果尾巴：四个入库入口（导入/解析下载/自己浏览器下/拓展推送）共用
+function aaNote(r) {
+  const a = r && r.auto_archive
+  if (!a) return ''
+  if (a.skipped) return ` ｜ 没自动归档（${a.skipped}）`
+  if (a.error) return ` ｜ 自动归档失败（看日志）`
+  if (!a.done) return ''
+  const mb = Math.round((a.bytes || 0) / 1048576)
+  return ` ｜ 已自动归档 ${a.ok || 0}/${a.done} 条（载荷 ${mb} MB 上云` +
+    (a.deleted ? `，本地删了 ${a.deleted} 个进回收站` : '') + '）'
+}
+
 export function jobResultText(s) {
   const r = s.result || {}
   if (s.state === 'cancelled') return '已取消'
@@ -190,7 +202,7 @@ export function jobResultText(s) {
         `覆盖 ${r.mods_overwritten ?? 0}，另存 ${r.mods_renamed ?? 0}`
     case 'import':
       return `导入完成：成功 ${(r.ok || []).length} 个` +
-        ((r.failed || []).length ? `，失败 ${r.failed.length} 个` : '')
+        ((r.failed || []).length ? `，失败 ${r.failed.length} 个` : '') + aaNote(r)
     case 'renumber':
       return `序号重排完成：改了 ${r.changed ?? 0} 个`
     case 'download':
@@ -198,7 +210,10 @@ export function jobResultText(s) {
     case 'watch':
       return `监视结束：搬走 ${(r.moved || []).length} 个文件`
     case 'fetch':
-      return `已入库：${r.mod}（${r.human}）${r.cover ? '，封面已抓' : ''}`
+      return `已入库：${r.mod}（${r.human}）${r.cover ? '，封面已抓' : ''}` + aaNote(r)
+    case 'importfile':
+    case 'selfdownload':
+      return (r.mod ? `已入库：${r.mod}` : `已放到待导入：${r.file || ''}`) + aaNote(r)
     default:
       return '完成'
   }
