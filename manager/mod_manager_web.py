@@ -812,22 +812,17 @@ def _job_selfdownload(job: Job):
     if cat:
         target, _exist, _removed = import_or_update(cfg, hit, cat, zone, subdir,
                                                     author or None, name or None, None, addr, info, job)
-        got = ""
-        if q.get("cover", True) and cover.lower().startswith("http"):
+        # 封面：和「拓展下载入库」走同一套（拓展带字节 → 全尺寸 → 公开缩略图兜底），
+        # 别再各写一套（这条路上原来也是 use_browser=... 静默失败 → 空封面，主人报过）
+        cover_info = {"ok": False}
+        if q.get("cover", True):
             job.set(3, 4, "抓封面当预览图…")
-            cu = cover
-            ext = "." + (cu.rsplit(".", 1)[-1].split("?")[0].lower() if "." in cu else "jpg")
-            if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-                ext = ".jpg"
-            tdir = Path(target)
-            try:
-                ok, _why = _save_url(cfg, cu, tdir.parent / (tdir.name + ext),
-                                     use_browser=mm.browser_running(cfg))
-                got = ext if ok else ""
-            except Exception:
-                got = ""
-            if got:
-                cover_land_inside(tdir)
+            if q.get("cover_data"):
+                cover_info = write_cover_bytes(target, q.get("cover_data"), q.get("cover_name"))
+            if not cover_info.get("ok"):
+                cover_info = fetch_cover_with_fallback(cfg, target, cover,
+                                                      q.get("imgs") or info.get("imgs"))
+            got = "ok" if cover_info.get("ok") else ""
         job.set(3, 4, "重扫索引、写标签、生成 Excel…")
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
@@ -851,7 +846,9 @@ def _job_selfdownload(job: Job):
         aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
                 "updated_existing": bool(_exist), "removed": _removed,
-                "file": hit.name, "cover": bool(got), "tags": _meta.get("tags") or [],
+                "file": hit.name, "cover": bool(got), "cover_how": cover_info.get("how") or "",
+                "cover_lowres": bool(cover_info.get("lowres")),
+                "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "",
                 "target": str(target), "dir": str(dl_dir),
                 "auto_install": ai, "auto_archive": aa}
