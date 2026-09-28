@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, h, onMounted, onUnmounted, provide, watch } from 'vue'
+import { ref, computed, h, onMounted, onUnmounted, provide, watch, reactive } from 'vue'
 import {
   NLayout, NLayoutSider, NMenu, NButton, NTag, NProgress, NSwitch, NModal, NInput,
   NForm, NFormItem, NAlert, NSpace, NIcon, useMessage, useDialog,
@@ -7,7 +7,7 @@ import {
 import {
   GridOutline, BuildOutline, FolderOpenOutline, ArchiveOutline, GlobeOutline,
   DownloadOutline, SettingsOutline, PowerOutline, MoonOutline, SunnyOutline,
-  RefreshOutline, DocumentTextOutline, RocketOutline,
+  RefreshOutline, DocumentTextOutline, RocketOutline, CheckmarkCircleOutline,
 } from '@vicons/ionicons5'
 import { api, JOB_TITLES, jobResultText } from '../api'
 import ModsView from '../views/ModsView.vue'
@@ -17,6 +17,8 @@ import BackupView from '../views/BackupView.vue'
 import PendingView from '../views/PendingView.vue'
 import WorkbenchView from '../views/WorkbenchView.vue'
 import SettingsView from '../views/SettingsView.vue'
+import TodosView from '../views/TodosView.vue'
+import { buildTodos } from '../todos'
 
 const props = defineProps({ dark: Boolean })
 const emit = defineEmits(['update:dark'])
@@ -33,23 +35,28 @@ const state = ref(null)
 const managerVer = computed(() => (state.value && state.value.manager_version) || '')
 const job = ref(null)
 const mods = ref([])
+const pending = ref([])          // 「待导入」的文件清单：侧栏待办角标要用
 const view = ref(new URLSearchParams(location.search).get('view') || 'mods')
 const collapsed = ref(false)
 let timer = null
 
 const icon = (comp) => () => h(NIcon, null, { default: () => h(comp) })
 
-const MENU = [
+const todoTotal = computed(() => buildTodos(mods.value, pending.value).total)
+const MENU = computed(() => [
   { label: 'Mod 列表', key: 'mods', icon: icon(GridOutline) },
+  { label: todoTotal.value ? `待办（${todoTotal.value}）` : '待办', key: 'todos',
+    icon: icon(CheckmarkCircleOutline) },
   { label: '检查 / 工具', key: 'tools', icon: icon(BuildOutline) },
   { label: '分类管理', key: 'cats', icon: icon(FolderOpenOutline) },
   { label: '备份 / 恢复', key: 'backup', icon: icon(ArchiveOutline) },
   { label: '下载工作台', key: 'work', icon: icon(GlobeOutline) },
   { label: '待导入', key: 'pending', icon: icon(DownloadOutline) },
   { label: '设置', key: 'settings', icon: icon(SettingsOutline) },
-]
+])
 const TITLES = {
   mods: ['Mod 列表', '浏览、筛选、批量整理你的 Mod'],
+  todos: ['待办', '把散在各页的待处理事项收在一处，能一键就一键'],
   tools: ['检查 / 工具', '查重、安装检查、体检报告、序号重排'],
   cats: ['分类管理', '分类与子分类的增删改和显示顺序'],
   backup: ['备份 / 恢复', '打包整个 Mod 库，或从备份恢复'],
@@ -60,13 +67,29 @@ const TITLES = {
 
 // bus 必须在 provide 之前声明，否则会 TDZ（压缩后就是那条很难查的
 // "Cannot access 'x' before initialization"）
-const bus = { refresh: null, prefillAdd: null }
+// ★ bus 必须是 **reactive**：各视图用 watch(() => bus.xxx, ...) 接跨页通知，
+//   普通对象没有依赖可追踪 → 那个 watch 永远不会触发（实测踩到：待办→Mod 列表跳转没反应；
+//   同一处根因也让「工作台 → 打开添加对话框并预填」一直是坏的）。
+const bus = reactive({ refresh: null, prefillAdd: null, focusMod: null })
 provide('mm', { state, mods, startJob, refreshAll, msg, bus })
 
 async function refreshAll() {
   state.value = await api.state()
   const d = await api.mods()
   mods.value = d.mods || []
+  // 侧栏「待办（N）」角标要用待导入条数；拿不到就当空（不因此中断整次刷新）
+  try {
+    const p = await api.pending()
+    pending.value = p.items || []
+  } catch (e) {
+    pending.value = []
+  }
+}
+
+// 待办页里点某一行 → 切视图（带 folder 时顺手把焦点塞给 Mod 列表）
+function goView(p) {
+  if (p && p.folder) bus.focusMod = p.folder
+  if (p && p.view) view.value = p.view
 }
 
 function pollJob() {
@@ -260,6 +283,8 @@ onUnmounted(() => clearTimeout(timer))
 
       <main class="content">
         <mods-view v-if="view === 'mods'" :mods="mods" @changed="refreshAll" />
+        <todos-view v-else-if="view === 'todos'" :mods="mods" :pending="pending"
+                    @changed="refreshAll" @go="goView" />
         <tools-view v-else-if="view === 'tools'" :mods="mods" @changed="refreshAll" />
         <categories-view v-else-if="view === 'cats'" @changed="refreshAll" />
         <backup-view v-else-if="view === 'backup'" />

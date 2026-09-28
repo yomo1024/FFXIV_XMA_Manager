@@ -137,6 +137,18 @@ export const JOB_TITLES = {
   mod_update: '更新 Mod（覆盖下载）',
 }
 
+// ---- 更新能力的共享判据（原来只写在 ModsView 里，待办页也要用 → 提到这里做唯一来源）----
+
+// heliosphere 的下载按钮调站内接口、外部拿不到直链 → 不能自动更新
+export function isHelio(m) {
+  return !!(m && /heliosphere\.app/i.test(String(m.addr || '')))
+}
+
+// 能自动更新的：有新版 + 不是 heliosphere + 填了站点地址（否则提交了也只会失败）
+export function canAutoUpdate(m) {
+  return !!m && !!m.update_avail && !isHelio(m) && !!(m.addr || '').trim()
+}
+
 // 「导入后自动归档」的结果尾巴：四个入库入口（导入/解析下载/自己浏览器下/拓展推送）共用
 function aaNote(r) {
   const a = r && r.auto_archive

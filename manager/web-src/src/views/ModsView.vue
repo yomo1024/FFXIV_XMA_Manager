@@ -7,7 +7,7 @@ import {
   NSpace, NAlert, NEmpty, NTooltip, NDivider, NButtonGroup, NDynamicTags,
   NCheckboxGroup, NCheckbox, NTabs, NTabPane, NSpin, NProgress, useMessage, useDialog,
 } from 'naive-ui'
-import { api } from '../api'
+import { api, canAutoUpdate, isHelio } from '../api'
 
 const props = defineProps({ mods: { type: Array, default: () => [] } })
 const emit = defineEmits(['changed'])
@@ -312,8 +312,7 @@ const updFolders = computed(() =>
   (checked.value.length ? checked.value : [])
     .filter((f) => { const m = (props.mods || []).find((x) => x.folder === f); return m && m.update_avail }))
 // 「全部更新」：所有有新版的一条不落，不用先逐条勾选（主人 2026-09 提的摩擦点）
-// 拿不到下载直链的（heliosphere / 没填站点地址）不进任务 —— 提交了也只会失败，改为在弹窗里列出来
-const canAutoUpdate = (m) => !!m && !!m.update_avail && !isHelio(m) && !!(m.addr || '').trim()
+// canAutoUpdate / isHelio 已提到 ../api.js（待办页要用同一份判据，别在两处各写一套）
 const allUpdFolders = computed(() => (props.mods || []).filter(canAutoUpdate).map((m) => m.folder))
 const allUpdManual = computed(() => (props.mods || [])
   .filter((m) => m.update_avail && !canAutoUpdate(m)))
@@ -514,10 +513,7 @@ async function restoreCloud(folders) {
   }
 }
 
-// heliosphere 的下载是页面上的按钮（接口没公开）→ 打开页面让他自己点，再上传替换
-function isHelio(m) {
-  return !!(m && /heliosphere\.app/i.test(String(m.addr || '')))
-}
+// isHelio 见 ../api.js（同一个判据，待办页共用）
 async function updateOne(m) {
   if (!m) return msg.warning('先在左边选一条 Mod')
   if (!isHelio(m)) return doUpdate([m.folder])
@@ -922,6 +918,33 @@ watch(
   { immediate: true },
 )
 
+// 从「待办」页点某一行跳过来：先把筛选清掉再选中它
+// （不清的话可能被当前筛选挡住 → 看着像「点了没反应」）
+//
+// ★★ 这段的位置有讲究：watch 是 immediate，**注册时立刻执行一次**，
+//    所以它引用的每个 ref（q/cat/zone/sub/onlyUpd + clearAdv 里那堆筛选 ref）
+//    都必须**已经声明**，否则 const 的 TDZ 会抛 "Cannot access 'X' before initialization"，
+//    回调直接中止 → 症状是「视图切过去了，但什么都没选中」（实测踩了一轮才定位，
+//    所以这里刻意放在所有筛选状态声明之后）。
+watch(
+  () => bus.focusMod,
+  (f) => {
+    if (!f) return
+    bus.focusMod = null
+    try { clearAdv() } catch (e) { /* 高级搜索还没就绪就算了 */ }
+    q.value = ''
+    cat.value = ''
+    zone.value = ''
+    sub.value = ''
+    onlyUpd.value = false
+    const hit = (props.mods || []).find((m) => m.folder === f)
+    if (!hit) return
+    cur.value = hit
+    detmode.value = 'half'
+  },
+  { immediate: true },
+)
+
 // ------------------------------------------------------------------ 表格
 const filtered = computed(() =>
   props.mods.filter((m) => {
@@ -1193,8 +1216,6 @@ async function checkBridge() {
     return { ok: false, error: e.message }
   }
 }
-
-
 
 
 async function installToGame(direct = false) {
