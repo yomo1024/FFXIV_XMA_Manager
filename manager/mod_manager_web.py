@@ -389,8 +389,10 @@ def _job_import(job: Job):
     if done:
         _job_scan(job)
         _job_export(job)
+    ai = auto_install_after_import(cfg, targets, job)     # ★ 先装：归档会删本地载荷
     aa = auto_archive_after_import(cfg, targets, job)
-    return {"ok": done, "failed": errors, "targets": targets, "auto_archive": aa}
+    return {"ok": done, "failed": errors, "targets": targets,
+            "auto_install": ai, "auto_archive": aa}
 
 
 def _job_renumber(job: Job):
@@ -676,13 +678,15 @@ def _job_fetch(job: Job):
     _site = record_site_update(cfg, target, addr)
     if q.get("export", True):
         _job_export(job)
+    ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装（见 auto_install 注释）
     aa = auto_archive_after_import(cfg, [str(target)], job)
     return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
             "updated_existing": bool(_exist), "removed": _removed,
             "tags": _meta.get("tags") or [], "affects": _meta.get("affects") or "",
             "file": Path(path).name, "cover": bool(got),
             "size": _size, "human": mm.fmt_size(_size),
-            "addr": mm.norm_addr(addr), "target": str(target), "auto_archive": aa}
+            "addr": mm.norm_addr(addr), "target": str(target),
+            "auto_install": ai, "auto_archive": aa}
 
 
 def _job_selfdownload(job: Job):
@@ -803,12 +807,14 @@ def _job_selfdownload(job: Job):
         record_site_update(cfg, target, addr)
         if q.get("export", True):
             _job_export(job)
+        ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
                 "updated_existing": bool(_exist), "removed": _removed,
                 "file": hit.name, "cover": bool(got), "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "",
-                "target": str(target), "dir": str(dl_dir), "auto_archive": aa}
+                "target": str(target), "dir": str(dl_dir),
+                "auto_install": ai, "auto_archive": aa}
 
     ib = Path(mm.resolve_dirs(cfg)[1])
     ib.mkdir(parents=True, exist_ok=True)
@@ -1780,6 +1786,64 @@ def auto_archive_after_import(cfg, folders, job):
         return {"error": "自动归档失败，看日志"}
 
 
+def auto_install_mode(cfg) -> str:
+    """「导入后自动装进游戏」的模式：'' = 关 ｜ 'propose' = 送到游戏内待确认 ｜ 'direct' = 直接装。
+
+    没设置过 → 默认 **propose**：游戏开着时导入完，游戏里就弹一条待确认，点一下即可。
+    不默认 direct 是因为「问都不问就装进游戏」风险更大，留一键确认更稳。
+    """
+    v = cfg.get("auto_install_after_import", None)
+    if v is None:
+        return "propose"
+    v = str(v)
+    return v if v in ("propose", "direct") else ""
+
+
+def auto_install_after_import(cfg, folders, job):
+    """导入/入库完成后，把刚入库的 Mod 自动推给游戏内插件。
+
+    两条硬规则：
+      · **插件不在线就安静跳过** —— 游戏没开是常态，不该每次刷一堆错误（先 /ping 探一下）。
+      · **绝不抛异常**（吞掉记日志 + 回 error 字段）—— 推送失败不能毁掉导入。
+    **必须排在「自动归档」之前**：归档会删本地载荷，之后推送就得先跑一次云端取回（白费）。
+    """
+    mode = auto_install_mode(cfg)
+    if not mode:
+        return None
+    try:
+        try:
+            bridge_call("/ping", need_token=False, timeout=3)
+        except SystemExit as e:
+            mm.log("导入后自动装进游戏：插件没连上 → 跳过（%s）" % str(e)[:80])
+            return {"skipped": "游戏里的插件没连上"}
+        out = []
+        for f in (folders or []):
+            nm = Path(str(f)).name
+            try:
+                payload = _bridge_payload(str(f))
+                nm = payload.get("name") or nm
+                if mode == "direct":
+                    r = bridge_call("/install", payload)
+                    out.append({"folder": str(f), "name": nm, "ok": True,
+                                "mode": "direct", "jobId": r.get("jobId")})
+                    mm.log("导入后自动装进游戏（直接装）：「%s」jobId=%s" % (nm, r.get("jobId")))
+                else:
+                    r = bridge_call("/propose", payload)
+                    out.append({"folder": str(f), "name": nm, "ok": True,
+                                "mode": "propose", "requestId": r.get("requestId")})
+                    mm.log("导入后自动装进游戏（送待确认）：「%s」requestId=%s" % (nm, r.get("requestId")))
+            except SystemExit as e:                 # _bridge_payload 用 SystemExit 表达可读错误
+                out.append({"folder": str(f), "name": nm, "ok": False, "why": str(e)[:160]})
+            except Exception:
+                mm.log(traceback.format_exc())
+                out.append({"folder": str(f), "name": nm, "ok": False, "why": "未知错误，看日志"})
+        return {"mode": mode, "items": out, "done": len(out),
+                "ok": sum(1 for x in out if x.get("ok"))}
+    except Exception:
+        mm.log("导入后自动推送失败（**导入本身已完成**，不影响）：\n" + traceback.format_exc())
+        return {"error": "自动推送失败，看日志"}
+
+
 def _cloud_download(drv, cfg, fid) -> bytes:
     """下载云端文件（**必须带 Cookie**，否则 403 —— 实测）"""
     import urllib.request
@@ -2123,12 +2187,14 @@ def _job_import_file(job: Job):
         record_site_update(cfg, target, addr)
         if q.get("export", True):
             _job_export(job)
+        ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
                 "updated_existing": bool(_exist), "removed": _removed,
                 "file": src.name, "cover": bool(got), "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "", "size": size,
-                "human": mm.fmt_size(size), "target": str(target), "auto_archive": aa}
+                "human": mm.fmt_size(size), "target": str(target),
+                "auto_install": ai, "auto_archive": aa}
 
     job.set(1, 2, "放到「待导入」…")
     ib = Path(mm.resolve_dirs(cfg)[1])
@@ -3307,6 +3373,8 @@ def api_settings():
     # 自动归档是三态：界面要显示**实际生效值**，并标出「这是跟着云存储推出来的默认，不是你定的」
     out["auto_archive_after_import"] = auto_archive_enabled(cfg)
     out["auto_archive_default"] = cfg.get("auto_archive_after_import", None) is None
+    out["auto_install_after_import"] = auto_install_mode(cfg)
+    out["auto_install_default"] = cfg.get("auto_install_after_import", None) is None
     return out
 
 
@@ -4730,11 +4798,14 @@ class Handler(BaseHTTPRequestHandler):
     def save_settings(self, b):
         cfg = mm.load_config()
         if ROOT_OVERRIDE and "root" in b:
-            return self._json({"error": "当前是临时根目录模式（--root），不能改 Mod 根目录"}, 400)
+            # 临时根目录模式下**只忽略 root 这一个字段**，其余设置照存。
+            # 原来这里是整体 400 拒绝 —— 后果是「测试模式下界面根本存不了设置」，
+            # 连带把这个新加的设置项也测不了（实测踩到）。隔离保证不变：save_cfg 仍强制写 ROOT_OVERRIDE。
+            b = {k: v for k, v in b.items() if k != "root"}
         allow = ("root", "excel", "download_dir", "inbox_dir", "install_dir", "backup_dir",
                  "browser_path", "browser_dir", "browser_port", "thumb_width",
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
-                 "auto_open_browser", "auto_archive_after_import",
+                 "auto_open_browser", "auto_archive_after_import", "auto_install_after_import",
                  # ---- 云存储（夸克归档）----
                  "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
         changed = {}

@@ -2,11 +2,17 @@
 import { ref, computed, inject, onMounted } from 'vue'
 import {
   NButton, NCard, NSpace, NForm, NFormItem, NInput, NInputNumber, NSwitch, NAlert,
-  NDivider, useMessage,
+  NDivider, NSelect, useMessage,
 } from 'naive-ui'
 import { api } from '../api'
 
 const emit = defineEmits(['changed'])
+// 「导入后自动装进游戏」三档：'' = 关 / propose = 送到游戏内待确认 / direct = 直接装
+const instOpts = [
+  { label: '关（不自动装）', value: '' },
+  { label: '送到游戏内待确认（推荐）', value: 'propose' },
+  { label: '直接装进游戏', value: 'direct' },
+]
 const { bus } = inject('mm')
 const msg = useMessage()
 
@@ -160,6 +166,7 @@ async function save() {
       browser_path: s.value.browser_path,
       auto_open_browser: !!s.value.auto_open_browser,
       bridge_url: s.value.bridge_url, bridge_token: s.value.bridge_token,
+      auto_install_after_import: s.value.auto_install_after_import || '',
       thumb_width: s.value.thumb_width,
       embed_images: s.value.embed_images, autofilter: s.value.autofilter,
       cloud_backend: s.value.cloud_backend || '', cloud_cookie: s.value.cloud_cookie || '',
@@ -204,6 +211,16 @@ async function save() {
                        style="flex: 1 1 auto; min-width: 170px" />
               <n-input v-model:value="s.bridge_token" placeholder="token（游戏里 /modbridge 复制）"
                        style="flex: 1 1 auto; min-width: 170px" />
+            </n-space>
+          </n-form-item>
+          <n-form-item label="导入后自动装">
+            <n-space align="center" :size="8" style="flex-wrap: wrap">
+              <n-select v-model:value="s.auto_install_after_import" size="small"
+                        style="width: 220px" :options="instOpts" />
+              <span class="dim" style="font-size: 12px; max-width: 470px">
+                导入/入库完成后自动推给游戏内插件；<b>游戏没开就静默跳过</b>（不会报错、不影响导入）。
+                <span v-if="s.auto_install_default">当前是默认值，改一下即固定下来。</span>
+              </span>
             </n-space>
           </n-form-item>
           <n-form-item label="版本">
