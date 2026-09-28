@@ -2,10 +2,10 @@
 import { ref, computed, inject, onMounted } from 'vue'
 import {
   NButton, NCard, NSpace, NForm, NFormItem, NInput, NInputNumber, NSwitch, NAlert,
-  NDivider, NSelect, useMessage,
+  NDivider, NSelect, NRadioGroup, NRadioButton, useMessage, useDialog,
 } from 'naive-ui'
 import { api } from '../api'
-import { MdText } from '../md'
+import { MdText, mdDialog } from '../md'
 
 const emit = defineEmits(['changed'])
 // 「导入后自动装进游戏」三档：'' = 关 / propose = 送到游戏内待确认 / direct = 直接装
@@ -16,6 +16,37 @@ const instOpts = [
 ]
 const { bus } = inject('mm')
 const msg = useMessage()
+const dialog = useDialog()
+const brInfo = ref(null)          // /api/browser：当前用哪个浏览器读页面
+
+async function loadBrowserInfo() {
+  try { brInfo.value = await api.browser() } catch (e) { brInfo.value = null }
+}
+
+// 「用我自己的浏览器」：先关掉它，再带调试端口启动 —— 之后管理器直接驱动你那个浏览器
+function takeoverBrowser() {
+  dialog.warning({
+    title: '接管你自己的浏览器',
+    content: mdDialog('会先**关闭你正在用的浏览器**，再带上调试端口启动（标签页浏览器自己会恢复）。\n\n'
+      + '之后读页面 / 抓封面 / 下载都用**你那个浏览器**，不再新开窗口，也不必再同步登录态。'),
+    positiveText: '关掉并接管',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      busy.value = true
+      try {
+        await api.saveSettings({ browser_mode: 'user' })
+        const r = await api.browserTakeover()
+        if (r && r.ok) msg.success(`已接管（调试端口 ${r.port}，关掉了 ${r.closed} 个进程）`)
+        else msg.error((r && r.error) || '接管失败，看日志')
+        await load()
+      } catch (e) {
+        msg.error(e.message)
+      } finally {
+        busy.value = false
+      }
+    },
+  })
+}
 
 const s = ref({})
 const resolved = ref({})
@@ -102,7 +133,7 @@ async function load() {
   }
 }
 bus.refresh = load
-onMounted(() => { load(); loadVersions() })
+onMounted(() => { load(); loadVersions(); loadBrowserInfo() })
 
 // ---------------- 云存储（夸克归档）----------------
 const cloudBusy = ref(false)
@@ -174,6 +205,7 @@ async function save() {
       cloud_backend: s.value.cloud_backend || '', cloud_cookie: s.value.cloud_cookie || '',
       cloud_root: s.value.cloud_root || '/MOD',
       cloud_share_url: s.value.cloud_share_url || '',
+      browser_mode: s.value.browser_mode || 'builtin',
       auto_archive_after_import: !!s.value.auto_archive_after_import,
       excel_auto: !!s.value.excel_auto,
       show_nsfw: !!s.value.show_nsfw,
@@ -184,6 +216,7 @@ async function save() {
     if (ch.length) msg.success('已保存：' + ch.join('、'))
     else msg.info('设置没有变化')
     await load()
+    await loadBrowserInfo()
     emit('changed')
   } catch (e) {
     msg.error(e.message)
@@ -358,9 +391,41 @@ async function save() {
         </n-alert>
       </n-card>
 
-      <!-- ④ 内置浏览器 -->
-      <n-card size="small" class="sec" title="内置浏览器">
+      <!-- ④ 读页面用的浏览器 -->
+      <n-card size="small" class="sec" title="内置浏览器 / 读页面">
         <n-form label-placement="left" label-width="108" size="small">
+          <n-form-item label="用哪个浏览器">
+            <div style="flex: 1 1 auto">
+              <n-radio-group v-model:value="s.browser_mode" size="small">
+                <n-radio-button value="builtin">内置（独立配置目录）</n-radio-button>
+                <n-radio-button value="user">我自己的浏览器</n-radio-button>
+              </n-radio-group>
+              <span class="dim" style="margin-left: 10px">
+                当前：{{ (s.browser_mode || 'builtin') === 'user' ? '我自己的浏览器' : '内置' }}
+                <template v-if="brInfo">（{{ brInfo.running ? '调试端口在线' : '没在跑' }}，端口 {{ brInfo.port }}）</template>
+              </span>
+              <div class="hint" style="margin-top: 4px">
+                XIVModArchive 在 Cloudflare 后面：读页面 / 抓受保护的封面<b>必须是真的浏览器</b>
+                （实测匿名纯 HTTP、带站点 cookie 的纯 HTTP、无窗口 headless 全是 403 或卡住）。<br />
+                · <b>内置</b>（默认）：另开一个独立配置目录的浏览器，需要把你的登录态同步过去。<br />
+                · <b>我自己的浏览器</b>：管理器直接用你那个（同一份配置与登录态，不新开窗口）。
+                代价是要先关它一次、以带调试端口的方式重启（点下面「立即接管」即可；以后浏览器都用这个方式开，
+                或再点一次接管）。
+                <div v-if="brInfo && brInfo.user_data" class="dim" style="margin-top: 4px">
+                  你的浏览器配置目录：{{ brInfo.user_data }}
+                </div>
+              </div>
+            </div>
+          </n-form-item>
+          <n-form-item label="接管">
+            <n-space align="center">
+              <n-button size="small" type="primary" ghost
+                        :disabled="(s.browser_mode || 'builtin') !== 'user'" @click="takeoverBrowser">
+                立即接管我的浏览器
+              </n-button>
+              <span class="dim">会把正在用的浏览器关掉再带调试端口启动（标签页会自动恢复）</span>
+            </n-space>
+          </n-form-item>
           <n-form-item label="浏览器程序">
             <n-input v-model:value="s.browser_path"
                      placeholder="留空 = 自动探测（优先 CentBrowser / Chrome / Edge）"

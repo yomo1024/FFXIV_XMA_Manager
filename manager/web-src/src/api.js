@@ -117,6 +117,8 @@ export const api = {
   browserOpen: (url) => req('/api/browser/open', { method: 'POST', body: JSON.stringify({ url }) }),
   browserClose: () => req('/api/browser/close', { method: 'POST', body: '{}' }),
   browserCapture: () => req('/api/browser/capture', { method: 'POST', body: '{}' }),
+  // 把它改成「用我自己的浏览器」：先关掉它、再带调试端口启动（会关掉正在用的浏览器）
+  browserTakeover: () => req('/api/browser/takeover', { method: 'POST', body: '{}' }),
   grabCover: (folder) => req('/api/browser/grab-cover', { method: 'POST', body: JSON.stringify({ folder }) }),
   browserLoginState: () => req('/api/browser/login-state'),
   browserLoginDiag: () => req('/api/browser/login-diag'),   // 同步前的体检（无副作用）

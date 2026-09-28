@@ -836,10 +836,16 @@ def _job_selfdownload(job: Job):
             tags=info.get("tags") or q.get("tags") or [],
             affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
             addr=addr)
-        # 标签/影响拓展已经推来了 → 这一步只是补「站点更新时间」；
-        # 内置浏览器没开就**别弹窗**（主人 2026-09：为什么下载要新开一个浏览器？）
-        record_site_update(cfg, target, addr,
-                           allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
+        # 标签/影响/更新时间**拓展都推来了**（v1.2.4 起带 updated）→ 一步都不联网；
+        # 只有旧版拓展没带时间时才去补，而且不许为此弹浏览器
+        #（主人 2026-09：为什么下载要新开一个浏览器？）
+        upd_txt = str(q.get("updated") or info.get("updated") or "").strip()
+        if upd_txt and apply_site_time_from_push(cfg, target, upd_txt):
+            _site = {"source": "push"}
+        else:
+            _site = record_site_update(
+                cfg, target, addr,
+                allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
@@ -2748,6 +2754,61 @@ def _job_mod_update(job: Job):
     return {"ok": done, "failed": failed}
 
 
+def write_cover_bytes(folder, b64, name="cover.jpg") -> dict:
+    """把拓展在**你自己浏览器里**取到的封面字节直接落盘（不用任何网络、不用浏览器）。
+
+    v1.2.4 起扩展推送会带 `cover_data`（base64）—— 全尺寸封面在 Cloudflare 后面，
+    只有带你自己登录态/指纹的浏览器能取到；让拓展取好带过来，入库就彻底不需要浏览器了。
+    写入：同级同名 + 文件夹内各一份（`cover_land_inside`）。
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return {"ok": False, "why": "文件夹不存在"}
+    try:
+        raw = base64.b64decode(str(b64 or ""))
+    except Exception as e:
+        return {"ok": False, "why": "base64 解不开：%s" % str(e)[:60]}
+    if not raw:
+        return {"ok": False, "why": "封面是空的"}
+    if len(raw) > 8 * 1024 * 1024:
+        return {"ok": False, "why": "封面太大（%d B）" % len(raw)}
+    ext = (Path(str(name or "")).suffix or ".jpg").lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        ext = ".jpg"
+    dest = folder.parent / (folder.name + ext)
+    try:
+        dest.write_bytes(raw)
+        cover_land_inside(folder)
+    except Exception as e:
+        return {"ok": False, "why": "写不进去：%s" % str(e)[:80]}
+    mm.log("入库补封面：拓展带过来的全尺寸（%s，%d B）" % (dest.name, len(raw)))
+    return {"ok": True, "how": "拓展带过来的全尺寸", "lowres": False, "path": str(dest)}
+
+
+def apply_site_time_from_push(cfg, target, text) -> bool:
+    """用拓展从页面上读来的「最后更新时间」写基线（省掉一次联网/开浏览器）。返回是否写成。"""
+    try:
+        iso = mm.site_time_iso(str(text or ""))
+    except Exception:
+        iso = ""
+    if not iso:
+        return False
+    try:
+        mm.cmd_scan(cfg, quiet=True)
+        st = mm.Store()
+        row = find_mod_row(st, target)
+        if row is None:
+            st.cx.close()
+            return False
+        st.set_site_info(row["folder"], updated=iso, latest=iso, checked=now_str(), avail=0)
+        st.cx.close()
+        mm.log("站点更新时间取自拓展推送：%s → %s" % (str(text)[:40], iso))
+        return True
+    except Exception as e:
+        mm.log("写推送来的更新时间失败：%s" % str(e)[:100])
+        return False
+
+
 def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
     """给刚入库的 Mod 抓封面：全尺寸拿不到就退到**公共缩略图**（保证不留空封面）。
 
@@ -2833,8 +2894,12 @@ def _job_import_file(job: Job):
         cover_info = {"ok": False}
         if q.get("cover", True):
             job.set(2, 3, "抓封面当预览图…")
-            cover_info = fetch_cover_with_fallback(cfg, target, cover,
-                                                   q.get("imgs") or info.get("imgs"))
+            if q.get("cover_data"):
+                cover_info = write_cover_bytes(target, q.get("cover_data"), q.get("cover_name"))
+            if not cover_info.get("ok"):
+                # 拓展没带（旧版/取不到）→ 才走网络：全尺寸优先，退公开缩略图兜底
+                cover_info = fetch_cover_with_fallback(cfg, target, cover,
+                                                      q.get("imgs") or info.get("imgs"))
             got = "ok" if cover_info.get("ok") else ""
         job.set(3, 3, "重扫索引、写标签、生成 Excel…")
         mm.cmd_scan(cfg, quiet=True)
@@ -2844,10 +2909,16 @@ def _job_import_file(job: Job):
             tags=q.get("tags") or info.get("tags") or [],
             affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
             addr=addr)
-        # 标签/影响拓展已经推来了 → 这一步只是补「站点更新时间」；
-        # 内置浏览器没开就**别弹窗**（主人 2026-09：为什么下载要新开一个浏览器？）
-        record_site_update(cfg, target, addr,
-                           allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
+        # 标签/影响/更新时间**拓展都推来了**（v1.2.4 起带 updated）→ 一步都不联网；
+        # 只有旧版拓展没带时间时才去补，而且不许为此弹浏览器
+        #（主人 2026-09：为什么下载要新开一个浏览器？）
+        upd_txt = str(q.get("updated") or info.get("updated") or "").strip()
+        if upd_txt and apply_site_time_from_push(cfg, target, upd_txt):
+            _site = {"source": "push"}
+        else:
+            _site = record_site_update(
+                cfg, target, addr,
+                allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
@@ -4849,12 +4920,33 @@ def api_browser():
         self_dl = mm.browser_download_dir(cfg)
     except Exception:
         self_dl = ""
+    mode = mm.browser_mode(cfg)
     return {"exe": exe, "port": port, "running": running, "self_download_dir": self_dl,
             "home": getattr(mm, "BROWSER_HOME", ""),
             "hint": getattr(mm, "BROWSER_HINT", ""),
+            "mode": mode,                      # builtin=独立的内置浏览器 / user=用你自己那个
+            "user_data": str(mm.user_data_dir_of(exe) or "") if exe else "",
+            "profile_arg": mm.browser_profile_arg(cfg),
             "profile": str(mm.browser_profile(cfg)) if exe else "",
             "browsers": [{"name": n, "path": p} for n, p in mm.detect_browsers()],
             "page": page, "download_dir": dl, "inbox_dir": ib}
+
+
+def api_browser_takeover():
+    """把「你自己那个浏览器」接管成可调试的（会先关掉它）。
+
+    为什么要关：调试端口只能在启动时指定；对已在运行的 Chromium 再传参数只会新开窗口、端口不生效。
+    接管后所有读页面/抓封面/下载都走你自己的浏览器，不再新开窗口、也不用同步登录态。
+    """
+    cfg = cfg_now()
+    try:
+        r = mm.user_browser_takeover(cfg)
+    except SystemExit as e:
+        return {"error": str(e)}
+    except Exception as e:
+        mm.log(traceback.format_exc())
+        return {"error": str(e)[:160]}
+    return r
 
 
 # -------------------------------------------------------------------------- HTTP
@@ -5308,6 +5400,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.browser_open(body)
             if u.path == "/api/browser/close":
                 return self.browser_close(body)
+            if u.path == "/api/browser/takeover":
+                r = api_browser_takeover()
+                return self._json(r, 400 if (r or {}).get("error") else 200)
             if u.path == "/api/browser/capture":
                 cfg = cfg_now()
                 try:
@@ -5760,7 +5855,7 @@ class Handler(BaseHTTPRequestHandler):
                  "browser_path", "browser_dir", "browser_port", "thumb_width",
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
                  "auto_open_browser", "auto_archive_after_import", "auto_install_after_import", "excel_auto",
-                 "show_nsfw", "blur_nsfw_covers",
+                 "show_nsfw", "blur_nsfw_covers", "browser_mode",
                  # ---- 云存储（夸克归档）----
                  "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
         changed = {}

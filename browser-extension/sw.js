@@ -46,6 +46,29 @@ async function api(path, opts) {
   if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
   return j;
 }
+/* 在**扩展自己**的上下文里抓封面图（带你的 cookie）。
+   全尺寸封面在 Cloudflare 后面：管理器那边纯 HTTP 抓是 403，扩展这边有你的登录态/指纹 → 能拿到。
+   拿不到就退回不放，管理器会用公开缩略图兜底（v1.2.4 加）。*/
+async function fetchCoverBytes(page) {
+  try {
+    const u = String((page && page.cover) || '').trim();
+    if (!/^https?:/i.test(u)) return {};
+    const r = await fetch(u, { credentials: 'include', cache: 'no-store' });
+    if (!r.ok) return { cover_error: 'HTTP ' + r.status };
+    const buf = await r.arrayBuffer();
+    if (!buf.byteLength) return { cover_error: '空图' };
+    if (buf.byteLength > 4 * 1024 * 1024) return { cover_error: '图太大 ' + buf.byteLength };
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return { cover_data: btoa(s), cover_name: (u.split('/').pop() || 'cover.jpg').split('?')[0] };
+  } catch (e) {
+    return { cover_error: String(e).slice(0, 80) };
+  }
+}
+
 const jpost = (path, body) => api(path, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
 });
@@ -104,13 +127,15 @@ async function runOne(it) {
       if (!s || s.state !== 'running') break;
       await new Promise((r) => setTimeout(r, 1000));
     }
-    await jpost('/api/push/downloaded', {
+    await patch(it.id, { detail: '带上封面图…' });
+    const covExtra = await fetchCoverBytes(it.page);     // 拿不到也没关系，管理器会兜底
+    await jpost('/api/push/downloaded', Object.assign({
       file: doneDl.filename, page: it.page, tags: it.tags || it.page.tags || [],
       affects: it.affects != null ? it.affects : (it.page.affects || ''),
       name: it.page.name || '', author: it.page.author || '', addr: it.page.addr || '',
       cover_url: it.page.cover || '', category: it.category, zone: it.zone,
-      subdir: it.subdir, export: true
-    });
+      subdir: it.subdir, updated: it.page.updated || '', export: true
+    }, covExtra));
     let snap = null;
     for (let i = 0; i < 1800; i++) {
       await new Promise((r) => setTimeout(r, 700));

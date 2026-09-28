@@ -56,6 +56,13 @@
       author: ua ? ua.innerText.trim() : '',
       cover: img ? img.src : (imgs[0] || ''),
       imgs: imgs.slice(0, 60), dl: dl, title: document.title,
+      // 站点「最后更新时间」：入库时直接当基线用，省得管理器再为一行时间开浏览器
+      updated: (function () {
+        try {
+          const mu = t.match(/Last\s+Version\s+Update\s*[:：]\s*([^\n]+)/i);
+          return mu ? mu[1].trim() : '';
+        } catch (e) { return ''; }
+      })(),
       addr: m ? ('https://www.xivmodarchive.com/modid/' + m[1]) : location.href,
       nsfw: /nsfw|adult|18\+/i.test(text)
     };

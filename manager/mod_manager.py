@@ -1128,8 +1128,32 @@ def browser_running(cfg) -> bool:
         return False
 
 
+def browser_mode(cfg) -> str:
+    """读页面用哪个浏览器：builtin（默认，独立配置目录，不碰你那个）/ user（你自己那个，带调试端口）"""
+    m = str(cfg.get("browser_mode") or "").strip().lower()
+    return "user" if m == "user" else "builtin"
+
+
+def browser_user_data_dir(cfg):
+    """启动时 `--user-data-dir` 指到哪：内置=自己的目录；user 模式=你浏览器真实的 User Data。"""
+    if browser_mode(cfg) == "user":
+        ud = user_data_dir_of(find_browser(cfg))
+        if ud:
+            return Path(ud)
+    return browser_profile(cfg)
+
+
+def browser_profile_arg(cfg) -> str:
+    """user 模式要显式指定用哪个 profile 目录（多个 profile 时才不歧义）。"""
+    return "Default" if browser_mode(cfg) == "user" else ""
+
+
 def launch_browser(cfg, url=BROWSER_HOME):
-    """启动（或复用）内置浏览器，返回调试端口"""
+    """启动（或复用）读页面用的浏览器，返回调试端口。
+
+    `browser_mode=user` 时启动的就是**你自己那个浏览器**（同一份配置目录与登录态），
+    这样管理器读页面/抓封面/下载都用你的会话，不再新开窗口。
+    """
     import time
     exe = find_browser(cfg)
     if not exe:
@@ -1138,18 +1162,54 @@ def launch_browser(cfg, url=BROWSER_HOME):
     if browser_running(cfg):
         return port
     Path(resolve_dirs(cfg)[1]).mkdir(parents=True, exist_ok=True)
-    subprocess.Popen([exe,
-                      "--user-data-dir=%s" % browser_profile(cfg),
-                      "--remote-debugging-port=%d" % port,
-                      "--remote-allow-origins=*",
-                      "--no-first-run", "--no-default-browser-check",
-                      "--disable-session-crashed-bubble",
-                      url], close_fds=True)
+    args = [exe,
+            "--user-data-dir=%s" % browser_user_data_dir(cfg),
+            "--remote-debugging-port=%d" % port,
+            "--remote-allow-origins=*",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-session-crashed-bubble"]
+    pa = browser_profile_arg(cfg)
+    if pa:
+        args.append("--profile-directory=%s" % pa)
+    args.append(url)
+    subprocess.Popen(args, close_fds=True)
     for _ in range(60):
         time.sleep(0.5)
         if browser_running(cfg):
             break
     return port
+
+
+def user_browser_takeover(cfg) -> dict:
+    """把「你自己那个浏览器」接管成可调试的：先关掉它，再带调试端口重启（用你原来的配置目录/登录态）。
+
+    为什么要先关：调试端口**只能在启动时指定**；对一个已经在跑的 Chromium 再传这些参数，
+    只会新开一个窗口、端口不生效。接管之后，管理器所有 CDP 操作（读页面 / 抓封面 / 下载）
+    就直接用你自己的浏览器了 —— 不再新开窗口，也不必再同步登录态。
+    """
+    import time
+    exe = find_browser(cfg)
+    if not exe:
+        raise SystemExit(BROWSER_HINT)
+    ud = user_data_dir_of(exe)
+    if not ud:
+        raise SystemExit("没找到你浏览器的配置目录，先在设置里选好浏览器程序")
+    closed = close_user_browser(exe)          # 只有主人点了「接管」才会走到这
+    if browser_running(cfg):                  # 端口上若还挂着旧的内置实例，也让它退场
+        try:
+            _cdp_get(cfg, False).call("Browser.close")
+        except Exception:
+            pass
+        for _ in range(30):
+            time.sleep(0.4)
+            if not browser_running(cfg):
+                break
+    port = launch_browser(cfg, BROWSER_HOME)
+    live = browser_running(cfg)
+    log("接管自己的浏览器：关掉 %s 个进程，调试端口 %d %s"
+        % (len(closed.get("closed") or []), port, "就绪" if live else "没起来"))
+    return {"ok": bool(live), "port": port, "closed": len(closed.get("closed") or []),
+            "left": closed.get("left") or [], "user_data": str(ud), "mode": "user"}
 
 
 class CDP:
