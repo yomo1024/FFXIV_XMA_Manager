@@ -75,6 +75,8 @@ export const api = {
   cloudRestore: (body) => req('/api/cloud/restore', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudVerify: (body) => req('/api/cloud/verify', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudDiscover: () => req('/api/cloud/discover'),          // 扫网盘（同步，几十秒）
+  cloudIndexRestore: (write) => req('/api/cloud/index-restore',   // 从云端索引恢复（0=预览）
+    { method: 'POST', body: JSON.stringify({ write: !!write }) }),
   cloudClaim: (items) => req('/api/cloud/claim',             // 把云端多的认领进索引库
     { method: 'POST', body: JSON.stringify({ items }) }),
   cloudReconcile: (folders, write) => req('/api/cloud/reconcile',
@@ -140,6 +142,9 @@ export const JOB_TITLES = {
   fetch: '解析并下载入库',
   update_check: '检查更新',
   mod_update: '更新 Mod（覆盖下载）',
+  cloud_index_sync: '同步索引到网盘',
+  cloud_discover: '扫描网盘新内容',
+  cloud_claim: '认领到库',
 }
 
 // ---- 更新能力的共享判据（原来只写在 ModsView 里，待办页也要用 → 提到这里做唯一来源）----
@@ -202,6 +207,14 @@ export function jobResultText(s) {
         `云端有载荷 ${f} 条（${r.total_files || 0} 个文件 / ${Math.round((r.total_size || 0) / 1048576)} MB）` +
         (cov ? ` ｜ 封面 ${cov} 张` : '') +
         (mi ? ` ｜ 云端找不到 ${mi} 条` : '') + (lo ? ` ｜ 本地有云端没有 ${lo} 条` : '')
+    }
+    case 'cloud_index_sync': {
+      const mb = Math.round((r.meta || 0))
+      return `索引已同步：上传 ${r.meta || 0} 条` +
+        (r.skipped ? `、跳过 ${r.skipped} 条（没变化）` : '') +
+        ` ｜ 云端索引 ${r.index_cloud ? '已写' : '**失败**'}` +
+        ((r.failed_n || 0) ? ` ｜ ${r.failed_n} 条没传上去（看日志）` : '') +
+        `\n本地副本：${r.local || ''}`
     }
     case 'cloud_archive': {
       const items = r.items || []

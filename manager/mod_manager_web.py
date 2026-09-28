@@ -1649,7 +1649,15 @@ def _cloud_meta_upload(drv, cfg, folder) -> bool:
     if not obj:
         return False
     fid = drv.ensure_dir(mod_cloud_path(cfg, folder))
-    return _cloud_put_json(drv, fid, mm.MOD_META_NAME, obj)
+    ok = _cloud_put_json(drv, fid, mm.MOD_META_NAME, obj)
+    if ok:                      # 记指纹 → 下次同步能跳过这条（增量上传）
+        try:
+            st = mm.Store()
+            st.set_meta_sync(folder, mm.meta_digest(obj))
+            st.cx.close()
+        except Exception:
+            mm.log(traceback.format_exc())
+    return ok
 
 
 def _job_cloud_index_sync(job: Job):
@@ -1661,16 +1669,25 @@ def _job_cloud_index_sync(job: Job):
     """
     cfg = cfg_now()
     drv = cloud_drive(cfg)
+    force = bool(job.params.get("force"))         # 强制全部重传（云端被手工动过时用）
     rows = mm.index_rows(cfg)
+    st0 = mm.Store()
+    done_digests = st0.meta_sync_map()
+    st0.cx.close()
     total = max(1, len(rows) + 1)
     job.set(0, total, "写本地索引副本…")
     local_path = str(mm.write_index_json(cfg))
-    n_meta, fails = 0, []
+    n_meta, skipped, fails = 0, 0, []
     for i, r in enumerate(rows, 1):
         if job.cancelled():
             raise mm.BackupCancelled()
-        job.set(i - 1, total, "上传元数据 %s" % str(r.get("name") or r.get("rel"))[:30])
         folder = str(Path(cfg.get("root") or "") / str(r["rel"]).replace("/", os.sep))
+        dg = mm.meta_digest(r)
+        if not force and done_digests.get(folder) == dg:
+            # ★ 增量：指纹没变就不重传（实测逐条上传 ≈4.9 秒/条，全量重传很快就是瓶颈）
+            skipped += 1
+            continue
+        job.set(i - 1, total, "上传元数据 %s" % str(r.get("name") or r.get("rel"))[:30])
         try:
             if _cloud_meta_upload(drv, cfg, folder):
                 n_meta += 1
@@ -1684,10 +1701,110 @@ def _job_cloud_index_sync(job: Job):
            "exported": time.strftime("%Y-%m-%d %H:%M:%S"),
            "count": len(rows), "mods": rows}
     ok_idx = _cloud_put_json(drv, base_fid, mm.INDEX_JSON_NAME, obj)
-    mm.log("同步索引到网盘：元数据 %d/%d 条、全库索引 %s、本地副本 %s"
-           % (n_meta, len(rows), "已上传" if ok_idx else "**上传失败**", local_path))
-    return {"meta": n_meta, "mods": len(rows), "index_cloud": bool(ok_idx),
-            "local": local_path, "failed": fails[:20], "failed_n": len(fails)}
+    mm.log("同步索引到网盘：上传 %d 条、跳过（没变化）%d 条、全库索引 %s、本地副本 %s"
+           % (n_meta, skipped, "已上传" if ok_idx else "**上传失败**", local_path))
+    return {"meta": n_meta, "skipped": skipped, "force": force, "mods": len(rows),
+            "index_cloud": bool(ok_idx), "local": local_path,
+            "failed": fails[:20], "failed_n": len(fails)}
+
+
+def api_cloud_index_restore(body):
+    """从**云端那份全库索引**恢复管理数据（分类/子分类/类型/序号/作者/名称/地址/影响替换/站点信息/标签）。
+
+    body: {write: 0/1} —— 0 = 只预览（**什么都不改**），1 = 写回。
+    用途：换电脑、索引库丢了、手工改乱了 —— 云端那份索引是最后一道保险（`_modmanager_index.json`）。
+    """
+    cfg = cfg_now()
+    write = bool(body.get("write"))
+    if not (cfg.get("cloud_cookie") or "").strip():
+        return {"error": "还没填夸克 Cookie（设置 → 云存储）"}
+    root = Path(cfg.get("root") or "")
+    if not str(root):
+        return {"error": "还没设 Mod 根目录"}
+    try:
+        drv = cloud_drive(cfg)
+        bfid = drv.resolve(_cloud_base(cfg))
+        if not bfid:
+            return {"error": "云端根目录不存在：%s" % _cloud_base(cfg)}
+        hit = [x for x in _cloud_walk(drv, bfid) if os.path.basename(x[0]) == mm.INDEX_JSON_NAME]
+        if not hit:
+            return {"error": "云端没有 %s —— 先点「同步索引到网盘」" % mm.INDEX_JSON_NAME}
+        raw_j = _cloud_download(drv, cfg, hit[0][2])
+        data = json.loads((raw_j or b"").decode("utf-8", "ignore") or "{}")
+    except Exception as e:
+        mm.log("读云端索引失败：\n" + traceback.format_exc())
+        return {"error": "读云端索引失败：%s" % str(e)[:160]}
+    rows = data.get("mods") or []
+    if not rows:
+        return {"error": "云端索引里没有条目"}
+    st = mm.Store()
+    known = {str(r["folder"]) for r in st.all()}
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    created, updated, bad, tags_n, same = [], [], [], 0, 0
+    for m in rows:
+        rel = str(m.get("rel") or "").strip().strip("/")
+        if not rel:
+            bad.append({"name": m.get("name") or "", "why": "这条索引没有相对路径"})
+            continue
+        folder = str(root / os.path.join(*rel.split("/")))
+        name = str(m.get("name") or Path(rel).name)
+        want = {"category": str(m.get("category") or ""), "subcat": str(m.get("subcat") or ""),
+                "nsfw": str(m.get("nsfw") or ""), "seq": int(m.get("seq") or 0),
+                "author": str(m.get("author") or ""), "name": name,
+                "addr": str(m.get("addr") or ""), "affects": str(m.get("affects") or ""),
+                "site_updated": str(m.get("site_updated") or ""),
+                "site_latest": str(m.get("site_latest") or ""),
+                "site_version": str(m.get("site_version") or "")}
+        if folder not in known:
+            created.append(name)
+            if write:
+                st.cx.execute(
+                    "INSERT OR IGNORE INTO mods (folder,category,subcat,seq,author,nsfw,name,addr,addr_source,"
+                    " affects,updated_at,site_updated,site_latest,site_version,site_checked,"
+                    " cloud_state,cloud_path,cloud_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (folder, want["category"], want["subcat"], want["seq"], want["author"], want["nsfw"],
+                     want["name"], want["addr"], str(m.get("addr_source") or ""), want["affects"], now,
+                     want["site_updated"], want["site_latest"], want["site_version"],
+                     str(m.get("site_checked") or ""), str(m.get("cloud_state") or ""),
+                     str(m.get("cloud_path") or ""), int(m.get("cloud_size") or 0)))
+            known.add(folder)
+        else:
+            cur = st.cx.execute(
+                "SELECT category,subcat,nsfw,seq,author,name,addr,affects,site_updated,site_latest,site_version"
+                " FROM mods WHERE folder=?", (folder,)).fetchone()
+            diff = [k for k, v in want.items() if str((cur[k] if cur else "") or "") != str(v or "")]
+            if diff:
+                updated.append({"name": name, "fields": diff[:6]})
+                if write:
+                    st.cx.execute(
+                        "UPDATE mods SET category=?,subcat=?,nsfw=?,seq=?,author=?,name=?,"
+                        " addr=COALESCE(NULLIF(?,''),addr), affects=COALESCE(NULLIF(?,''),affects),"
+                        " site_updated=COALESCE(NULLIF(?,''),site_updated),"
+                        " site_latest=COALESCE(NULLIF(?,''),site_latest),"
+                        " site_version=COALESCE(NULLIF(?,''),site_version), updated_at=? WHERE folder=?",
+                        (want["category"], want["subcat"], want["nsfw"], want["seq"], want["author"],
+                         want["name"], want["addr"], want["affects"], want["site_updated"],
+                         want["site_latest"], want["site_version"], now, folder))
+            else:
+                same += 1
+        tags = [str(t) for t in (m.get("tags") or []) if str(t).strip()]
+        if write and tags:
+            have = {r[0] for r in st.cx.execute("SELECT tag FROM mod_tags WHERE folder=?", (folder,))}
+            if set(tags) - have:
+                st.set_tags(folder, sorted(have | set(tags)))
+                tags_n += 1
+    if write:
+        st.cx.commit()
+    st.cx.close()
+    if write:
+        mod_index(force=True)
+    mm.log("云端索引恢复（%s）：新增 %d 条、更新 %d 条、无变化 %d 条、补标签 %d 条"
+           % ("已写入" if write else "只看不改", len(created), len(updated), same, tags_n))
+    return {"write": write, "exported": str(data.get("exported") or ""),
+            "index_version": str(data.get("version") or ""),
+            "total": len(rows), "created": created[:300], "created_n": len(created),
+            "updated": updated[:300], "updated_n": len(updated), "same": same,
+            "tags_n": tags_n, "bad": bad[:10], "root": str(root)}
 
 
 def _cloud_delete_for_folder(cfg, folder) -> dict:
@@ -4787,6 +4904,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "kind": "cloud_reconcile",
                                    "title": JOB_TITLES.get("cloud_reconcile"),
                                    "dry_run": not a["write"]})
+            if u.path == "/api/cloud/index-restore":
+                r = api_cloud_index_restore(body or {})
+                return self._json(r, 400 if r.get("error") else 200)
             if u.path == "/api/cloud/claim":
                 r = api_cloud_claim(body or {})
                 return self._json(r, 400 if r.get("error") else 200)

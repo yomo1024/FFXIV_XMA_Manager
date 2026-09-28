@@ -403,20 +403,31 @@ async function claimPick() {
 
 // 把「索引 / 元数据」同步到网盘（本地也写一份）——换机/丢库时靠它恢复标签、地址、站点信息
 const idxBusy = ref(false)
+const idxForce = ref(false)
 function askIndexSync() {
+  idxForce.value = false
   dialog.warning({
     title: '把索引同步到网盘？',
-    content: '会给每条 Mod 的云端目录写一份 `_modmanager.json`（分类/类型/标签/地址/站点信息），' +
-      '并在云端根写一份全库索引 `_modmanager_index.json`；**本地也写一份**（放在 Mod 根目录旁边，跟汇总表同一处）。\n\n' +
-      '云端目录里本来就有载荷、封面、地址.txt。写的都是小文件，不动你的载荷；' +
-      '有了它，别的机器/换电脑时「扫描网盘新内容」才能把**标签、地址、封面**一起认领回来。',
+    content: () => h('div', [
+      h('div', { style: 'white-space: pre-wrap' },
+        '会给每条 Mod 的云端目录写一份 `_modmanager.json`（分类/类型/标签/地址/站点信息），' +
+        '并在云端根写一份全库索引 `_modmanager_index.json`；本地也写一份（Mod 根旁边，跟汇总表同一处）。\n' +
+        '云端目录里本来就有载荷、封面、地址.txt —— 这里只写小文件，不动载荷。'),
+      h('div', { style: 'margin-top: 10px; display: flex; align-items: center; gap: 8px' }, [
+        h(NCheckbox, { checked: idxForce.value, 'onUpdate:checked': (v) => { idxForce.value = v } }),
+        h('span', null, '强制全部重传（默认只推**变化过**的，快很多）'),
+      ]),
+      h('div', { style: 'opacity:.7; margin-top: 6px; font-size: 12px' },
+        '默认是增量：只把元数据变了的条目推上去（每条要一次云端上传，约 5 秒 —— 全量重传几千条会很久）。'),
+    ]),
     positiveText: '开始同步',
     negativeText: '取消',
     onPositiveClick: async () => {
       idxBusy.value = true
       try {
-        await startJob('cloud_index_sync', {})
-        msg.info('开始同步索引到网盘…（每条一份小文件，跑完看任务条）', { duration: 12000 })
+        await startJob('cloud_index_sync', { force: idxForce.value })
+        msg.info(idxForce.value ? '开始**全部重传**索引到网盘…' : '开始同步索引（只推变化过的）…',
+          { duration: 12000 })
       } catch (e) {
         msg.error('启动失败：' + e.message)
       } finally {
@@ -424,6 +435,41 @@ function askIndexSync() {
       }
     },
   })
+}
+
+// 从云端那份全库索引恢复（换机/丢库的最后一道保险）
+const askRestoreIndex = () => {
+  dialog.warning({
+    title: '从云端索引恢复？',
+    content: '会把云端那份 `_modmanager_index.json` 里的**分类/子分类/类型/序号/作者/名称/地址/影响替换/站点信息/标签**' +
+      '按 Mod 路径比对后写回索引库（只在这台机器没有或对不上时才改）。\n\n' +
+      '不动任何 Mod 文件、不下载载荷、不改云存储状态。\n' +
+      '用途：换电脑、索引库丢了、手工改乱了。\n\n' +
+      '建议先「只看不改（预览）」看一眼会改什么。',
+    positiveText: '恢复写入',
+    negativeText: '只看不改（预览）',
+    onPositiveClick: () => runRestoreIndex(true),
+    onNegativeClick: () => runRestoreIndex(false),
+  })
+}
+async function runRestoreIndex(write) {
+  busy.value = true
+  try {
+    const r = await api.cloudIndexRestore(write)
+    if (r.error) throw new Error(r.error)
+    const head = (write ? '已写入' : '预览（没改任何东西）')
+    msg.success(`${head}：云端索引 ${r.total} 条 ｜ 新增 ${r.created_n} 条 ｜ 需更新 ${r.updated_n} 条 ｜ 一致 ${r.same} 条` +
+      (r.tags_n ? ` ｜ 补标签 ${r.tags_n} 条` : '') +
+      (r.bad && r.bad.length ? ` ｜ ${r.bad.length} 条读不了` : '') +
+      (r.exported ? `\n云端索引生成于 ${r.exported}` : ''),
+      { duration: 20000 })
+    if (!write) console.log('云端索引预览', r)
+    if (write) { emit('changed'); await loadMeta() }
+  } catch (e) {
+    msg.error('恢复失败：' + e.message, { duration: 15000 })
+  } finally {
+    busy.value = false
+  }
 }
 
 // 冲突：以云端为准（取回覆盖本地）/ 用本地覆盖云端（重新上传）
@@ -1425,6 +1471,7 @@ async function copyPath() {
         <n-button size="small" :loading="cloudBusy" @click="askReconcile()">与网盘对账</n-button>
         <n-button size="small" :loading="discBusy && discOpen" @click="scanCloud">扫描网盘新内容</n-button>
         <n-button size="small" :loading="idxBusy" @click="askIndexSync">同步索引到网盘</n-button>
+        <n-button size="small" :loading="busy" @click="askRestoreIndex">从云端索引恢复</n-button>
         <template v-if="updCount">
           <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
                     @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>

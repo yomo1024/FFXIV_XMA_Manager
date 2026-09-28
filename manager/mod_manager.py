@@ -160,6 +160,14 @@ CREATE TABLE IF NOT EXISTS mod_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_mod_tags_tag ON mod_tags(tag);
 -- 载荷清单：一条 mod 可能有几十个包、多层子目录（实测最多 27 个），逐文件记账
+-- 「元数据同步」摘要：记住每条上次推上云端的 meta 内容指纹 → 下次同步只推变化过的（v2.32.2）
+-- 为什么值得单开一张表：逐条上传云端很快变成瓶颈（实测 38 条约 4.9 秒/条），
+-- 而绝大多数条目的元数据是不变的 —— 有指纹就能跳过。
+CREATE TABLE IF NOT EXISTS meta_sync (
+    folder TEXT PRIMARY KEY,
+    digest TEXT,              -- meta 内容的 md5（不含 exported/cloud_synced 这类每次都变的字段）
+    synced TEXT               -- 最近一次成功上传时间
+);
 CREATE TABLE IF NOT EXISTS payload_files (
     folder    TEXT NOT NULL,   -- mod 文件夹（与 mods.folder 同一个键）
     rel_path  TEXT NOT NULL,   -- 相对 mod 文件夹的路径（含子目录）
@@ -2511,6 +2519,20 @@ class Store:
             self.cx.commit()
         return len(dead)
 
+    def meta_sync_map(self) -> dict:
+        """folder → 上次推上云端的 meta 指纹（增量上传用）"""
+        try:
+            return {r["folder"]: (r["digest"] or "") for r in self.cx.execute("SELECT folder, digest FROM meta_sync")}
+        except Exception:
+            return {}
+
+    def set_meta_sync(self, folder, digest) -> None:
+        self.cx.execute(
+            "INSERT INTO meta_sync(folder,digest,synced) VALUES(?,?,?) "
+            "ON CONFLICT(folder) DO UPDATE SET digest=excluded.digest, synced=excluded.synced",
+            (str(folder), str(digest or ""), _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        self.cx.commit()
+
     def drop(self, folder) -> int:
         """整条删掉索引记录（mods + mod_tags + payload_files）。
 
@@ -2519,6 +2541,7 @@ class Store:
         f = str(folder)
         self.cx.execute("DELETE FROM payload_files WHERE folder=?", (f,))
         self.cx.execute("DELETE FROM mod_tags WHERE folder=?", (f,))
+        self.cx.execute("DELETE FROM meta_sync WHERE folder=?", (f,))
         n = self.cx.execute("DELETE FROM mods WHERE folder=?", (f,)).rowcount
         self.cx.commit()
         return int(n or 0)
@@ -2588,6 +2611,17 @@ def fit_size(w, h, box_w, box_h):
 # --------------------------------------------------------------------- export
 INDEX_JSON_NAME = "_modmanager_index.json"      # 全库索引（云端根 + 本地 Mod 根旁边各一份）
 MOD_META_NAME = "_modmanager.json"             # 单条 mod 的元数据（放在云端该 mod 目录里）
+
+
+def meta_digest(obj: dict) -> str:
+    """meta 内容的指纹：**排除每次都变的字段**（exported / cloud_synced），否则永远算「变了」。
+
+    用它做「增量上传」的依据：指纹一样就不重传（实测逐条上传是同步耗时的大头）。
+    """
+    skip = ("exported", "cloud_synced")
+    clean = {k: v for k, v in (obj or {}).items() if k not in skip}
+    s = json.dumps(clean, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
 def meta_row(m: dict, cfg: dict, tags=None) -> dict:
