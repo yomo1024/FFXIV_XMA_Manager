@@ -841,6 +841,11 @@ def _job_selfdownload(job: Job):
             _site = record_site_update(
                 cfg, target, addr,
                 allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
+        # 时间没记上就说清楚原因（以前静默留空，主人 2026-09 问「为什么没取更新时间」）
+        site_time_missing = not (_site or {}).get("updated")
+        if site_time_missing:
+            mm.log("站点更新时间这次没记上：拓展没带 updated，且当前没有可用的浏览器会话"
+                   "（重载拓展到 1.2.4，或在设置里「立即接管我的浏览器」）")
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
@@ -848,6 +853,7 @@ def _job_selfdownload(job: Job):
                 "updated_existing": bool(_exist), "removed": _removed,
                 "file": hit.name, "cover": bool(got), "cover_how": cover_info.get("how") or "",
                 "cover_lowres": bool(cover_info.get("lowres")),
+                "site_time_missing": site_time_missing,
                 "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "",
                 "target": str(target), "dir": str(dl_dir),
@@ -2857,22 +2863,37 @@ def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
             tried.append("全尺寸：%s" % why)
         except Exception as e:
             tried.append("全尺寸：%s" % str(e)[:70])
+    # ★ 全尺寸拿不到时，退到**封面自己的缩略图**：把 mod-images/<uuid> 换成 mod-thumbnails/<uuid>
+    #   （同一张图的低分辨率版，实测公开可取 200）。
+    #   ⚠ 千万别拿 imgs 里别的图当封面 —— 那些 UUID 不同、是画廊里的**另一张图**，
+    #     主人 2026-09 就是这么发现「封面取错了」的。
+    cands = []
+    m_cover = re.search(r"/mod-images/([0-9a-fA-F-]{16,})", cu)
+    if m_cover:
+        for ext2 in (".jpg", ".jpeg", ".png"):
+            cands.append(cu.replace("/mod-images/", "/mod-thumbnails/").rsplit(".", 1)[0] + ext2)
+    cover_uuid = m_cover.group(1) if m_cover else ""
     for u in [str(x) for x in (imgs or []) if str(x).lower().startswith("http")]:
         if u == cu:
             continue
+        # 只有**和封面同 UUID** 的图才认（同图不同尺寸）；UUID 不同的一律不碰
+        if cover_uuid and cover_uuid in u and u not in cands:
+            cands.append(u)
+    for u in cands:
         ext = _ext_of(u)
         try:
             ok, why = _save_url(cfg, u, _sib(ext), use_browser=False)
             if ok:
                 cover_land_inside(folder)
-                mm.log("入库补封面：低清兜底（公开缩略图 %s）" % Path(u).name[:28])
-                return {"ok": True, "how": "低清兜底（公开缩略图）", "lowres": True,
+                mm.log("入库补封面：低清兜底（封面自己的缩略图 %s）" % Path(u).name[:28])
+                return {"ok": True, "how": "低清兜底（封面自己的缩略图）", "lowres": True,
                         "path": str(_sib(ext)), "tried": tried}
             tried.append("%s：%s" % (Path(u).name[:20], why))
         except Exception as e:
             tried.append("%s：%s" % (Path(u).name[:20], str(e)[:60]))
-    mm.log("入库补封面失败：%s" % ("；".join(tried[:3]) or "没有可用的图地址"))
-    return {"ok": False, "why": "没抓到封面", "tried": tried}
+    # 连封面自己的缩略图都拿不到 → **宁可空着**，也不拿别的图充数
+    mm.log("入库补封面失败（没有用别的图替代）：%s" % ("；".join(tried[:3]) or "没有可用的图地址"))
+    return {"ok": False, "why": "没抓到封面（没拿别的图替代）", "tried": tried}
 
 
 def _job_import_file(job: Job):
@@ -2932,6 +2953,11 @@ def _job_import_file(job: Job):
             _site = record_site_update(
                 cfg, target, addr,
                 allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
+        # 时间没记上就说清楚原因（以前静默留空，主人 2026-09 问「为什么没取更新时间」）
+        site_time_missing = not (_site or {}).get("updated")
+        if site_time_missing:
+            mm.log("站点更新时间这次没记上：拓展没带 updated，且当前没有可用的浏览器会话"
+                   "（重载拓展到 1.2.4，或在设置里「立即接管我的浏览器」）")
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
@@ -2939,6 +2965,7 @@ def _job_import_file(job: Job):
                 "updated_existing": bool(_exist), "removed": _removed,
                 "file": src.name, "cover": bool(got), "cover_how": cover_info.get("how") or "",
                 "cover_lowres": bool(cover_info.get("lowres")),
+                "site_time_missing": site_time_missing,
                 "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "", "size": size,
                 "human": mm.fmt_size(size), "target": str(target),
