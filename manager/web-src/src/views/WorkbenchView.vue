@@ -5,6 +5,7 @@ import {
   NEmpty, NSpin, NSwitch, NCollapse, NCollapseItem, NImage, NCheckbox, useMessage, useDialog,
 } from 'naive-ui'
 import { api } from '../api'
+import { MdText } from '../md'
 
 const props = defineProps({ mods: { type: Array, default: () => [] } })
 const emit = defineEmits(['changed'])
@@ -503,8 +504,8 @@ const pendColumns = [
             <n-alert v-if="diag" :type="diag.can ? 'success' : 'warning'" :show-icon="false"
                      class="diagbox">
               <b>{{ diag.can ? '现在可以同步' : '现在同步会失败' }}</b>
-              <template v-if="diag.why">：{{ diag.why }}</template>
-              <div v-if="diag.next" style="margin-top: 2px">→ {{ diag.next }}</div>
+              <template v-if="diag.why">：<MdText :text="diag.why" /></template>
+              <div v-if="diag.next" style="margin-top: 2px">→ <MdText :text="diag.next" /></div>
               <div class="dim" style="margin-top: 4px">
                 读取对象：{{ (diag.browser && diag.browser.name) || '（还没选浏览器程序）' }}
                 <template v-if="diag.browser && diag.browser.profile">
@@ -514,7 +515,7 @@ const pendColumns = [
                   ｜<b>正在运行</b>
                 </template>
               </div>
-              <div v-for="(s, i) in (diag.steps || [])" :key="i" class="dim" style="margin-top: 2px">· {{ s }}</div>
+              <div v-for="(s, i) in (diag.steps || [])" :key="i" class="dim" style="margin-top: 2px">· <MdText :text="s" /></div>
             </n-alert>
             <span class="dim" style="display: block; margin-top: 6px">
               （内置浏览器是<strong>可选</strong>的：用上面的「⬇ 用我自己的浏览器下载」完全不需要它 ——
@@ -544,8 +545,8 @@ const pendColumns = [
             </n-collapse-item>
           </n-collapse>
 
-          <n-alert v-if="parseErr" type="warning" :show-icon="false">{{ parseErr }}</n-alert>
-          <n-alert v-else-if="parseWarn" type="warning" :show-icon="false">{{ parseWarn }}</n-alert>
+          <n-alert v-if="parseErr" type="warning" :show-icon="false"><MdText :text="parseErr" /></n-alert>
+          <n-alert v-else-if="parseWarn" type="warning" :show-icon="false"><MdText :text="parseWarn" /></n-alert>
 
           <template v-if="parsed">
             <div class="found">

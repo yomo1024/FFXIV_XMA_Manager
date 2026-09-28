@@ -10,6 +10,7 @@ import {
   RefreshOutline, DocumentTextOutline, RocketOutline, CheckmarkCircleOutline,
 } from '@vicons/ionicons5'
 import { api, JOB_TITLES, jobResultText } from '../api'
+import { mdToast } from '../md'
 import ModsView from '../views/ModsView.vue'
 import ToolsView from '../views/ToolsView.vue'
 import CategoriesView from '../views/CategoriesView.vue'
@@ -111,7 +112,8 @@ function pollJob() {
       await refreshAll()
       await bus.refresh?.()
     } catch (e) {}
-    s.state === 'error' ? msg.error(jobResultText(s)) : msg.success(jobResultText(s))
+    // 任务结果文案里可能带 **粗体**/`代码` → 统一走 markdown 渲染（不然是一堆星号）
+    s.state === 'error' ? msg.error(mdToast(jobResultText(s))) : msg.success(mdToast(jobResultText(s)))
     setTimeout(() => (job.value = null), 6000)
   }, 300)
 }

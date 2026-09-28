@@ -5,6 +5,7 @@ import {
   NDivider, NSelect, useMessage,
 } from 'naive-ui'
 import { api } from '../api'
+import { MdText } from '../md'
 
 const emit = defineEmits(['changed'])
 // 「导入后自动装进游戏」三档：'' = 关 / propose = 送到游戏内待确认 / direct = 直接装
@@ -244,13 +245,13 @@ async function save() {
             </div>
           </n-form-item>
           <n-form-item v-if="verInfo && verInfo.cover_message" label=" ">
-            <n-alert type="warning" :show-icon="false">{{ verInfo.cover_message }}</n-alert>
+            <n-alert type="warning" :show-icon="false"><MdText :text="verInfo.cover_message" /></n-alert>
           </n-form-item>
           <n-form-item v-if="verInfo && verInfo.plugin_version && !verInfo.plugin_ok" label=" ">
-            <n-alert type="warning" :show-icon="false">{{ verInfo.version_message }}</n-alert>
+            <n-alert type="warning" :show-icon="false"><MdText :text="verInfo.version_message" /></n-alert>
           </n-form-item>
           <n-form-item v-if="bridgeMsg" label=" ">
-            <n-alert :type="bridgeMsg.ok ? 'success' : 'warning'" :show-icon="false">{{ bridgeMsg.text }}</n-alert>
+            <n-alert :type="bridgeMsg.ok ? 'success' : 'warning'" :show-icon="false"><MdText :text="bridgeMsg.text" /></n-alert>
           </n-form-item>
         </n-form>
       </n-card>
@@ -349,7 +350,7 @@ async function save() {
         </div>
         <n-alert v-if="cloudRes" :type="cloudRes.ok ? 'success' : 'error'" :show-icon="false"
                  style="margin-top: 8px; white-space: pre-wrap; font-size: 12px">
-          {{ cloudText }}
+          <MdText :text="cloudText" />
         </n-alert>
       </n-card>
 

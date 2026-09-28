@@ -8,6 +8,7 @@ import {
   NCheckboxGroup, NCheckbox, NTabs, NTabPane, NSpin, NProgress, useMessage, useDialog,
 } from 'naive-ui'
 import { api, canAutoUpdate, isHelio } from '../api'
+import { mdDialog, mdToast, mdNodes, MdText } from '../md'
 
 const props = defineProps({ mods: { type: Array, default: () => [] } })
 const emit = defineEmits(['changed'])
@@ -335,10 +336,10 @@ function askReconcile(folders) {
   const list = (folders && folders.length) ? folders : cloudTargets()
   dialog.warning({
     title: '与网盘对账',
-    content: '拿**云端实况**核对每条 Mod 到底归档没有，并重建「已归档」状态与云端载荷清单。\n'
+    content: mdDialog('拿**云端实况**核对每条 Mod 到底归档没有，并重建「已归档」状态与云端载荷清单。\n'
       + '用在：换电脑后 / 索引库丢了云状态 / 你在网盘里手工整理过。\n'
       + (list.length ? `只对选中的 ${list.length} 条对账。` : '没勾选 → 对全部 Mod 对账。')
-      + '\n不下载、不删除任何文件，只改索引库里的记录。',
+      + '\n不下载、不删除任何文件，只改索引库里的记录。'),
     positiveText: '对账并修正（写回索引）',
     negativeText: '只看不改（预览）',
     onPositiveClick: () => {
@@ -409,13 +410,13 @@ function askIndexSync() {
   dialog.warning({
     title: '把索引同步到网盘？',
     content: () => h('div', [
-      h('div', { style: 'white-space: pre-wrap' },
+      h('div', { style: 'white-space: pre-wrap' }, mdNodes(
         '会给每条 Mod 的云端目录写一份 `_modmanager.json`（分类/类型/标签/地址/站点信息），' +
         '并在云端根写一份全库索引 `_modmanager_index.json`；本地也写一份（Mod 根旁边，跟汇总表同一处）。\n' +
-        '云端目录里本来就有载荷、封面、地址.txt —— 这里只写小文件，不动载荷。'),
+        '云端目录里本来就有载荷、封面、地址.txt —— 这里只写小文件，不动载荷。')),
       h('div', { style: 'margin-top: 10px; display: flex; align-items: center; gap: 8px' }, [
         h(NCheckbox, { checked: idxForce.value, 'onUpdate:checked': (v) => { idxForce.value = v } }),
-        h('span', null, '强制全部重传（默认只推**变化过**的，快很多）'),
+        h('span', null, mdNodes('强制全部重传（默认只推**变化过**的，快很多）')),
       ]),
       h('div', { style: 'opacity:.7; margin-top: 6px; font-size: 12px' },
         '默认是增量：只把元数据变了的条目推上去（每条要一次云端上传，约 5 秒 —— 全量重传几千条会很久）。'),
@@ -426,7 +427,7 @@ function askIndexSync() {
       idxBusy.value = true
       try {
         await startJob('cloud_index_sync', { force: idxForce.value })
-        msg.info(idxForce.value ? '开始**全部重传**索引到网盘…' : '开始同步索引（只推变化过的）…',
+        msg.info(mdToast(idxForce.value ? '开始**全部重传**索引到网盘…' : '开始同步索引（只推变化过）…'),
           { duration: 12000 })
       } catch (e) {
         msg.error('启动失败：' + e.message)
@@ -464,11 +465,11 @@ const rstColsUpd = [
 const askRestoreIndex = () => {
   dialog.warning({
     title: '从云端索引恢复？',
-    content: '会把云端那份 `_modmanager_index.json` 里的**分类/子分类/类型/序号/作者/名称/地址/影响替换/站点信息/标签**' +
+    content: mdDialog('会把云端那份 `_modmanager_index.json` 里的**分类/子分类/类型/序号/作者/名称/地址/影响替换/站点信息/标签**' +
       '按 Mod 路径比对后写回索引库（只在这台机器没有或对不上时才改）。\n\n' +
       '不动任何 Mod 文件、不下载载荷、不改云存储状态。\n' +
       '用途：换电脑、索引库丢了、手工改乱了。\n\n' +
-      '建议先「只看不改（预览）」看一眼会改什么。',
+      '建议先「只看不改（预览）」看一眼会改什么。'),
     positiveText: '恢复写入',
     negativeText: '只看不改（预览）',
     onPositiveClick: () => runRestoreIndex(true),
@@ -486,7 +487,7 @@ async function runRestoreIndex(write) {
       rstTab.value = (r.created_n ? 'new' : 'upd')
       rstOpen.value = true
       if (!r.created_n && !r.updated_n && !r.tags_n) {
-        msg.info('预览完成：本地索引与云端索引**完全一致**，没什么要改的')
+        msg.info(mdToast('预览完成：本地索引与云端索引**完全一致**，没什么要改的'))
       }
     } else {
       rstOpen.value = false
@@ -638,10 +639,10 @@ async function archiveCloud(folders) {
   const already = rows.filter((m) => (m.archived_files || 0) && !(m.payload_size || 0)).length
   dialog.warning({
     title: '归档到云盘',
-    content: `把 ${list.length} 条 Mod 的载荷（约 ${humanMB(total)}）上传到夸克；`
+    content: mdDialog(`把 ${list.length} 条 Mod 的载荷（约 ${humanMB(total)}）上传到夸克；`
       + `上传并逐个校验通过后，会删掉本地载荷（进回收站，可还原）。`
       + `预览图会跟载荷**一起上云**（换机/新电脑才有图可推给游戏，本地也各留一份）；地址.txt 和元信息只留本地。`
-      + (already ? `\n其中 ${already} 条已经在云端了，会自动走秒传、不用重传。` : ''),
+      + (already ? `\n其中 ${already} 条已经在云端了，会自动走秒传、不用重传。` : '')),
     positiveText: '开始归档',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -665,8 +666,8 @@ async function verifyCloud(folders) {
   const total = rows.reduce((s2, m) => s2 + (m.cloud_size || 0), 0)
   dialog.info({
     title: '校验云端文件',
-    content: `会把云端这 ${rows.length} 条（约 ${humanMB(total)}）下载回来逐个比对 sha1 ——`
-      + `只做体检，不动本地的东西，但**要花时间和流量**。`,
+    content: mdDialog(`会把云端这 ${rows.length} 条（约 ${humanMB(total)}）下载回来逐个比对 sha1 ——`
+      + `只做体检，不动本地的东西，但**要花时间和流量**。`),
     positiveText: '开始校验',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -2123,7 +2124,7 @@ async function copyPath() {
       </template>
     </n-modal>
     <n-modal v-model:show="rstOpen" preset="card" style="width: 1020px"
-             title="云端索引预览（**还没有改任何东西**）">
+             title="云端索引预览（还没有改任何东西）">
       <n-alert :type="((rstData || {}).created_n || (rstData || {}).updated_n) ? 'warning' : 'success'"
                :show-icon="false" style="margin-bottom: 10px; font-size: 13px">
         云端索引生成于 <b>{{ (rstData || {}).exported || '?' }}</b>
@@ -2167,8 +2168,8 @@ async function copyPath() {
       <n-spin :show="discBusy">
         <div class="dim" style="margin-bottom: 10px">
           网盘上多出来的 Mod 管理器不知道 —— 这一页把网盘扫一遍给你看。
-          认领会**读云端那份元数据**（分类/标签/地址），并把**封面图和地址.txt 取回本地**；
-          载荷不下载，点「安装到游戏」时才自动从云端取回。<br />
+          <MdText text="认领会**读云端那份元数据**（分类/标签/地址），并把**封面图和地址.txt 取回本地**；载荷不下载，点「安装到游戏」时才自动从云端取回。" />
+          <br />
           如果云端还没有元数据（没跑过「同步索引到网盘」），认领只能按路径还原分类和名字。
         </div>
         <n-tabs v-model:value="discTab" type="line" size="small">
