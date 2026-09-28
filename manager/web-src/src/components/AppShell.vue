@@ -270,12 +270,16 @@ onUnmounted(() => clearTimeout(timer))
       </header>
 
       <div v-if="job" class="jobbar">
-        <b>{{ JOB_TITLES[job.kind] || job.kind }}</b>
+        <b class="jobkind">{{ JOB_TITLES[job.kind] || job.kind }}</b>
         <n-progress type="line" :percentage="job.pct" :show-indicator="false" :height="8"
-                    style="flex: 1; min-width: 120px" />
+                    class="jobprog" />
+        <!-- ★ 这三段都会随时间变（0/12→10/12、秒数进位、文件名换）——
+             所以各自占**固定宽度的槽**：数字右对齐 + 等宽数字，中间那段自己省略号截断，
+             这样进度条和「取消」按钮的位置在整个任务里纹丝不动（主人 2026-09 提的） -->
         <span class="jobtext">
-          {{ job.total ? `${job.done}/${job.total} · ` : '' }}{{ job.text }}
-          <span class="dim">· 已用 {{ job.elapsed }}s</span>
+          <span class="num jobcount">{{ job.total ? `${job.done}/${job.total}` : '—' }}</span>
+          <span class="jobwhat" :title="job.text">{{ job.text }}</span>
+          <span class="num jobelapsed dim">已用 {{ job.elapsed }}s</span>
         </span>
         <n-button size="tiny" type="error" quaternary :disabled="job.state !== 'running'"
                   @click="api.cancelJob().then(() => msg.info('正在取消…')).catch((e) => msg.error(e.message))">
@@ -478,13 +482,47 @@ onUnmounted(() => clearTimeout(timer))
   padding: 8px 18px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.16);
 }
+/* 等宽数字：位数变了也不会左右挪（配合下面的定宽槽） */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+.jobkind {
+  flex: 0 0 auto;
+}
+/* ★ 进度条只吃「剩余空间」，而右边那块是**定宽**的 →
+   进度条宽度在一个任务里恒定，不会因为「已用 9s→10s」每秒抖一下、把邻居挤来挤去 */
+.jobprog {
+  flex: 1 1 0;
+  min-width: 120px;
+}
 .jobtext {
-  flex: 0 1 auto;
-  max-width: 46%;
+  flex: 0 0 34%;
+  min-width: 250px;
+  max-width: 470px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 12px;
   white-space: nowrap;
+}
+/* 计数「3/12」：固定 6 个字符宽、右对齐 —— 位数变多也不会顶开后面 */
+.jobcount {
+  flex: 0 0 auto;
+  min-width: 6ch;
+  text-align: right;
+}
+/* 中间那段（文件名/动作）才是会变长的：让它自己截断，别去挤别人 */
+.jobwhat {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* 「已用 12s」：固定 8 个字符宽、右对齐 */
+.jobelapsed {
+  flex: 0 0 auto;
+  min-width: 8ch;
+  text-align: right;
 }
 .content {
   flex: 1 1 auto;

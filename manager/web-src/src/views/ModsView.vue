@@ -2673,6 +2673,8 @@ async function copyPath() {
   font-size: 12px;
 }
 .dlbox .dlname {
+  flex: 1 1 auto;
+  min-width: 0;                 /* 不加这句：长文件名会把「取消/关闭」按钮顶走 */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2681,7 +2683,11 @@ async function copyPath() {
   margin-top: 3px;
   font-size: 11.5px;
   opacity: 0.65;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums;   /* 数字等宽：大小/百分比/速度一直在变也不左右抖 */
+  min-height: 1.5em;                    /* 预留一行：切状态（下完/取消/出错）时面板高度不跳 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .opcloud .oplink {
   font-size: 11.5px;
