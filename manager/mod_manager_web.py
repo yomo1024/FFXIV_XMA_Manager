@@ -706,7 +706,9 @@ def _job_fetch(job: Job):
         tags=info.get("tags") or q.get("tags") or [],
         affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
         addr=addr)
-    _site = record_site_update(cfg, target, addr)
+    # 同上：入库这步不为了更新时间弹浏览器
+    _site = record_site_update(cfg, target, addr,
+                               allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
     _auto_export(job, cfg)
     ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装（见 auto_install 注释）
     aa = auto_archive_after_import(cfg, [str(target)], job)
@@ -834,7 +836,10 @@ def _job_selfdownload(job: Job):
             tags=info.get("tags") or q.get("tags") or [],
             affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
             addr=addr)
-        record_site_update(cfg, target, addr)
+        # 标签/影响拓展已经推来了 → 这一步只是补「站点更新时间」；
+        # 内置浏览器没开就**别弹窗**（主人 2026-09：为什么下载要新开一个浏览器？）
+        record_site_update(cfg, target, addr,
+                           allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
@@ -948,7 +953,7 @@ def _merge_site(a, b):
     return out
 
 
-def _site_info(cfg, addr):
+def _site_info(cfg, addr, allow_browser=True):
     """读站点更新信息，三级兜底：
 
     ① 直连（公开 Mod 就够）
@@ -972,6 +977,12 @@ def _site_info(cfg, addr):
         pass
     page = str(addr or "").strip()
     if not page.lower().startswith("http"):
+        return info
+    if not allow_browser:
+        # 调用方明确「别弹窗」（入库时拓展已经把标签/影响推来了，只差一个更新时间）→
+        # 就认了这次没时间，等之后「检查更新」再补；别再为一行时间把浏览器窗口怼到主人脸上
+        mm.log("直连读不到（%s）；这次不弹内置浏览器（allow_browser=False）：%s"
+               % ((info.get("error") or "")[:50], page))
         return info
     try:
         mm.log("直连读不到（%s），改用内置浏览器读页面：%s" % ((info.get("error") or "")[:50], page))
@@ -1005,12 +1016,12 @@ def _site_info(cfg, addr):
     return info
 
 
-def record_site_update(cfg, target, addr):
+def record_site_update(cfg, target, addr, allow_browser=True):
     """下载/入库后把站点上的「最后更新时间」记成基线（这样以后才比得出有没有新版）。"""
     if not (str(addr or "").strip()):
         return {}
     try:
-        info = _site_info(cfg, addr)
+        info = _site_info(cfg, addr, allow_browser=allow_browser)
         if not info.get("ok"):
             mm.log("记站点更新时间：没读到（%s）%s" % (Path(str(target)).name[:40], info.get("error") or ""))
             return {}
@@ -2737,6 +2748,59 @@ def _job_mod_update(job: Job):
     return {"ok": done, "failed": failed}
 
 
+def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
+    """给刚入库的 Mod 抓封面：全尺寸拿不到就退到**公共缩略图**（保证不留空封面）。
+
+    为什么（2026-09 主人报的「新下载的 mod 没有封面图」）：
+      全尺寸封面（static.xivmodarchive.com/mod-images/...）在 Cloudflare 后面，**没有浏览器会话就 403**；
+      以前这里是 use_browser=browser_running(cfg) —— 内置浏览器没开时纯 HTTP 必然 403，
+      然后**静默放弃**，封面就空着（Shrouded eyes 就是这样）。
+      而推送里带的画廊缩略图（mod-thumbnails/...）是**公开可取的**（实测 200，355×200），
+      拿来当预览图够列表/卡片/汇总表用 —— 先有一个，总比空着强；想要高清再点「补预览图」。
+    返回 {ok, path, how, lowres}
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return {"ok": False, "why": "文件夹不存在"}
+
+    def _sib(ext):
+        return folder.parent / (folder.name + ext)
+
+    def _ext_of(u):
+        e = "." + (str(u).rsplit(".", 1)[-1].split("?")[0].lower() if "." in str(u) else "jpg")
+        return e if e in (".jpg", ".jpeg", ".png", ".webp", ".gif") else ".jpg"
+
+    tried = []
+    cu = str(cover_url or "").strip()
+    if cu.lower().startswith("http"):
+        ext = _ext_of(cu)
+        try:
+            ok, why = _save_url(cfg, cu, _sib(ext), use_browser=mm.browser_running(cfg))
+            if ok:
+                cover_land_inside(folder)
+                mm.log("入库补封面：全尺寸（%s）" % why)
+                return {"ok": True, "how": "全尺寸", "lowres": False, "path": str(_sib(ext))}
+            tried.append("全尺寸：%s" % why)
+        except Exception as e:
+            tried.append("全尺寸：%s" % str(e)[:70])
+    for u in [str(x) for x in (imgs or []) if str(x).lower().startswith("http")]:
+        if u == cu:
+            continue
+        ext = _ext_of(u)
+        try:
+            ok, why = _save_url(cfg, u, _sib(ext), use_browser=False)
+            if ok:
+                cover_land_inside(folder)
+                mm.log("入库补封面：低清兜底（公开缩略图 %s）" % Path(u).name[:28])
+                return {"ok": True, "how": "低清兜底（公开缩略图）", "lowres": True,
+                        "path": str(_sib(ext)), "tried": tried}
+            tried.append("%s：%s" % (Path(u).name[:20], why))
+        except Exception as e:
+            tried.append("%s：%s" % (Path(u).name[:20], str(e)[:60]))
+    mm.log("入库补封面失败：%s" % ("；".join(tried[:3]) or "没有可用的图地址"))
+    return {"ok": False, "why": "没抓到封面", "tried": tried}
+
+
 def _job_import_file(job: Job):
     """浏览器已经下好了，直接把那个文件入库。
 
@@ -2766,21 +2830,12 @@ def _job_import_file(job: Job):
         job.set(1, 3, "入库（写 地址.txt、自动编号）…")
         target, _exist, _removed = import_or_update(cfg, src, cat, zone, subdir,
                                                     author or None, name or None, None, addr, info, job)
-        got = ""
-        if q.get("cover", True) and cover.lower().startswith("http"):
+        cover_info = {"ok": False}
+        if q.get("cover", True):
             job.set(2, 3, "抓封面当预览图…")
-            ext = "." + (cover.rsplit(".", 1)[-1].split("?")[0].lower() if "." in cover else "jpg")
-            if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-                ext = ".jpg"
-            tdir = Path(target)
-            try:
-                ok, _why = _save_url(cfg, cover, tdir.parent / (tdir.name + ext),
-                                     use_browser=mm.browser_running(cfg))
-                got = ext if ok else ""
-            except Exception:
-                got = ""
-            if got:
-                cover_land_inside(tdir)
+            cover_info = fetch_cover_with_fallback(cfg, target, cover,
+                                                   q.get("imgs") or info.get("imgs"))
+            got = "ok" if cover_info.get("ok") else ""
         job.set(3, 3, "重扫索引、写标签、生成 Excel…")
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
@@ -2789,13 +2844,18 @@ def _job_import_file(job: Job):
             tags=q.get("tags") or info.get("tags") or [],
             affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
             addr=addr)
-        record_site_update(cfg, target, addr)
+        # 标签/影响拓展已经推来了 → 这一步只是补「站点更新时间」；
+        # 内置浏览器没开就**别弹窗**（主人 2026-09：为什么下载要新开一个浏览器？）
+        record_site_update(cfg, target, addr,
+                           allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
                 "updated_existing": bool(_exist), "removed": _removed,
-                "file": src.name, "cover": bool(got), "tags": _meta.get("tags") or [],
+                "file": src.name, "cover": bool(got), "cover_how": cover_info.get("how") or "",
+                "cover_lowres": bool(cover_info.get("lowres")),
+                "tags": _meta.get("tags") or [],
                 "affects": _meta.get("affects") or "", "size": size,
                 "human": mm.fmt_size(size), "target": str(target),
                 "auto_install": ai, "auto_archive": aa}
