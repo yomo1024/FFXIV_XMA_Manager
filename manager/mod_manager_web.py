@@ -2806,6 +2806,22 @@ def apply_site_time_from_push(cfg, target, text) -> bool:
         return False
 
 
+def _retire_lowres_cover(folder, old_img, new_img) -> None:
+    """换到全尺寸封面之后，把之前那张低清兜底图送进回收站（别让 find_image 又挑回它）。"""
+    try:
+        if not old_img:
+            return
+        old, new = Path(str(old_img)), Path(str(new_img or ""))
+        if new and old.resolve() == new.resolve():
+            return
+        if not old.is_file() or old.stat().st_size >= 80 * 1024:
+            return
+        mm.send_to_recycle_bin(str(old))
+        mm.log("补预览图：旧的低清封面已进回收站（%s）" % old.name)
+    except Exception as e:
+        mm.log("清理旧低清封面失败（不影响使用）：%s" % str(e)[:80])
+
+
 def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
     """给刚入库的 Mod 抓封面：全尺寸拿不到就退到**公共缩略图**（保证不留空封面）。
 
@@ -3013,6 +3029,12 @@ def start_job(kind: str, params: dict | None = None):
             job.state = "cancelled" if job.cancelled() else "done"
         except mm.BackupCancelled:
             job.state = "cancelled"
+        except SystemExit as e:
+            # SystemExit 在本项目里表示「可读的用户错误」（不是真退出）。
+            # 必须在这儿收住：否则线程直接死掉，任务会永远停在 running（界面卡住）
+            job.state = "error"
+            job.error = "%s" % e
+            mm.log("任务中止：%s" % e)
         except Exception as e:
             job.state = "error"
             job.error = "%s" % e
@@ -5594,10 +5616,23 @@ class Handler(BaseHTTPRequestHandler):
         fd = Path(folder)
         tried = []
 
+        # ★ 低清兜底（公开缩略图 ~20KB）要允许**升级**成全尺寸：
+        #   以前这里「只要有任何图就 already=True」，于是入库兜底那张低清图再也换不掉（主人 2026-09 报的）
+        LOWRES_BYTES = 80 * 1024
         found, how = mm.find_image(fd, fd.name, m.get("author") or "", m.get("name") or "")
+        small = False
         if found:
+            try:
+                small = Path(found).stat().st_size < LOWRES_BYTES
+            except OSError:
+                small = False
+        if found and not small:
             return self._json({"ok": True, "img": str(found), "how": how,
                                "name": Path(found).name, "already": True})
+        old_img = str(found) if found else ""
+        if small:
+            mm.log("补预览图：现有封面只有 %s B（低清兜底），试着换成全尺寸"
+                   % Path(found).stat().st_size)
 
         addr = m.get("addr") or ""
         modid = _modid_of(addr)
@@ -5609,6 +5644,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 shutil.copy2(local, dest)
                 mm._mirror_cover_sibling(fd, dest)   # 同级也放一张（检查报告的规范位）
+                _retire_lowres_cover(fd, old_img, dest)
                 mm.cmd_scan(cfg, quiet=True)
                 mod_index(force=True)
                 return self._json({"ok": True, "img": str(dest), "how": "本机给的封面",
@@ -5627,6 +5663,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok, why = _save_url(cfg, cover, dest, use_browser=mm.browser_running(cfg))
                 if ok:
                     mm._mirror_cover_sibling(fd, dest)   # 同级也放一张（检查报告的规范位）
+                    _retire_lowres_cover(fd, old_img, dest)
                     mm.cmd_scan(cfg, quiet=True)
                     mod_index(force=True)
                     return self._json({"ok": True, "img": str(dest), "how": "浏览器推来的封面（%s）" % why,
@@ -5661,6 +5698,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok, why = _save_url(cfg, gc, dest, use_browser=True)
                 if ok:
                     mm._mirror_cover_sibling(fd, dest)   # 同级也放一张（检查报告的规范位）
+                    _retire_lowres_cover(fd, old_img, dest)
                     mm.cmd_scan(cfg, quiet=True)
                     mod_index(force=True)
                     return self._json({"ok": True, "img": str(dest),

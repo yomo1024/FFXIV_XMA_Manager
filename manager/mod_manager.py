@@ -1161,6 +1161,12 @@ def launch_browser(cfg, url=BROWSER_HOME):
     port = browser_port(cfg)
     if browser_running(cfg):
         return port
+    if browser_mode(cfg) == "user" and browser_procs(exe):
+        # 你那个浏览器已经在跑：再带调试端口启动只会被现有实例吞掉，端口永远不开
+        # → 立刻给出可操作的提示（以前会傻等到超时，主人 2026-09 踩到：界面卡住）
+        raise SystemExit("「我自己的浏览器」模式还没接管：你的浏览器正在运行，"
+                         "而调试端口只能在启动时指定。请点「设置 → 内置浏览器 / 读页面 → 立即接管我的浏览器」"
+                         "（会先关掉它再带端口启动），或把模式切回「内置」。")
     Path(resolve_dirs(cfg)[1]).mkdir(parents=True, exist_ok=True)
     args = [exe,
             "--user-data-dir=%s" % browser_user_data_dir(cfg),
@@ -1176,8 +1182,10 @@ def launch_browser(cfg, url=BROWSER_HOME):
     for _ in range(60):
         time.sleep(0.5)
         if browser_running(cfg):
-            break
-    return port
+            return port
+    raise SystemExit("读页面用的浏览器没起来（调试端口 %d 没响应）。"
+                     "内置模式检查「浏览器程序」路径；用自己浏览器的话点「立即接管我的浏览器」。"
+                     % port)
 
 
 def user_browser_takeover(cfg) -> dict:
