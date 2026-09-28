@@ -107,7 +107,9 @@ export const api = {
   browserCapture: () => req('/api/browser/capture', { method: 'POST', body: '{}' }),
   grabCover: (folder) => req('/api/browser/grab-cover', { method: 'POST', body: JSON.stringify({ folder }) }),
   browserLoginState: () => req('/api/browser/login-state'),
-  browserSyncLogin: () => req('/api/browser/sync-login', { method: 'POST', body: '{}' }),
+  browserLoginDiag: () => req('/api/browser/login-diag'),   // 同步前的体检（无副作用）
+  browserSyncLogin: (closeUser) => req('/api/browser/sync-login',
+    { method: 'POST', body: JSON.stringify({ close_user: !!closeUser }) }),
   images: (f) => req('/api/images?f=' + encodeURIComponent(f)),
   imgUrl: (p, w = 200) => `/api/img?p=${encodeURIComponent(p)}&w=${w}`,
   rawImgUrl: (p) => `/api/rawimg?p=${encodeURIComponent(p)}`,

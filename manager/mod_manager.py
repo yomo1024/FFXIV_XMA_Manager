@@ -1484,13 +1484,29 @@ def user_data_dir_of(exe):
                 "BraveSoftware/Brave-Browser/User Data", "360Chrome/Chrome/User Data",
                 "Vivaldi/User Data", "Chromium/User Data"):
         out.append(Path(la) / rel)
-    for d in out:
+    def _ok(x):
         try:
-            if d.is_dir() and ((d / "Default").is_dir() or list(d.glob("Profile *"))):
-                return d
+            return x.is_dir() and ((x / "Default").is_dir() or bool(list(x.glob("Profile *"))))
         except OSError:
-            pass
-    return None
+            return False
+    ok = [d for d in out if _ok(d)]
+    if not ok:
+        return None
+    # ★★ 必须挑「跟这个 exe 对得上」的那个，不能有就用第一个：
+    #    Edge 装在 Program Files，推导出来的 ...\Edge\User Data 根本不存在 →
+    #    老代码会退到列表里第一个（CentBrowser），于是**读错了浏览器的 Cookie**
+    #    （实测踩到：配置里选 Edge，体检却说在读 CentBrowser 的 User Data）。
+    #    判据：LOCALAPPDATA 那一层的**品牌目录名**出现在 exe 路径里。
+    if exe:
+        e = os.path.normcase(str(exe)).replace("/", "\\")
+        for d in ok:
+            try:
+                brand = os.path.normcase(d.parent.name)
+            except Exception:
+                continue
+            if brand and brand in e:
+                return d
+    return ok[0]
 
 
 def _cookie_file_in(profile_dir):
@@ -1555,7 +1571,149 @@ def browser_login_state(cfg):
         return {"running": True, "count": 0, "names": [], "logged": False, "error": str(e)[:80]}
 
 
-def sync_login_from_user_browser(cfg):
+def browser_procs(exe) -> list:
+    """按**可执行文件全路径**找出正在运行的浏览器进程。
+
+    为什么不按进程名（taskkill /IM chrome.exe 那种）：同一内核的浏览器全叫 chrome.exe，
+    按名字杀会误伤主人自己开着的别的浏览器 —— 本项目真踩过「把主人的 CMD 窗口一起杀了」的事故。
+    这里只认路径完全一致的进程，返回 [(pid, path), ...]。
+    """
+    if not exe:
+        return []
+    try:
+        want = os.path.normcase(os.path.abspath(str(exe)))
+    except Exception:
+        return []
+    try:
+        raw = subprocess.run(["wmic", "process", "get", "ProcessId,ExecutablePath", "/format:csv"],
+                             capture_output=True, text=True, encoding="gbk", errors="replace",
+                             timeout=15).stdout
+    except Exception:
+        return []
+    out = []
+    for line in raw.splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 3 or not parts[-1].isdigit():
+            continue
+        pid = parts[-1]
+        path = ",".join(parts[1:-1])            # 路径里可能带逗号，别用固定下标
+        if path and os.path.normcase(os.path.abspath(path)) == want:
+            out.append((pid, path))
+    return out
+
+
+def login_sync_diag(cfg) -> dict:
+    """同步登录态之前的**体检** —— 无副作用，只回答「现在能不能同步、卡在哪、下一步做什么」。
+
+    为什么需要：原来点「同步登录状态」是**闷头去复制**，被占用时才在最后抛错，
+    主人看到的只是一句 toast，还得自己猜「是不是要先关浏览器」。这里把判断提前，
+    而且「能不能读」用**真开读 1 字节**判定（比看 mtime 靠谱）。
+    """
+    d = {"can": False, "why": "", "next": "", "steps": [], "browser": {}, "internal": {}}
+    try:
+        exe = find_browser(cfg) or ""
+    except Exception:
+        exe = ""
+    d["browser"] = {"exe": exe, "name": Path(exe).name if exe else ""}
+    try:
+        d["internal"] = browser_login_state(cfg)
+    except Exception as e:
+        d["internal"] = {"logged": False, "count": 0, "error": str(e)[:80]}
+    if not exe:
+        d["why"] = "还没选浏览器程序"
+        d["next"] = "设置 → 内置浏览器 →「浏览器程序」里选一个（一般就选你平时用的那个）"
+        return d
+    # ★ 必须 str()：user_data_dir_of 返回的是 Path，直接塞进返回体 → 接口 JSON 序列化失败（500，实测踩到）
+    ud = str(user_data_dir_of(exe) or "")
+    d["browser"]["user_data"] = ud
+    if not ud:
+        d["why"] = "没找到这个浏览器的配置目录（可能不是 Chromium 系）"
+        d["next"] = "换一个浏览器程序再试；或者干脆在内置浏览器里登录一次 XIVModArchive"
+        return d
+    try:
+        same = Path(ud).resolve() == Path(browser_profile(cfg)).resolve()
+    except Exception:
+        same = False
+    d["browser"]["same_profile"] = same
+    if same:
+        d["can"] = True
+        d["why"] = "内置浏览器用的就是你这个浏览器的配置目录 —— 不需要同步，它已经共用登录态"
+        return d
+    srcs = [x for x in ([Path(ud) / "Default"] + sorted(Path(ud).glob("Profile *")))
+            if _cookie_file_in(x)]
+    if not srcs:
+        d["why"] = "你的浏览器里没有 Cookie 文件"
+        d["next"] = "先在那个浏览器里打开一次 xivmodarchive.com（不登录也算，会写下站点 Cookie）"
+        return d
+    best = max(srcs, key=lambda x: _cookie_file_in(x).stat().st_mtime)
+    d["browser"]["profile"] = str(best)
+    d["browser"]["cookie_file"] = str(_cookie_file_in(best))
+    procs = browser_procs(exe)
+    d["browser"]["running"] = bool(procs)
+    d["browser"]["pids"] = [p for p, _ in procs]
+    locked = ""
+    for name in ("Cookies", "Cookies-wal"):
+        f = _cookie_file_in(best).parent / name
+        if not f.is_file():
+            continue
+        try:
+            with open(str(f), "rb") as fh:
+                fh.read(1)
+        except OSError as e:
+            locked = "%s 被占用（%s）" % (f.name, e.__class__.__name__)
+            break
+    d["browser"]["locked"] = locked
+    if locked:
+        if d["browser"]["running"]:
+            d["why"] = "你的浏览器「%s」正在运行，Cookie 库被它独占：%s" % (d["browser"]["name"], locked)
+            d["next"] = ("关掉它再点「同步登录状态」；也可以直接点「关闭它并同步」"
+                         "（只关这一个浏览器，尽量优雅关闭、下次能恢复标签页）")
+        else:
+            # 没在运行却读不出来 —— 别照抄「先关浏览器」的套话（那会让人白关一次）
+            d["why"] = "读不出 Cookie 库：%s（这个浏览器并没有在运行，可能是权限或被别的程序占用）" % locked
+            d["next"] = "换个浏览器程序试试；或直接在内置浏览器里登录一次 XIVModArchive"
+    else:
+        d["can"] = True
+        d["why"] = "可以同步（你的浏览器不在运行，或者 Cookie 库没被独占）"
+    if not d["internal"].get("logged"):
+        d["steps"].append("同步完若仍显示「未登录」，就在内置浏览器里打开 xivmodarchive 登录一次（一次长期有效）")
+    return d
+
+
+def close_user_browser(exe, wait=12) -> dict:
+    """关掉「你自己那个浏览器」，只针对**路径完全匹配的进程**（绝不按进程名杀）。
+
+    先不带 /F（等于点关闭，浏览器自己收尾、下次还能恢复标签页）；赖着不走才 /F。
+    """
+    pids = [p for p, _ in browser_procs(exe)]
+    if not pids:
+        return {"closed": [], "left": []}
+    args = []
+    for p in pids:
+        args += ["/PID", p]
+    try:
+        subprocess.run(["taskkill"] + args, capture_output=True, text=True, timeout=20)
+    except Exception:
+        log("关浏览器失败：\n" + traceback.format_exc())
+    t0 = time.time()
+    while time.time() - t0 < max(1, wait):
+        if not browser_procs(exe):
+            return {"closed": pids, "left": []}
+        time.sleep(1.0)
+    left = [p for p, _ in browser_procs(exe)]
+    if left:
+        args2 = []
+        for p in left:
+            args2 += ["/PID", p]
+        try:
+            subprocess.run(["taskkill", "/F"] + args2, capture_output=True, text=True, timeout=20)
+        except Exception:
+            pass
+        time.sleep(1.5)
+    return {"closed": pids, "left": [p for p, _ in browser_procs(exe)]}
+
+
+def sync_login_from_user_browser(cfg, close_user=False):
     """把你平时用的浏览器里的 Cookie 搬进内置浏览器的配置目录。
 
     为什么需要：管理器只能靠调试端口(CDP)读页面，而你自己那个浏览器没开调试端口，
@@ -1574,6 +1732,9 @@ def sync_login_from_user_browser(cfg):
     if not srcs:
         raise SystemExit("你的浏览器里没有找到 Cookie 文件：%s" % src_ud)
     best = max(srcs, key=lambda d: _cookie_file_in(d).stat().st_mtime)
+    if close_user:                           # 只有主人明确点了「关闭它并同步」才动他的浏览器
+        r = close_user_browser(exe)
+        log("同步登录态：按请求关闭了你的浏览器 %s（残留 %s）" % (r["closed"], r["left"]))
     was = browser_running(cfg)
     if was:                                  # 先关掉内置浏览器，免得它退出时把 Cookie 写回去
         try:
@@ -1623,7 +1784,8 @@ def sync_login_from_user_browser(cfg):
         if locked:      # Chromium 把 Cookie 库独占占用，只有关掉它才能读
             raise SystemExit(
                 "你自己的浏览器正在运行，它的 Cookie 文件被占用，读不出来：%s。"
-                "两种做法：① 关掉你自己的浏览器（点『再试一次』即可，只需一次）；"
+                "三种做法：① 点「关闭它并同步」（管理器只关这一个浏览器，尽量优雅关闭）；"
+                "② 自己关掉它再点「同步登录状态」；"
                 "② 直接在内置浏览器里登录一次 XIVModArchive —— 登录一次长期有效。" % locked)
         raise SystemExit("没能复制到 Cookie（源目录里没有可读文件）")
     if was:             # 同步完把内置浏览器重新拉起来

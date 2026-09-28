@@ -4155,6 +4155,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_inspect(q))
                 if u.path == "/api/browser":
                     return self._json(api_browser())
+                if u.path == "/api/browser/login-diag":
+                    # 同步登录态之前的体检（无副作用）：现在能不能同步、卡在哪、下一步做什么
+                    return self._json(mm.login_sync_diag(cfg_now()))
                 if u.path == "/api/browser/login-state":
                     cfg = cfg_now()
                     s = mm.browser_login_state(cfg)
@@ -4361,7 +4364,9 @@ class Handler(BaseHTTPRequestHandler):
                                    "title": JOB_TITLES.get("importfile", "入库")})
             if u.path == "/api/browser/sync-login":
                 cfg = cfg_now()
-                r = mm.sync_login_from_user_browser(cfg)      # SystemExit 会被上层转成 400
+                # close_user=true 时才去关主人的浏览器（前端会先弹确认）
+                r = mm.sync_login_from_user_browser(
+                    cfg, close_user=bool((body or {}).get("close_user")))   # SystemExit 会被上层转成 400
                 try:
                     mm.launch_browser(cfg, mm.BROWSER_HOME)
                 except Exception:

@@ -2,7 +2,7 @@
 import { ref, computed, inject, onMounted, onUnmounted } from 'vue'
 import {
   NButton, NCard, NSpace, NAlert, NTag, NSelect, NInput, NInputNumber, NDataTable,
-  NEmpty, NSpin, NSwitch, NCollapse, NCollapseItem, NImage, NCheckbox, useMessage,
+  NEmpty, NSpin, NSwitch, NCollapse, NCollapseItem, NImage, NCheckbox, useMessage, useDialog,
 } from 'naive-ui'
 import { api } from '../api'
 
@@ -10,6 +10,7 @@ const props = defineProps({ mods: { type: Array, default: () => [] } })
 const emit = defineEmits(['changed'])
 const { startJob, bus } = inject('mm')
 const msg = useMessage()
+const dialog = useDialog()
 
 const info = ref(null)
 const busy = ref(false)
@@ -33,13 +34,22 @@ const browserName = computed(() => {
   const n = e.split(/[\\/]/).pop() || ''
   return n ? n.replace(/\.exe$/i, '') : '你的浏览器'
 })
+// 同步前的体检：现在能不能同步、卡在哪、下一步做什么（无副作用，随时可刷）
+const diag = ref(null)
+const diagBusy = ref(false)
 async function loadLogin() {
   try { login.value = (await api.browserLoginState()).login || {} } catch (e) { /* 忽略 */ }
+  refreshDiag()
 }
-async function syncLogin() {
+async function refreshDiag() {
+  diagBusy.value = true
+  try { diag.value = await api.browserLoginDiag() } catch (e) { diag.value = null }
+  finally { diagBusy.value = false }
+}
+async function syncLogin(closeUser = false) {
   syncing.value = true
   try {
-    const r = await api.browserSyncLogin()
+    const r = await api.browserSyncLogin(closeUser)
     login.value = (r && r.login) || {}
     const n = (r && r.synced && r.synced.files) || 0
     if (login.value.logged) {
@@ -49,10 +59,25 @@ async function syncLogin() {
         `可以直接在内置浏览器里登录一次 XIVModArchive（一次就够）。`, { duration: 12000 })
     }
   } catch (e) {
+    // 失败原因写进卡片里（toast 一闪就没了，这里留着能对着看）
+    diag.value = { ...(diag.value || {}), can: false, why: e.message, next: '按上面的原因处理后再点一次「同步登录状态」' }
     msg.warning(e.message, { duration: 15000 })
   } finally {
     syncing.value = false
+    refreshDiag()
   }
+}
+function askCloseAndSync() {
+  const nm = (diag.value && diag.value.browser && diag.value.browser.name) || '你的浏览器'
+  dialog.warning({
+    title: `先关掉「${nm}」再同步？`,
+    content: '管理器只会关掉这一个浏览器（按程序路径精确匹配，不碰别的程序），' +
+      '会尽量优雅关闭，下次打开一般能恢复标签页。\n\n' +
+      '不想关的话，也可以自己关掉它再点「同步登录状态」。',
+    positiveText: '关掉它并同步',
+    negativeText: '取消',
+    onPositiveClick: () => syncLogin(true),
+  })
 }
 
 // ---------- 用「你自己的浏览器」读取 ----------
@@ -464,16 +489,38 @@ const pendColumns = [
             管理器只负责在下完那一刻自动接住并入库。
           </div>
 
-          <n-space align="center" wrap>
-            <n-tag :type="login.logged ? 'success' : 'default'" size="small" :bordered="false">
-              内置浏览器{{ login.logged ? '已登录' : '未登录（可选）' }}{{ login.count ? '（' + login.count + ' 条站点 Cookie）' : '' }}
-            </n-tag>
-            <n-button size="small" :loading="syncing" @click="syncLogin">同步登录状态</n-button>
-            <span class="dim">
+          <div class="logindiag">
+            <n-space align="center" wrap :size="8">
+              <n-tag :type="login.logged ? 'success' : 'default'" size="small" :bordered="false">
+                内置浏览器{{ login.logged ? '已登录' : '未登录（可选）' }}{{ login.count ? '（' + login.count + ' 条站点 Cookie）' : '' }}
+              </n-tag>
+              <n-button size="small" :loading="diagBusy" @click="refreshDiag">刷新体检</n-button>
+              <n-button size="small" type="primary" ghost :loading="syncing"
+                        :disabled="!!diag && !diag.can" @click="syncLogin(false)">同步登录状态</n-button>
+              <n-button v-if="diag && !diag.can && diag.browser && diag.browser.running"
+                        size="small" type="warning" ghost @click="askCloseAndSync">关闭它并同步</n-button>
+            </n-space>
+            <n-alert v-if="diag" :type="diag.can ? 'success' : 'warning'" :show-icon="false"
+                     class="diagbox">
+              <b>{{ diag.can ? '现在可以同步' : '现在同步会失败' }}</b>
+              <template v-if="diag.why">：{{ diag.why }}</template>
+              <div v-if="diag.next" style="margin-top: 2px">→ {{ diag.next }}</div>
+              <div class="dim" style="margin-top: 4px">
+                读取对象：{{ (diag.browser && diag.browser.name) || '（还没选浏览器程序）' }}
+                <template v-if="diag.browser && diag.browser.profile">
+                  ｜配置 {{ diag.browser.profile }}
+                </template>
+                <template v-if="diag.browser && diag.browser.running">
+                  ｜<b>正在运行</b>
+                </template>
+              </div>
+              <div v-for="(s, i) in (diag.steps || [])" :key="i" class="dim" style="margin-top: 2px">· {{ s }}</div>
+            </n-alert>
+            <span class="dim" style="display: block; margin-top: 6px">
               （内置浏览器是<strong>可选</strong>的：用上面的「⬇ 用我自己的浏览器下载」完全不需要它 ——
               你自己的浏览器已经登录，NSFW 也能下。只有想让它自动点「解析链接」时才需要在这里登录）
             </span>
-          </n-space>
+          </div>
 
           <n-collapse>
             <n-collapse-item title="不想开内置浏览器？用你自己的浏览器读取（拖一个书签到书签栏）">
@@ -720,5 +767,12 @@ const pendColumns = [
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+.diagbox {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.diagbox :deep(.n-alert-body) {
+  padding: 6px 10px;
 }
 </style>
