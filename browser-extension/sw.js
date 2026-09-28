@@ -180,6 +180,8 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         let state = null;
         try { state = await api('/api/state'); } catch (e) { }
         reply({ ok: true, cats: cats.cats || [], state: state, base: await findBase() });
+      } else if (msg.type === 'suggest') {
+        reply({ ok: true, r: await jpost('/api/suggest/category', msg.info || {}) });
       } else if (msg.type === 'push') {
         reply({ ok: true, r: await jpost('/api/inbox/page', msg.page) });
       } else if (msg.type === 'enqueue') {

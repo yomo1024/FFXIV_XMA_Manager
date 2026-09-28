@@ -2468,6 +2468,102 @@ def _cat_disk_scan(root: Path) -> dict:
     return out
 
 
+def suggest_category(author="", tags=None, name="", zone="", exclude="") -> dict:
+    """按「作者 + 标签」从库里已有记录**推荐**分类/类型/子分类（可解释 + 给置信度）。
+
+    数据依据（主人库实测 2026-09）：同一作者的「分类+类型」5/5 完全一致；
+    高频标签里 77% 纯度 ≥80%（tattoo/skin → 皮肤 12/12；yab/lavabod/neobelly → 衣服）。
+
+    只**建议**、不替主人决定：前端预选，主人一改就不覆盖。
+    `zone` 给了就优先只在那个类型里找（页面已经能判出 SFW/NSFW，别给出自相矛盾的组合）。
+    `exclude` = 排除某个 mod 文件夹自己（复核「这条该归哪类」时避免自我投票）。
+    """
+    a = (author or "").strip().lower()
+    want = {str(x).strip().lower() for x in (tags or []) if str(x).strip()}
+    z = (zone or "").strip().upper()
+    out = {"ok": True, "category": "", "zone": z, "subcat": "", "confidence": 0.0,
+           "why": "库里还没有可参考的记录", "source": "none"}
+    st = mm.Store()
+    try:
+        mods = st.all()
+        tmap = st.tags_map()
+    finally:
+        st.cx.close()
+    ex = str(exclude or "")
+    if ex:
+        mods = [m for m in mods if str(m.get("folder") or "") != ex]
+    pool = [m for m in mods if (m.get("nsfw") or "").upper() == z] if z else list(mods)
+    narrowed = bool(pool)
+    if not pool:
+        pool = list(mods)                      # 该类型下还没记录 → 退回全部参考
+
+    def tally(rows):
+        votes, subs_v, a_hit, tag_hit, tset = {}, {}, 0, 0, set()
+        for m in rows:
+            cat = str(m.get("category") or "")
+            if not cat:
+                continue
+            k = (cat, str(m.get("nsfw") or "").upper())
+            w = 0
+            if a and (m.get("author") or "").strip().lower() == a:
+                w += 3                         # 作者权重高（实测 100% 一致）
+                a_hit += 1
+            if want:
+                common = want & {str(x).strip().lower() for x in (tmap.get(m["folder"]) or [])}
+                if common:
+                    w += len(common)
+                    tag_hit += len(common)
+                    tset |= common
+            if not w:
+                continue
+            votes[k] = votes.get(k, 0) + w
+            if m.get("subcat"):
+                sk = k + (str(m["subcat"]),)
+                subs_v[sk] = subs_v.get(sk, 0) + w
+        return votes, subs_v, a_hit, tag_hit, tset
+
+    votes, subs_v, a_hits, tag_hits, hit_tags = tally(pool)
+    if not votes and narrowed and len(pool) != len(mods):
+        # 该类型下没命中 → 退回全部参考（作者历史都在另一个类型时也能给出类别）
+        votes, subs_v, a_hits, tag_hits, hit_tags = tally(mods)
+        if votes:
+            # 明确告诉调用方：这次的「类型」是从别的类型参考来的，别拿它当准的
+            out["zone_fallback"] = True
+    if not votes:
+        return out
+
+    best, score = max(votes.items(), key=lambda kv: kv[1])
+    out.update(category=best[0], zone=best[1] or z,
+               confidence=round(score / (sum(votes.values()) or 1), 2),
+               source=("author" if a_hits else "tag"))
+    cand = [(k, v) for k, v in subs_v.items() if k[:2] == best]
+    if cand:
+        out["subcat"] = max(cand, key=lambda kv: kv[1])[0][2]
+
+    bits = []
+    if a_hits:
+        bits.append("作者「%s」在库里的 %d 条都归「%s」" % (author, a_hits, best[0]))
+    if hit_tags:
+        bits.append("标签 %s 的历史也指向这里" % "、".join(sorted(hit_tags)[:3]))
+    if out.get("zone_fallback"):
+        bits.append("（%s 类型下没记录，参考了其它类型）" % z)
+    elif z and not narrowed:
+        bits.append("（%s 类型下还没有记录，参考了全部）" % z)
+    out["why"] = "；".join(bits) or "按库里最接近的记录推荐"
+    return out
+
+
+def api_suggest_category(b):
+    """给前端/拓展用：POST /api/suggest/category {author, tags, name, zone}"""
+    b = b or {}
+    tags = b.get("tags") or []
+    if isinstance(tags, str):
+        tags = [x for x in re.split(r"[,\s]+", tags) if x]
+    return suggest_category(author=b.get("author") or "", tags=tags,
+                            name=b.get("name") or "", zone=b.get("zone") or "",
+                            exclude=b.get("exclude") or "")
+
+
 def api_categories():
     cfg = cfg_now()
     root = Path(cfg["root"] or "")
@@ -4032,6 +4128,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/backup/delete":
                 r = api_backup_delete(body)
                 return self._json(r, 400 if r.get("error") else 200)
+            if u.path == "/api/suggest/category":
+                return self._json(api_suggest_category(body))
             if u.path == "/api/mod/add":
                 return self.mod_add(body)
             if u.path == "/api/mod/edit":

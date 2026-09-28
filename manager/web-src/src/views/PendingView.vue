@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, inject, onMounted } from 'vue'
+import { ref, computed, inject, onMounted, watch } from 'vue'
 import {
   NButton, NDataTable, NCard, NSpace, NAlert, NSpin, NEmpty, NSelect, NSwitch,
   NInput, useMessage,
@@ -34,6 +34,20 @@ async function load() {
 }
 bus.refresh = load
 onMounted(load)
+
+// ---- 分类智能预选：勾中文件后，用它推测的作者去库里找历史归类（主人一改就不覆盖）----
+const catTouched = ref(false)
+const sugInfo = ref(null)
+watch(checked, async (v) => {
+  const first = (items.value || []).find((x) => x.src === (v || [])[0])
+  if (!first || catTouched.value) return
+  try {
+    // 不传 zone：文件名判不出 SFW/NSFW，传默认值反而逼出「类型回退」的错误提示
+    const r = await api.suggestCategory({ author: first.author || '', tags: [] })
+    if (r && r.ok && r.category) { target.value.category = r.category; sugInfo.value = r }
+    else sugInfo.value = null
+  } catch (e) { sugInfo.value = null }
+})
 
 const catOptions = computed(() => cats.value.map((c) => ({ label: `${c.name}（${c.count}）`, value: c.name })))
 const allFiles = computed(() => items.value.map((i) => i.src))
@@ -79,7 +93,8 @@ const columns = [
         <template v-else>
           <n-space align="center" style="margin-bottom: 10px" :wrap="true">
             <n-select v-model:value="target.category" :options="catOptions" size="small"
-                      placeholder="导入到哪个分类" style="width: 200px" />
+                      placeholder="导入到哪个分类" style="width: 200px"
+                      @update:value="catTouched = true; sugInfo = null" />
             <n-select v-model:value="target.zone" size="small" style="width: 110px"
                       :options="[{ label: 'SFW', value: 'SFW' }, { label: 'NSFW', value: 'NSFW' }]" />
             <n-input v-model:value="target.subcat" size="small" placeholder="子分类（可空）"
@@ -93,6 +108,9 @@ const columns = [
               导入选中（{{ checked.length }}）
             </n-button>
           </n-space>
+          <div v-if="sugInfo" class="dim" style="font-size: 12px; margin: 4px 0 8px">
+            ◆ 按库里历史预选「{{ sugInfo.category }}」：{{ sugInfo.why }} —— 可以直接改
+          </div>
           <n-data-table :columns="columns" :data="items" size="small" :scroll-x="1000"
                         :row-key="(r) => r.src" :checked-row-keys="checked"
                         @update:checked-row-keys="(k) => (checked = k)" :max-height="420" />

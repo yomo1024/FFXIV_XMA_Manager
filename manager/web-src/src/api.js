@@ -39,6 +39,8 @@ export const api = {
     { method: 'POST', body: JSON.stringify({ folders, fields }) }),
   deleteMod: (body) => req('/api/mod/delete', { method: 'POST', body: JSON.stringify(body) }),
   fixCover: (body) => req('/api/mod/fix-cover', { method: 'POST', body: JSON.stringify(body) }),
+  // 按「作者 + 标签」从库里历史推荐 分类/类型（只建议，前端预选；主人一改就不覆盖）
+  suggestCategory: (body) => req('/api/suggest/category', { method: 'POST', body: JSON.stringify(body || {}) }),
 
   // ---- 游戏内插件（Mod Bridge）：送到游戏里等确认 / 直接装 / 查待确认 ----
   bridgeStatus: () => req('/api/bridge'),

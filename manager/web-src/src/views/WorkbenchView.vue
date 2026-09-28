@@ -210,6 +210,28 @@ async function load() {
     busy.value = false
   }
 }
+// ---- 分类/类型智能预选：按「作者 + 标签」问管理器（库里历史；留一法实测 分类+类型 93% 准）----
+// 主人一改过就不再覆盖（catTouched / zoneTouched），它只负责「打开就是对的」默认值。
+const catTouched = ref(false)
+const zoneTouched = ref(false)
+const sugInfo = ref(null)
+async function applySuggest(author, tags, zone) {
+  if (catTouched.value) return false
+  try {
+    const r = await api.suggestCategory({ author: author || '', tags: tags || [], zone: zone || '' })
+    if (r && r.ok && r.category) {
+      form.value.category = r.category
+      // 类型来自「回退参考」时不采用（那是别的类型的记录，不可信；分类本身仍然可用）
+      if (r.zone && !r.zone_fallback && !zoneTouched.value) form.value.zone = r.zone
+      if (r.subcat && !form.value.subcat) form.value.subcat = r.subcat
+      sugInfo.value = r
+      return true
+    }
+  } catch (e) { /* 推荐失败不影响主流程 */ }
+  sugInfo.value = null
+  return false
+}
+
 bus.refresh = load
 onMounted(async () => {
   await load()
@@ -259,8 +281,9 @@ async function parse() {
         parseWarn.value = ''
         msg.success('解析成功：' + (r.page.name || r.page.title || ''))
       }
-      // 分类/类型留空时给个默认
-      if (!form.value.category && cats.value.length) form.value.category = cats.value[0].name
+      // 分类/类型：先按「作者 + 标签」智能预选；拿不到推荐才退回「第一个分类」的老行为
+      const sug = await applySuggest(r.page.author, r.page.tags, '')
+      if (!sug && !form.value.category && cats.value.length) form.value.category = cats.value[0].name
     }
   } catch (e) {
     parseErr.value = e.message
@@ -508,8 +531,10 @@ const pendColumns = [
 
             <div class="formrow">
               <n-select v-model:value="form.category" :options="catOptions" size="small"
-                        placeholder="导入到哪个分类" style="width: 180px" />
+                        placeholder="导入到哪个分类" style="width: 180px"
+                        @update:value="catTouched = true; sugInfo = null" />
               <n-select v-model:value="form.zone" size="small" style="width: 100px"
+                        @update:value="zoneTouched = true"
                         :options="[{ label: 'SFW', value: 'SFW' }, { label: 'NSFW', value: 'NSFW' }]" />
               <n-input v-model:value="form.subcat" size="small" placeholder="子分类（可空）"
                        style="width: 130px" />
@@ -526,6 +551,11 @@ const pendColumns = [
                        style="width: 420px" />
               <n-button v-if="form.affectsFromPage" size="tiny" quaternary
                         @click="form.affects = form.affectsFromPage">用页面读到的值</n-button>
+            </div>
+
+            <div v-if="sugInfo" class="dim" style="font-size: 12px; margin: 2px 0 6px">
+              ◆ 已按库里历史预选「{{ sugInfo.category }} / {{ sugInfo.zone }}」（把握
+              {{ Math.round((sugInfo.confidence || 0) * 100) }}%）：{{ sugInfo.why }} —— 可以直接改
             </div>
 
             <n-space align="center">

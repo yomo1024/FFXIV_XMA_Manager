@@ -63,7 +63,8 @@
 
   /* ---------------- 面板 ---------------- */
   const STATE_TXT = { queued: '排队中', downloading: '下载中', importing: '入库中', done: '已完成', error: '失败' };
-  let CATS = [], tagsTouched = false, affTouched = false, zoneTouched = false, timerQ = null;
+  let CATS = [], tagsTouched = false, affTouched = false, zoneTouched = false,
+    catTouched = false, sugFor = '', sugNote = '', timerQ = null;
   let fillSub = () => {};
 
   function panel() {
@@ -154,11 +155,29 @@
           ? ('候选（按类型过滤）：' + cands.map((c) => c.name + (c.zone ? '(' + c.zone + ')' : '(分类根下)')).join('、'))
           : '这个分类还没有子分类目录';
       };
-      cat.addEventListener('change', fillSub);
+      cat.addEventListener('change', () => { catTouched = true; sugNote = ''; fillSub(); refresh(); });
       fillSub();
       setSt('管理器已连接（端口 ' + (o.base || '').split(':').pop() + '）');
       refresh(); renderQueue();
     })();
+
+    // 「分类」智能预选：按页面上的 作者 + 标签 问管理器（库里历史；留一法实测 分类+类型 93% 准）。
+    // 主人一改过（catTouched）就再不动它；只在管理器确实有这个分类时才设。
+    async function applySuggest(info) {
+      const sel = $('#ffmm-cat');
+      try {
+        const r = await send({ type: 'suggest',
+          info: { author: info.author || '', tags: info.tags || [], zone: info.nsfw ? 'NSFW' : 'SFW' } });
+        const res = (r && r.r) || {};
+        const has = [].slice.call(sel.options).some((o) => o.value === res.category);
+        if (!catTouched && res.ok && res.category && has) {
+          sel.value = res.category;
+          fillSub();
+          sugNote = ' ｜ ◆ 已按库里历史预选「' + res.category + '」（' + (res.why || '') + '）—— 不对就直接改';
+          refresh();                 // 重画一次，让提示落到 tagsrc（refresh 自己会带上 sugNote）
+        }
+      } catch (e) { /* 预选失败不影响主流程 */ }
+    }
 
     function refresh() {
       const info = readPage();
@@ -168,9 +187,11 @@
       if (!zoneTouched) $('#ffmm-zone').value = info.nsfw ? 'NSFW' : 'SFW';
       if (!tagsTouched) $('#ffmm-tags').value = (info.tags || []).join(', ');
       if (!affTouched) $('#ffmm-aff').value = info.affects || '';
-      $('.mm-tagsrc').textContent = (info.tags && info.tags.length)
+      // 每个页面只问一次（refresh 是定时跑的）
+      if (!catTouched && info.url && info.url !== sugFor) { sugFor = info.url; applySuggest(info); }
+      $('.mm-tagsrc').textContent = ((info.tags && info.tags.length)
         ? ('站点标签 ' + info.tags.length + ' 个（已自动填入，可修改）')
-        : '这个页面没读到标签（可能要登录）';
+        : '这个页面没读到标签（可能要登录）') + sugNote;
       $('#ffmm-dl').disabled = !info.dl;
       return info;
     }
