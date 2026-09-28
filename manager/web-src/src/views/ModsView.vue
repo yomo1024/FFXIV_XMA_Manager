@@ -387,8 +387,11 @@ async function claimPick() {
   try {
     const r = await api.cloudClaim(items)
     if (r.error) throw new Error(r.error)
-    msg.success(`已认领 ${r.count} 条进索引库（只写索引，没下载任何文件）` +
-      ((r.failed || []).length ? `；${r.failed.length} 条没认成（看日志）` : ''), { duration: 12000 })
+    const notes = (r.ok || []).flatMap((x) => x.notes || [])
+    msg.success(`已认领 ${r.count} 条进索引库` +
+      ((r.ok || []).some((x) => x.meta) ? '（含标签/地址/封面）' : '（只写了索引行）') +
+      ((r.failed || []).length ? `；${r.failed.length} 条没认成（看日志）` : '') +
+      (notes.length ? `；${notes.length} 条有提示：${notes[0]}` : ''), { duration: 15000 })
     emit('changed')
     await scanCloud()
   } catch (e) {
@@ -396,6 +399,31 @@ async function claimPick() {
   } finally {
     discBusy.value = false
   }
+}
+
+// 把「索引 / 元数据」同步到网盘（本地也写一份）——换机/丢库时靠它恢复标签、地址、站点信息
+const idxBusy = ref(false)
+function askIndexSync() {
+  dialog.warning({
+    title: '把索引同步到网盘？',
+    content: '会给每条 Mod 的云端目录写一份 `_modmanager.json`（分类/类型/标签/地址/站点信息），' +
+      '并在云端根写一份全库索引 `_modmanager_index.json`；**本地也写一份**（放在 Mod 根目录旁边，跟汇总表同一处）。\n\n' +
+      '云端目录里本来就有载荷、封面、地址.txt。写的都是小文件，不动你的载荷；' +
+      '有了它，别的机器/换电脑时「扫描网盘新内容」才能把**标签、地址、封面**一起认领回来。',
+    positiveText: '开始同步',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      idxBusy.value = true
+      try {
+        await startJob('cloud_index_sync', {})
+        msg.info('开始同步索引到网盘…（每条一份小文件，跑完看任务条）', { duration: 12000 })
+      } catch (e) {
+        msg.error('启动失败：' + e.message)
+      } finally {
+        setTimeout(() => { idxBusy.value = false }, 5000)
+      }
+    },
+  })
 }
 
 // 冲突：以云端为准（取回覆盖本地）/ 用本地覆盖云端（重新上传）
@@ -1366,6 +1394,7 @@ async function copyPath() {
         <n-button size="small" :loading="cloudBusy" @click="restoreCloud()">从云盘取回</n-button>
         <n-button size="small" :loading="cloudBusy" @click="askReconcile()">与网盘对账</n-button>
         <n-button size="small" :loading="discBusy && discOpen" @click="scanCloud">扫描网盘新内容</n-button>
+        <n-button size="small" :loading="idxBusy" @click="askIndexSync">同步索引到网盘</n-button>
         <template v-if="updCount">
           <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
                     @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>
@@ -1988,8 +2017,10 @@ async function copyPath() {
     <n-modal v-model:show="discOpen" preset="card" style="width: 980px" title="扫描网盘新内容">
       <n-spin :show="discBusy">
         <div class="dim" style="margin-bottom: 10px">
-          索引只存在本地（网盘里<b>不放</b>索引），所以网盘上多出来的 Mod 管理器不知道 ——
-          这一页把网盘扫一遍给你看。认领**只写索引、不下载任何文件**，之后点「安装到游戏」时会自动从云端取回。
+          网盘上多出来的 Mod 管理器不知道 —— 这一页把网盘扫一遍给你看。
+          认领会**读云端那份元数据**（分类/标签/地址），并把**封面图和地址.txt 取回本地**；
+          载荷不下载，点「安装到游戏」时才自动从云端取回。<br />
+          如果云端还没有元数据（没跑过「同步索引到网盘」），认领只能按路径还原分类和名字。
         </div>
         <n-tabs v-model:value="discTab" type="line" size="small">
           <n-tab-pane name="new"

@@ -131,7 +131,8 @@ const cloudText = computed(() => {
   if ((r.sample || []).length) {
     lines.push('样例：' + r.sample.map((x) => x.name + (x.dir ? '/' : '')).join('、'))
   }
-  if (r.download_test) lines.push('取直链测试：' + r.download_test)
+  if (r.download_test) lines.push('下载测试：' + r.download_test)
+  if (r.download_ok === false) lines.push('⚠ ' + (r.download_hint || '下载被拒：Cookie 的下载权限可能过期了'))
   return lines.join('\n')
 })
 

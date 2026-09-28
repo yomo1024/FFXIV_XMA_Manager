@@ -2559,6 +2559,97 @@ def fit_size(w, h, box_w, box_h):
 
 
 # --------------------------------------------------------------------- export
+INDEX_JSON_NAME = "_modmanager_index.json"      # 全库索引（云端根 + 本地 Mod 根旁边各一份）
+MOD_META_NAME = "_modmanager.json"             # 单条 mod 的元数据（放在云端该 mod 目录里）
+
+
+def meta_row(m: dict, cfg: dict, tags=None) -> dict:
+    """一条 mod 的元数据（索引 json 与云端 `_modmanager.json` **共用这一份字段映射**，别写两遍）。
+
+    路径存**相对路径**：换机后 Mod 根不同也能恢复。
+    """
+    root = Path(str(cfg.get("root") or ""))
+    try:
+        rel = os.path.relpath(str(m["folder"]), str(root))
+    except Exception:
+        rel = ""
+    return {
+        "rel": rel.replace("\\", "/"),
+        "category": m.get("category") or "", "subcat": m.get("subcat") or "",
+        "nsfw": m.get("nsfw") or "", "seq": m.get("seq") or 0,
+        "author": m.get("author") or "", "name": m.get("name") or "",
+        "addr": m.get("addr") or "", "addr_source": m.get("addr_source") or "",
+        "affects": m.get("affects") or "",
+        "img": Path(m["img"]).name if m.get("img") else "",
+        "tags": list(tags or []),
+        "site_updated": m.get("site_updated") or "",
+        "site_latest": m.get("site_latest") or "",
+        "site_version": m.get("site_version") or "",
+        "site_checked": m.get("site_checked") or "",
+        "cloud_state": m.get("cloud_state") or "",
+        "cloud_path": m.get("cloud_path") or "",
+        "cloud_size": m.get("cloud_size") or 0,
+        "installed_dir": m.get("installed_dir") or "",
+        "exported": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def index_rows(cfg) -> list:
+    """导出用的全库清单（云端根 + 本地根旁边各存一份）。
+
+    为什么要有它：索引库只在本地（SQLite），一旦换电脑/丢库，云端虽然载荷和封面都在，
+    但**标签、影响替换、站点信息、分类**这些管理数据就没了 —— 所以索引也要存一份到云端（本地同留一份）。
+    """
+    st = Store()
+    mods = st.all()
+    tags = st.tags_map()
+    st.cx.close()
+    return [meta_row(m, cfg, tags.get(m["folder"], [])) for m in mods]
+
+
+def index_row(cfg, folder) -> dict:
+    """单条（云端 `_modmanager.json` 用）；找不到返回 {}"""
+    st = Store()
+    hit = None
+    for m in st.all():
+        if str(m["folder"]) == str(folder):
+            hit = m
+            break
+    tags = (st.tags_map() or {}).get(str(folder), []) if hit else []
+    st.cx.close()
+    return meta_row(hit, cfg, tags) if hit else {}
+
+
+def write_index_json(cfg, path=None) -> Path:
+    """把全库清单写成 json（**本地那份**）。默认放在 Mod 根目录旁边（跟汇总表同一处）。"""
+    if path is None:
+        root = Path(str(cfg.get("root") or "."))
+        path = root.parent / INDEX_JSON_NAME
+    path = Path(path)
+    rows = index_rows(cfg)
+    try:
+        from app_version import APP_VERSION as _AV      # 跟其它模块同一个版本来源
+    except Exception:
+        _AV = ""
+    data = {"app": "FFXIV Mod Manager", "version": _AV,
+            "exported": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "root_name": Path(str(cfg.get("root") or "")).name,
+            "count": len(rows), "mods": rows}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    log("已写出索引副本：%s（%d 条）" % (path, len(rows)))
+    return path
+
+
+def read_index_json(path) -> dict:
+    """读索引副本（本地或从云端下载下来的那份）"""
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8", errors="ignore") or "{}")
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
 def write_excel(mods: list, cfg: dict, out_path: Path, use_store_hash=None, progress=None):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, Side

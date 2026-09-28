@@ -479,8 +479,38 @@ class QuarkDrive:
                                 break
                 if cand:
                     u = self.download_url(cand.get("fid"))
-                    out["download_test"] = "%s → %s" % (
-                        cand.get("file_name"), ("取到直链（%d 字符）" % len(u)) if u else "直链为空")
+                    if u:
+                        # ★ 只看"取到直链"是不够的：夸克 Cookie 的**下载授权**会单独过期，
+                        #   这时列目录/上传/对账全都正常，只有真下才 403（实测踩到）→ 这里真读一段。
+                        import urllib.request as _ur
+                        try:
+                            _req = _ur.Request(u, headers={
+                                "user-agent": CLIENT_UA, "cookie": self.cookie,
+                                "referer": "https://pan.quark.cn/"})
+                            with _ur.urlopen(_req, timeout=60) as _r:
+                                _got = _r.read(1 << 16)
+                            out["download_ok"] = True
+                            out["download_test"] = ("%s → 取到直链并**实下 %d 字节 OK**"
+                                                    % (cand.get("file_name"), len(_got)))
+                        except Exception as _e:
+                            _body = ""
+                            try:
+                                if hasattr(_e, "read"):
+                                    _body = (_e.read() or b"").decode("utf-8", "ignore")
+                            except Exception:
+                                pass
+                            out["download_ok"] = False
+                            out["download_test"] = ("%s → 取到直链，但**实际下载被拒**：%s %s"
+                                                    % (cand.get("file_name"), type(_e).__name__,
+                                                       " ".join(_body.split())[:140]))
+                            out["download_hint"] = (
+                                "云盘的**下载**权限被拒（列目录、上传、对账可能都还正常）。"
+                                "去设置里把夸克 Cookie **重新粘一次**（浏览器登录 pan.quark.cn 后复制整条 Cookie）——"
+                                "否则「从云盘取回」和「装进游戏时自动取回」都会失败，"
+                                "认领时也读不到云端的元数据/封面。")
+                    else:
+                        out["download_test"] = "%s → 直链为空" % cand.get("file_name")
+                        out["download_hint"] = "取不到下载直链：Cookie 可能已失效，重新粘一次试试。"
             else:
                 top = [it.get("file_name") for it in self.list_dir("0") if it.get("dir")]
                 out["root_ok"] = False

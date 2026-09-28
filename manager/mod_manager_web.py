@@ -26,6 +26,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -280,6 +281,7 @@ JOB_TITLES = {"cover_inject": "封面插包", "scan": "扫描目录", "export": 
               "update_check": "检查更新", "mod_update": "更新 Mod（覆盖下载）",
               "cloud_archive": "归档到云盘", "cloud_restore": "从云盘取回",
              "cloud_discover": "扫描网盘新内容", "cloud_claim": "认领到库",
+             "cloud_index_sync": "同步索引到网盘",
               "cloud_verify": "校验云端文件",
               "cloud_reconcile": "与网盘对账（重建归档状态）"}
 
@@ -1614,6 +1616,80 @@ def _job_cloud_reconcile(job: Job):
             "total_covers": sum(x.get("covers") or 0 for x in found)}
 
 
+def _cloud_put_json(drv, parent_fid, name, obj) -> bool:
+    """把一个小 json 传到云端指定目录（同名先删，保证一物一件）。失败返回 False。"""
+    try:
+        old = drv.find_child(parent_fid, name)
+        if old:
+            try:
+                drv.delete([old.get("fid")])
+            except Exception:
+                mm.log(traceback.format_exc())
+        tmp = Path(tempfile.gettempdir()) / ("mmjson_%d_%s" % (int(time.time() * 1000) % 100000, name))
+        tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+        try:
+            drv.upload_file(str(tmp), parent_fid, name=name)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        return True
+    except Exception:
+        mm.log("上传 %s 失败：\n%s" % (name, traceback.format_exc()))
+        return False
+
+
+def _cloud_meta_upload(drv, cfg, folder) -> bool:
+    """把这条 mod 的元数据（分类/标签/地址/站点信息…）写到它**云端目录**里的 `_modmanager.json`。
+
+    为什么：认领/换机时只靠「路径 + 文件夹名」只能还原分类和名字，**标签、影响替换、站点信息全丢**。
+    """
+    obj = mm.index_row(cfg, folder)
+    if not obj:
+        return False
+    fid = drv.ensure_dir(mod_cloud_path(cfg, folder))
+    return _cloud_put_json(drv, fid, mm.MOD_META_NAME, obj)
+
+
+def _job_cloud_index_sync(job: Job):
+    """把「索引 / 元数据」同步到网盘（**本地也写一份**）。
+
+    · 每条 mod：云端目录里写 `_modmanager.json`（完整元数据，含标签）
+    · 云端根 + 本地 Mod 根旁边：写 `_modmanager_index.json`（全库清单，换机/丢库时靠它恢复管理数据）
+    封面图和 地址.txt 本来就在云端目录里（归档时传的），这里不用重传。
+    """
+    cfg = cfg_now()
+    drv = cloud_drive(cfg)
+    rows = mm.index_rows(cfg)
+    total = max(1, len(rows) + 1)
+    job.set(0, total, "写本地索引副本…")
+    local_path = str(mm.write_index_json(cfg))
+    n_meta, fails = 0, []
+    for i, r in enumerate(rows, 1):
+        if job.cancelled():
+            raise mm.BackupCancelled()
+        job.set(i - 1, total, "上传元数据 %s" % str(r.get("name") or r.get("rel"))[:30])
+        folder = str(Path(cfg.get("root") or "") / str(r["rel"]).replace("/", os.sep))
+        try:
+            if _cloud_meta_upload(drv, cfg, folder):
+                n_meta += 1
+            else:
+                fails.append({"name": r.get("name") or r["rel"], "why": "本地索引里找不到这条"})
+        except Exception as e:
+            fails.append({"name": r.get("name") or r["rel"], "why": str(e)[:120]})
+    job.set(len(rows), total, "上传全库索引…")
+    base_fid = drv.ensure_dir(_cloud_base(cfg))
+    obj = {"app": "FFXIV Mod Manager", "version": MANAGER_VERSION,
+           "exported": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "count": len(rows), "mods": rows}
+    ok_idx = _cloud_put_json(drv, base_fid, mm.INDEX_JSON_NAME, obj)
+    mm.log("同步索引到网盘：元数据 %d/%d 条、全库索引 %s、本地副本 %s"
+           % (n_meta, len(rows), "已上传" if ok_idx else "**上传失败**", local_path))
+    return {"meta": n_meta, "mods": len(rows), "index_cloud": bool(ok_idx),
+            "local": local_path, "failed": fails[:20], "failed_n": len(fails)}
+
+
 def _cloud_base(cfg) -> str:
     return "/" + str(cfg.get("cloud_root") or "/FFXIV/MOD").strip("/")
 
@@ -1715,10 +1791,13 @@ def _parse_mod_folder_name(name):
 
 
 def api_cloud_claim(body):
-    """把「云端有、库里没有」的 Mod **认领到索引库**（只写索引 + 云端载荷清单，不下载任何文件）。
+    """把「云端有、库里没有」的 Mod **认领到索引库**。
 
-    认领后：列表里能看到它、能「检查更新」、点「安装到游戏」时会自动从云端取回。
-    本地不会多出文件 —— 载荷仍然只在云端。
+    · 优先读云端该目录里的 `_modmanager.json`（完整元数据：分类/标签/地址/站点信息）——
+      有它才能把标签、影响替换这些**路径里没有的东西**一起恢复；
+    · 没有元数据就退回「按路径 + 文件夹名解析」（分类/类型/序号/作者/名称仍然能还原）；
+    · 顺手把**封面图**和 **地址.txt** 取回本地 mod 文件夹（这样列表里就有图、也能「检查更新」）。
+    载荷**不下载** —— 仍然只在云端，点「安装到游戏」时才会自动取回。
     """
     cfg = cfg_now()
     if not (cfg.get("cloud_cookie") or "").strip():
@@ -1757,13 +1836,76 @@ def api_cloud_claim(body):
             bad.append({"rel": rel, "why": "云端这个目录里没有载荷文件"})
             continue
         size = sum(x[1] for x in pays)
+        # ★ 优先用云端元数据恢复（标签/影响替换/地址/站点信息只有它才有）
+        meta, meta_src, notes = {}, "", []
+        mf = [x for x in allf if os.path.basename(x[0]) == mm.MOD_META_NAME]
+        if mf:
+            try:
+                raw_j = _cloud_download(drv, cfg, mf[0][2])
+                meta = json.loads((raw_j or b"").decode("utf-8", "ignore") or "{}")
+                if isinstance(meta, dict) and meta:
+                    meta_src = "云端元数据"
+                else:
+                    meta = {}
+            except Exception as e:
+                mm.log(traceback.format_exc())
+                meta = {}
+                notes.append("云端元数据取不下来（%s）——标签/地址只能按路径猜" % str(e)[:60])
+        if meta:
+            category = str(meta.get("category") or category)
+            subcat = str(meta.get("subcat") or subcat)
+            zone = str(meta.get("nsfw") or zone)
+            seq = int(meta.get("seq") or seq or 0)
+            author = str(meta.get("author") or author)
+            name = str(meta.get("name") or name)
+        # 封面 / 地址.txt 取回本地（拿不到也不影响认领）
+        got_img, got_addr = "", ""
+        try:
+            want = str(meta.get("img") or "")
+            cand_img = [x for x in allf if os.path.basename(x[0]) == want] if want else []
+            if not cand_img:
+                cand_img = [x for x in allf if os.path.splitext(x[0])[1].lower() in COVER_EXT]
+            if cand_img:
+                Path(folder).mkdir(parents=True, exist_ok=True)
+                tgt = Path(folder) / os.path.basename(cand_img[0][0])
+                tgt.write_bytes(_cloud_download(drv, cfg, cand_img[0][2]) or b"")
+                got_img = tgt.name if tgt.is_file() and tgt.stat().st_size else ""
+            aa = [x for x in allf if os.path.basename(x[0]) == mm.ADDR_NAME]
+            if aa:
+                Path(folder).mkdir(parents=True, exist_ok=True)
+                (Path(folder) / mm.ADDR_NAME).write_bytes(_cloud_download(drv, cfg, aa[0][2]) or b"")
+                got_addr = mm.ADDR_NAME
+        except Exception as e:
+            mm.log(traceback.format_exc())
+            notes.append("封面/地址取不下来（%s）" % str(e)[:60])
         st.cx.execute(
-            "INSERT INTO mods (folder,category,seq,author,nsfw,subcat,name,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder) DO UPDATE SET "
+            "INSERT INTO mods (folder,category,seq,author,nsfw,subcat,name,addr,addr_source,"
+            "  img,img_source,affects,updated_at,site_updated,site_latest,site_version,site_checked) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(folder) DO UPDATE SET "
             "category=excluded.category, seq=excluded.seq, author=excluded.author, "
-            "nsfw=excluded.nsfw, subcat=excluded.subcat, name=excluded.name",
-            (folder, category, seq, author, zone, subcat, name, now))
+            "nsfw=excluded.nsfw, subcat=excluded.subcat, name=excluded.name, "
+            "addr=COALESCE(NULLIF(excluded.addr,''),mods.addr), "
+            "addr_source=COALESCE(NULLIF(excluded.addr_source,''),mods.addr_source), "
+            "img=COALESCE(NULLIF(excluded.img,''),mods.img), "
+            "img_source=COALESCE(NULLIF(excluded.img_source,''),mods.img_source), "
+            "affects=COALESCE(NULLIF(excluded.affects,''),mods.affects), "
+            "site_updated=COALESCE(NULLIF(excluded.site_updated,''),mods.site_updated), "
+            "site_latest=COALESCE(NULLIF(excluded.site_latest,''),mods.site_latest), "
+            "site_version=COALESCE(NULLIF(excluded.site_version,''),mods.site_version), "
+            "site_checked=COALESCE(NULLIF(excluded.site_checked,''),mods.site_checked)",
+            (folder, category, seq, author, zone, subcat, name,
+             str(meta.get("addr") or ""), str(meta.get("addr_source") or ("地址.txt" if got_addr else "")),
+             str(Path(folder) / got_img) if got_img else "", "云端" if got_img else "",
+             str(meta.get("affects") or ""), now,
+             str(meta.get("site_updated") or ""), str(meta.get("site_latest") or ""),
+             str(meta.get("site_version") or ""), str(meta.get("site_checked") or "")))
         st.cx.commit()
+        tags = meta.get("tags") or []
+        if tags:
+            try:
+                st.set_tags(folder, tags)
+            except Exception:
+                mm.log(traceback.format_exc())
         st.set_cloud(folder, backend="quark", path=base + "/" + rel, state="archived",
                      size=size, synced=now)
         st.set_payload_files(folder, [{"rel_path": x[0], "size": x[1], "cloud_fid": x[2]}
@@ -1772,9 +1914,15 @@ def api_cloud_claim(body):
             st.set_payload_files(folder, [{"rel_path": x[0], "size": x[1], "cloud_fid": x[2]}
                                           for x in covs], state="cover")
         ok.append({"rel": rel, "folder": folder, "name": name, "files": len(pays),
-                   "size": size, "covers": len(covs)})
-        mm.log("认领云端 Mod：%s → %s（%d 个载荷 / %.1f MB）"
-               % (rel, name, len(pays), size / 1048576.0))
+                   "size": size, "covers": len(covs),
+                   "category": category, "nsfw": zone, "subcat": subcat,
+                   "meta": meta_src, "tags": len(tags), "img": got_img, "addr": got_addr,
+                   "notes": notes})
+        mm.log("认领云端 Mod：%s → %s（%d 个载荷 / %.1f MB%s%s%s）"
+               % (rel, name, len(pays), size / 1048576.0,
+                  "，用" + meta_src if meta_src else "，无元数据（按路径解析）",
+                  "，标签 %d 个" % len(tags) if tags else "",
+                  "，已取回封面" if got_img else ""))
     st.cx.close()
     mod_index(force=True)
     return {"ok": ok, "failed": bad, "count": len(ok)}
@@ -1883,6 +2031,11 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
             else:
                 # 封面没传上去不该卡住归档（载荷的硬闸不变）；记进日志 + 结果里让人看得见
                 (cfailed if kind == "cover" else failed).append({"rel": pay["rel"], "why": out["why"]})
+        # ★ 归档完顺手把这条的元数据推上云端（含标签/地址/站点信息）——失败不影响归档
+        try:
+            _cloud_meta_upload(drv, cfg, folder)
+        except Exception:
+            mm.log(traceback.format_exc())
         if failed:
             results.append({"folder": folder, "name": name, "ok": False, "files": len(recs),
                             "failed": failed[:5],
@@ -2452,6 +2605,7 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "update_check": _job_update_check, "mod_update": _job_mod_update,
              "cloud_reconcile": _job_cloud_reconcile,
              "cloud_discover": _job_cloud_discover,
+             "cloud_index_sync": _job_cloud_index_sync,
              "cloud_archive": _job_cloud_archive, "cloud_restore": _job_cloud_restore,
              "cloud_verify": _job_cloud_verify, "cover_inject": _job_cover_inject}
 
