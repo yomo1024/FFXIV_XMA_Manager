@@ -1690,6 +1690,27 @@ def _job_cloud_index_sync(job: Job):
             "local": local_path, "failed": fails[:20], "failed_n": len(fails)}
 
 
+def _cloud_delete_for_folder(cfg, folder) -> dict:
+    """删掉这条 Mod 在**云端**的目录（进夸克回收站，可还原）。没有云端记录就跳过。"""
+    try:
+        st = mm.Store()
+        row = st.cx.execute("SELECT cloud_path FROM mods WHERE folder=?", (str(folder),)).fetchone()
+        st.cx.close()
+        cpath = (row["cloud_path"] if row else "") or mod_cloud_path(cfg, folder)
+        if not cpath:
+            return {"skipped": "没有云端路径"}
+        drv = cloud_drive(cfg)
+        fid = drv.resolve(cpath)
+        if not fid:
+            return {"skipped": "云端本来就没有这个目录"}
+        drv.delete([fid])
+        mm.log("删除 Mod 时一并删掉了云端目录（夸克回收站）：%s" % cpath)
+        return {"deleted": cpath}
+    except Exception as e:
+        mm.log("删云端目录失败：\n" + traceback.format_exc())
+        return {"error": str(e)[:160]}
+
+
 def _cloud_base(cfg) -> str:
     return "/" + str(cfg.get("cloud_root") or "/FFXIV/MOD").strip("/")
 
@@ -2715,6 +2736,8 @@ def api_mods():
             "site_checked": m.get("site_checked") or "",
             "update_avail": bool(m.get("update_avail")),
             "installed": inst.get(m["folder"]) if inst_dir else None,
+            # 本地到底有没有文件夹（归档/认领回来的只有元数据+封面）—— 界面要据此说话
+            "local_exists": Path(m["folder"]).is_dir(),
         })
     return {"mods": out, "install_dir": inst_dir or ""}
 
@@ -4972,19 +4995,34 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": done, "failed": bad})
 
     def mod_delete(self, b):
+        """删一条 Mod。
+
+        ★ 本地**没有文件夹**也要能删：归档/认领回来的 Mod 本地只有元数据 + 封面（载荷在云端），
+          以前这里直接回 400「文件夹不存在」，主人一次删 7 条全失败（2026-09 报的）。
+          现在这种就只清索引记录；云端那份用 `cloud_too`（默认开）一起删掉，
+          否则它会在下次「扫描网盘新内容」里又冒出来当新内容。
+        """
         cfg = cfg_now()
         folder = str(b.get("folder") or "").strip()
         if not folder:
             return self._json({"error": "没指定要删哪条 Mod（页面传了个空路径，刷新页面再试一次）"}, 400)
         if not inside_root(folder, cfg.get("root") or ""):
-            # 把被拒的路径打出来，以后一看就知道是哪条/什么传错了
             return self._json({"error": "路径不在 Mod 目录里，拒绝删除：%s" % folder}, 403)
-        if not Path(folder).exists():
-            return self._json({"error": "文件夹不存在"}, 400)
-        how = mm.delete_mod(folder, to_recycle=not bool(b.get("permanent")))
+        permanent = bool(b.get("permanent"))
+        cloud_too = bool(b.get("cloud_too", True))
+        has_local = Path(folder).is_dir()
+        if has_local:
+            how = mm.delete_mod(folder, to_recycle=not permanent)
+        else:
+            how = "本地没有文件夹：只清理索引记录"
+        cloud = {"skipped": "没要求删云端"} if not cloud_too else _cloud_delete_for_folder(cfg, folder)
+        st = mm.Store()
+        record = st.drop(folder)          # 显式删记录（文件夹不在时扫描带不走它）
+        st.cx.close()
         mm.cmd_scan(cfg, quiet=True)
         mod_index(force=True)
-        return self._json({"ok": True, "how": how})
+        return self._json({"ok": True, "how": how, "local": has_local,
+                           "record": record, "cloud": cloud})
 
     def mod_replace(self, b):
         """手动上传/指定一个新文件，替换掉这条 Mod 的旧文件（保留 地址.txt、预览图、编号）"""

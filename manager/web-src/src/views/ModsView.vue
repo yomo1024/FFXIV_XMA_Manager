@@ -1260,11 +1260,30 @@ function doDelete(rows) {
     return x && x.folder ? x : null
   }).filter(Boolean)
   if (!list.length) return msg.warning('先选要删的 Mod')
+  // 归档/认领回来的 Mod 本地只有元数据 + 封面（载荷在云端）→ 默认把云端那份一起删，
+  // 否则它下次会在「扫描网盘新内容」里又冒出来当新内容（主人 2026-09 报的删除失败就是这个场景）
+  const noLocal = list.filter((m) => m.local_exists === false).length
+  const archived = list.filter((m) => (m.cloud_state || '') === 'archived' || (m.archived_files || 0) > 0).length
+  const alsoCloud = ref(noLocal > 0 || archived > 0)
   dialog.warning({
     title: '删除 Mod',
-    content: `要把这 ${list.length} 个 Mod 移入回收站吗？\n${list.slice(0, 6).map((m) => '· ' + (m.name || m.folder)).join('\n')}` +
-      (list.length > 6 ? `\n… 还有 ${list.length - 6} 个` : ''),
-    positiveText: '移入回收站',
+    content: () => h('div', [
+      h('div', { style: 'white-space: pre-wrap' },
+        `要把这 ${list.length} 个 Mod 移入回收站吗？\n` +
+        list.slice(0, 6).map((m) => '· ' + (m.name || m.folder)).join('\n') +
+        (list.length > 6 ? `\n… 还有 ${list.length - 6} 个` : '')),
+      h('div', { style: 'margin-top: 10px; display: flex; align-items: center; gap: 8px' }, [
+        h(NCheckbox, {
+          checked: alsoCloud.value,
+          'onUpdate:checked': (v) => { alsoCloud.value = v },
+        }),
+        h('span', null, '同时删除云端载荷（进夸克回收站，可还原）'),
+      ]),
+      h('div', { style: 'opacity: .7; margin-top: 6px; font-size: 12px; white-space: pre-wrap' },
+        (noLocal ? `其中 ${noLocal} 条本地没有文件夹（载荷在云端）：删的是索引记录 + 云端那份。\n` : '') +
+        '不删云端的话，网盘里那份会在下次「扫描网盘新内容」里又冒出来当成新内容。'),
+    ]),
+    positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
       busy.value = true
@@ -1272,14 +1291,25 @@ function doDelete(rows) {
       const bad = []
       for (const m of list) {
         try {
-          await api.deleteMod({ folder: m.folder })
-          ok.push(m.name)
+          const r = await api.deleteMod({ folder: m.folder, cloud_too: alsoCloud.value })
+          ok.push({ name: m.name, ...(r || {}) })
         } catch (e) {
           bad.push(`${m.name || m.folder || '（没有名字）'}：${e.message}`)
         }
       }
       busy.value = false
-      if (ok.length) msg.success(`已删除 ${ok.length} 个：${ok[ok.length - 1] || ''}`)
+      if (ok.length) {
+        const recOnly = ok.filter((x) => x.local === false).length
+        const cloudGone = ok.filter((x) => (x.cloud || {}).deleted).length
+        const cloudSkipped = ok.filter((x) => (x.cloud || {}).skipped).length
+        const cloudErr = ok.filter((x) => (x.cloud || {}).error)
+        msg.success(`已删除 ${ok.length} 个` +
+          (recOnly ? `（其中 ${recOnly} 条只清了索引记录 —— 本地本来就没有文件夹）` : '') +
+          (cloudGone ? `，云端 ${cloudGone} 条也删了` : '') +
+          (cloudSkipped ? `，${cloudSkipped} 条云端没东西可删` : '') +
+          (cloudErr.length ? `；⚠ ${cloudErr.length} 条云端没删掉：${cloudErr[0].cloud.error}` : ''),
+          { duration: 15000 })
+      }
       if (bad.length) {
         msg.error('删除失败 ' + bad.length + ' 个：' + bad[0], { duration: 12000 })
         console.warn('删除失败详情', bad)

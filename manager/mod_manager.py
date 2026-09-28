@@ -2511,13 +2511,40 @@ class Store:
             self.cx.commit()
         return len(dead)
 
+    def drop(self, folder) -> int:
+        """整条删掉索引记录（mods + mod_tags + payload_files）。
+
+        本地文件夹不存在时用它：那种情况下「扫描」带不走这条（见下面 prune 的说明），必须显式删。
+        """
+        f = str(folder)
+        self.cx.execute("DELETE FROM payload_files WHERE folder=?", (f,))
+        self.cx.execute("DELETE FROM mod_tags WHERE folder=?", (f,))
+        n = self.cx.execute("DELETE FROM mods WHERE folder=?", (f,)).rowcount
+        self.cx.commit()
+        return int(n or 0)
+
     def prune(self, alive: set) -> int:
+        """删掉「已经不在了」的记录。**但云端还留着载荷的不能删**。
+
+        为什么：归档/认领回来的 Mod，本地**本来就只有元数据 + 封面**（载荷在云端），
+        它们的文件夹在磁盘上是「不存在」的 —— 按「不在扫描结果里就删」的规则，
+        一次「重新扫描」就会把主人认领回来的条目全吃掉（实测：38 条里会被删掉 9 条）。
+        """
+        keep = set()
+        try:
+            for r in self.cx.execute("SELECT folder FROM mods WHERE cloud_state='archived'"):
+                keep.add(r["folder"])
+            for r in self.cx.execute("SELECT DISTINCT folder FROM payload_files"):
+                keep.add(r["folder"])
+        except Exception:
+            pass
+        alive2 = set(alive) | keep
         dead = [r["folder"] for r in self.cx.execute("SELECT folder FROM mods")
-                if r["folder"] not in alive]
+                if r["folder"] not in alive2]
         for f in dead:
             self.cx.execute("DELETE FROM mods WHERE folder=?", (f,))
         if dead:
-            self.prune_tags(alive)
+            self.prune_tags(alive2)
         return len(dead)
 
     def commit(self):
