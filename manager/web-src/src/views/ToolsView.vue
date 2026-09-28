@@ -1,13 +1,14 @@
 <script setup>
-import { ref, computed, inject, onMounted } from 'vue'
+import { ref, computed, h, inject, onMounted } from 'vue'
 import {
   NButton, NInput, NSelect, NDataTable, NTag, NCard, NTabs, NTabPane, NSpace, NAlert,
   NInputNumber, NEmpty, NSpin, useMessage, useDialog,
 } from 'naive-ui'
 import { api } from '../api'
+import { mdDialog } from '../md'
 
 const props = defineProps({ mods: { type: Array, default: () => [] } })
-const emit = defineEmits(['changed'])
+const emit = defineEmits(['changed', 'go'])
 const { state, startJob, bus } = inject('mm')
 const msg = useMessage()
 const dialog = useDialog()
@@ -127,6 +128,107 @@ const rcols = [
   { title: '名称', key: 'name', ellipsis: { tooltip: true } },
   { title: '问题', key: 'issues', render: (r) => r.issues.join('；') },
 ]
+
+// ---------------- 检查报告：每条问题的处置
+// 后端 /api/check 会给每条问题带上 actions（kind + label）：
+//   go           → 跳去 Mod 列表处理（缺地址 / 缺预览图）
+//   addr_hoist   → 把子目录里的 地址.txt 提到文件夹根
+//   cover_sibling→ 从文件夹内复制一张同级同名封面（原图保留）
+//   drop_record  → 文件夹本来就不在了，只清索引记录
+const ccols = [
+  { title: '分类', key: 'category', width: 80 },
+  { title: '序号', key: 'seq', width: 60, align: 'center' },
+  { title: '名称', key: 'name', ellipsis: { tooltip: true } },
+  { title: '问题', key: 'issues', width: 280, render: (r) => r.issues.join('；') },
+  {
+    title: '处理', key: '_fix', width: 230,
+    render: (r) => h(NSpace, { size: 6 }, {
+      default: () => (r.actions || []).map((a) => h(NButton, {
+        size: 'tiny', ghost: a.kind !== 'go', type: a.kind === 'go' ? 'default' : 'primary',
+        onClick: (e) => { e.stopPropagation(); doAction(r, a) },
+      }, { default: () => a.label })),
+    }),
+  },
+]
+
+function showFixResult(r, label) {
+  const ok = (r.done || []).length
+  const bad = (r.failed || []).length
+  if (bad) msg.warning(`${label}：处理了 ${ok} 条，${bad} 条没成功（原因看日志）`)
+  else if (ok) msg.success(`${label}：处理了 ${ok} 条`)
+  else msg.info(`${label}：没有需要处理的`)
+}
+
+async function runFix(kind, folder, label) {
+  busy.value = true
+  try {
+    const r = await api.checkFix(kind, { folder })
+    showFixResult(r, label)
+    if (r.report) report.value = r.report
+    emit('changed')
+  } catch (e) {
+    msg.error(e.message)
+  } finally {
+    busy.value = false
+  }
+}
+
+function runFixAll(kind, label) {
+  const n = (report.value?.batches || {})[kind] || 0
+  if (!n) return
+  const rows = (report.value?.problems || [])
+    .filter((p) => (p.actions || []).some((a) => a.kind === kind))
+  dialog.warning({
+    title: `${label}：${n} 条`,
+    content: mdDialog('会处理这些 Mod：\n' + rows.slice(0, 8).map((p) => '· ' + p.rel).join('\n')
+      + (rows.length > 8 ? `\n… 还有 ${rows.length - 8} 条` : '')
+      + (kind === 'cover_sibling'
+        ? '\n\n只在**同级**补一张同名封面（文件夹里那张保留不动）。' : '')),
+    positiveText: '写入',
+    negativeText: '只看不改',
+    onPositiveClick: async () => {
+      busy.value = true
+      try {
+        const r = await api.checkFix(kind, { all: true })
+        showFixResult(r, label)
+        if (r.report) report.value = r.report
+        emit('changed')
+      } catch (e) {
+        msg.error(e.message)
+      } finally {
+        busy.value = false
+      }
+    },
+  })
+}
+
+function doAction(row, a) {
+  if (a.kind === 'go') return emit('go', { view: 'mods', folder: row.folder })
+  if (a.kind === 'drop_record') {
+    dialog.warning({
+      title: '清理这条记录',
+      content: mdDialog(`「${row.name || row.rel}」在磁盘上已经没有文件夹了。\n`
+        + '只清索引记录，云端那份不动（之后还能「扫描网盘新内容」认领回来）。'),
+      positiveText: '写入（清理）',
+      negativeText: '只看不改',
+      onPositiveClick: async () => {
+        busy.value = true
+        try {
+          await api.deleteMod({ folder: row.folder, cloud_too: false })
+          msg.success('已清掉这条索引记录')
+          await loadAll()
+          emit('changed')
+        } catch (e) {
+          msg.error(e.message)
+        } finally {
+          busy.value = false
+        }
+      },
+    })
+    return
+  }
+  runFix(a.kind, row.folder, a.label)
+}
 </script>
 
 <template>
@@ -186,9 +288,21 @@ const rcols = [
             <n-alert type="warning" :show-icon="false" style="margin-bottom: 10px">
               共 {{ report?.total }} 条，{{ report?.problems.length }} 条要看一下，
               {{ report?.dup_seqs.length }} 组序号重复。
+              每条右边都有「处理」按钮，能就地做完的就不用去别处找了。
             </n-alert>
-            <n-data-table :columns="rcols" size="small" :data="report?.problems || []"
-                          :max-height="420" :scroll-x="700" />
+            <n-space v-if="report?.batches && (report.batches.addr_hoist
+                     || report.batches.cover_sibling)" style="margin-bottom: 10px">
+              <n-button v-if="report.batches.addr_hoist" size="small" type="primary" ghost
+                        @click="runFixAll('addr_hoist', '地址提到文件夹根')">
+                一键规范地址（{{ report.batches.addr_hoist }}）
+              </n-button>
+              <n-button v-if="report.batches.cover_sibling" size="small" type="primary" ghost
+                        @click="runFixAll('cover_sibling', '生成同级封面')">
+                一键生成同级封面（{{ report.batches.cover_sibling }}）
+              </n-button>
+            </n-space>
+            <n-data-table :columns="ccols" size="small" :data="report?.problems || []"
+                          :max-height="420" :scroll-x="820" />
           </template>
         </n-spin>
       </n-tab-pane>

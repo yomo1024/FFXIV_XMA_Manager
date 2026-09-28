@@ -790,6 +790,26 @@ def index_repair(cfg, write=False) -> dict:
     return out
 
 
+def _mirror_cover_sibling(folder: Path, inside: Path) -> None:
+    """封面写进文件夹内之后，顺手在**同级**放一张同名图（`find_image` 第 1 顺位）。
+
+    为什么（2026-09 主人报的「检查报告里这条没地方处理」）：检查报告要求「同级同名」，
+    可工具自己（补预览图 / 导入取封面）以前只写文件夹内 → 自己造出一条永远处理不掉的问题。
+    两边都写：报告干净，插件注封面也有包内那份（v2.24.1 的约定不破）。
+    """
+    try:
+        inside = Path(inside)
+        if not inside.is_file():
+            return
+        sib = Path(folder).parent / (Path(folder).name + inside.suffix.lower())
+        if sib.exists():
+            return
+        shutil.copy2(inside, sib)
+        log("封面同时放到同级：%s" % sib.name)
+    except Exception as e:
+        log("封面放同级失败（不影响使用）：%s" % e)
+
+
 def ensure_preview(cfg, folder, author="", name="", local_cover="", addr="") -> str:
     """确保 Mod 文件夹里有预览图，并返回图片路径（没有则返回 ""）。
 
@@ -812,6 +832,7 @@ def ensure_preview(cfg, folder, author="", name="", local_cover="", addr="") -> 
     if local_cover and Path(local_cover).is_file():
         try:
             shutil.copy2(local_cover, dest)
+            _mirror_cover_sibling(folder, dest)      # 同级也放一张（检查报告的规范位）
             log("已放入封面图：%s" % dest)
             return str(dest)
         except Exception as e:
@@ -827,6 +848,7 @@ def ensure_preview(cfg, folder, author="", name="", local_cover="", addr="") -> 
             info = browser_capture(cfg)
             if info.get("cover"):
                 browser_fetch(cfg, info["cover"], dest)
+                _mirror_cover_sibling(folder, dest)  # 同级也放一张（检查报告的规范位）
                 log("已按地址抓取封面：%s" % dest)
                 return str(dest)
         except SystemExit as e:
@@ -841,6 +863,78 @@ def has_preview(folder, author="", name="") -> bool:
         return bool(find_image(Path(folder), Path(folder).name, author, name)[0])
     except Exception:
         return False
+
+
+# ------------------------------------------- 规范位置：检查报告里那几条的处置
+# 「地址来自子目录」「预览图取自文件夹内」以前只报不给处置（主人 2026-09 报的：没地方处理）。
+# 规范位置是：地址 `<文件夹>/地址.txt`、封面**同级同名** `<文件夹名>.<ext>`
+#（find_addr / find_image 的第 1 顺位就是这两处，Excel 与推封面也都从这里取材）。
+def hoist_addr(folder) -> dict:
+    """把子目录里的 `地址.txt` 提到 Mod 文件夹根。
+
+    提到根上之后 `find_addr` 第 1 顺位命中 → `addr_source` 变成「地址.txt」，检查报告那条消失。
+    子目录那份默认**移过来**（不留过期副本）；移不动（占用/只读）退化成复制，如实回报。
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return {"ok": False, "why": "文件夹不存在：%s" % folder}
+    root_file = folder / ADDR_NAME
+    if root_file.is_file():
+        return {"ok": True, "already": True, "how": "根目录本来就有 地址.txt",
+                "path": str(root_file), "old": ""}
+    src = None
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames.sort()
+        if ADDR_NAME in filenames:
+            src = Path(dirpath) / ADDR_NAME
+            break
+    if src is None:
+        return {"ok": False, "why": "整个文件夹里都没有 地址.txt"}
+    old_rel = str(src.relative_to(folder))
+    try:
+        shutil.move(str(src), str(root_file))
+        how = "已从「%s」移到文件夹根" % old_rel
+    except Exception as e:
+        try:
+            shutil.copy2(src, root_file)
+            how = "已复制到文件夹根（原子目录那份保留：%s）" % str(e)[:80]
+        except Exception as e2:
+            return {"ok": False, "why": "搬不动：%s" % str(e2)[:120]}
+    log("地址提到文件夹根：%s（%s）" % (folder.name, old_rel))
+    return {"ok": True, "how": how, "path": str(root_file), "old": old_rel}
+
+
+def make_sibling_cover(folder, author="", name="") -> dict:
+    """给封面只在「文件夹内 / 子文件夹」的 Mod 补一张**同级同名**封面。
+
+    同级同名是 `find_image` 的第 1 顺位、也是 Excel/推封面的取材口。
+    文件夹内那张（Penumbra 注封面要用）**原样保留** → 这里是复制，不是搬。
+    同级已经有了就什么都不做（幂等）。
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return {"ok": False, "why": "文件夹不存在：%s" % folder}
+    for ext in IMG_EXT:
+        sib = folder.parent / (folder.name + ext)
+        if sib.is_file():
+            return {"ok": True, "already": True, "how": "同级同名封面本来就有",
+                    "path": str(sib)}
+    src, how = find_image(folder, folder.name, author, name)
+    if not src:
+        return {"ok": False, "why": "这条 Mod 里没找到可用的图（先用「补预览图」）"}
+    src = Path(src)
+    if src.parent == folder.parent and src.stem == folder.name:
+        return {"ok": True, "already": True, "how": "同级同名封面本来就有", "path": str(src)}
+    dest = folder.parent / (folder.name + src.suffix.lower())
+    if dest.exists():
+        return {"ok": True, "already": True, "how": "同级同名封面本来就有", "path": str(dest)}
+    try:
+        shutil.copy2(src, dest)
+    except Exception as e:
+        return {"ok": False, "why": "复制失败：%s" % str(e)[:120]}
+    log("补同级封面：%s（取自%s：%s）" % (dest.name, how, src.name))
+    return {"ok": True, "how": "已按「%s」复制成同级同名封面" % how, "path": str(dest),
+            "from": str(src)}
 
 
 def fmt_size(n) -> str:

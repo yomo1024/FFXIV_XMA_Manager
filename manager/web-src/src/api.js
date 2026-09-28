@@ -81,6 +81,9 @@ export const api = {
     { method: 'POST', body: JSON.stringify({ items }) }),
   cloudReconcile: (folders, write) => req('/api/cloud/reconcile',
     { method: 'POST', body: JSON.stringify({ folders: folders || [], write: !!write }) }),
+  // 检查报告里每条问题的处置（{kind, folder} 单条 / {kind, all:true} 这一类全做）
+  checkFix: (kind, opts) => req('/api/check/fix',
+    { method: 'POST', body: JSON.stringify({ kind, ...(opts || {}) }) }),
   // 索引体检 / 修复（「重排序号后一个 Mod 变两条」那类历史遗留）
   indexHealth: () => req('/api/index/health'),
   indexRepair: (write, alignCloud) => req('/api/index/repair',

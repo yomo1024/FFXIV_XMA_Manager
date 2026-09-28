@@ -3864,35 +3864,99 @@ def api_pending():
 
 
 def api_check():
+    """检查报告：每条问题都带上**可执行的处置动作**（2026-09 主人报的：只报没地方处理）。
+
+    动作 kind 与前端按钮对应：
+      · addr_hoist    —— 把子目录里的 地址.txt 提到文件夹根（`mm.hoist_addr`）
+      · cover_sibling —— 从文件夹内/子文件夹复制一张同级同名封面（`mm.make_sibling_cover`）
+      · drop_record   —— 文件夹本来就不在了：只清索引记录（复用「删除 Mod」那条路）
+      · go            —— 交给 Mod 列表处理（缺地址 → 编辑弹窗；缺预览图 → 详情里的「补预览图」）
+    """
     cfg = cfg_now()
     root = cfg.get("root") or ""
     mods = mm.Store().all()
     problems = []
     for m in mods:
-        issues = []
+        issues, actions = [], []
         if not Path(m["folder"]).is_dir():
             issues.append("文件夹不存在")
+            actions.append({"kind": "drop_record", "label": "清理这条记录"})
         if not m["addr"]:
             issues.append("缺 Mod 地址")
+            actions.append({"kind": "go", "label": "去填地址"})
         elif m.get("addr_source") != "地址.txt":
             issues.append("地址来自子目录（%s）" % m.get("addr_source"))
+            actions.append({"kind": "addr_hoist", "label": "地址提到文件夹根"})
         if not m.get("img"):
             issues.append("缺预览图")
+            actions.append({"kind": "go", "label": "去补预览图"})
         elif m.get("img_source") != "同级同名":
             issues.append("预览图取自%s" % m.get("img_source"))
+            actions.append({"kind": "cover_sibling", "label": "生成同级封面"})
         if issues:
             problems.append({"folder": m["folder"], "rel": safe_rel(m["folder"], root),
                              "name": m["name"], "author": m["author"],
                              "category": m["category"], "seq": m["seq"],
-                             "issues": issues})
+                             "issues": issues, "actions": actions})
     dup = {}
     for m in mods:
         dup.setdefault((m["category"], m["seq"]), []).append(m)
     dups = [{"category": k[0], "seq": k[1],
              "mods": [{"folder": x["folder"], "name": x["name"]} for x in v]}
             for k, v in sorted(dup.items()) if len(v) > 1]
+    # 「一键规范」能一次做完的类别与条数（前端据此显示按钮）
+    batches = {k: sum(1 for p in problems for a in p["actions"] if a["kind"] == k)
+               for k in ("addr_hoist", "cover_sibling")}
     return {"problems": problems, "dup_seqs": dups, "total": len(mods),
-            "clean": not problems and not dups}
+            "batches": batches, "clean": not problems and not dups}
+
+
+def api_check_fix(body):
+    """检查报告里那几条的**处置**：`{kind, folder}` 单条；`{kind, all:true}` 把这一类全做了。
+
+    只动该动的：地址提到根、补一张同级封面（原图保留）。文件夹不在了那条走「删除 Mod」接口，
+    这里只认 addr_hoist / cover_sibling。做完重扫 + 刷新索引，并把新的检查报告一起回给前端。
+    """
+    cfg = cfg_now()
+    b = body or {}
+    kind = str(b.get("kind") or "").strip()
+    if kind not in ("addr_hoist", "cover_sibling"):
+        return {"error": "不认识的处置类型：%s" % kind}
+    rows = {m["folder"]: m for m in mm.Store().all()}
+    if b.get("all"):
+        rep = api_check()
+        want = [p["folder"] for p in rep["problems"]
+                if any(a["kind"] == kind for a in p["actions"])]
+    else:
+        want = [str(b.get("folder") or "")] if b.get("folder") else []
+    done, skipped, failed = [], [], []
+    for f in want:
+        m = rows.get(f)
+        if not m:
+            failed.append({"folder": f, "why": "索引里没有这条"})
+            continue
+        try:
+            if kind == "addr_hoist":
+                r = mm.hoist_addr(f)
+            else:
+                r = mm.make_sibling_cover(f, m.get("author") or "", m.get("name") or "")
+        except Exception as e:
+            mm.log(traceback.format_exc())
+            failed.append({"folder": f, "why": str(e)[:140]})
+            continue
+        item = {"folder": f, "rel": safe_rel(f, cfg.get("root") or ""),
+                "name": m.get("name"), "how": r.get("how") or r.get("why") or ""}
+        (done if r.get("ok") else failed).append(item if r.get("ok") else
+                                                 {"folder": f, "rel": item["rel"], "why": item["how"]})
+        if r.get("already"):
+            skipped.append(item)
+    if done:
+        mm.cmd_scan(cfg, quiet=True)
+        mod_index(force=True)
+    mm.log("检查报告处置（%s）：成功 %d / 本来就好 %d / 失败 %d"
+           % (kind, len(done), len(skipped), len(failed)))
+    return {"ok": not failed, "kind": kind, "count": len(want),
+            "done": done, "already": skipped, "failed": failed, "report": api_check()}
 
 
 def _cloud_folders(b) -> list:
@@ -5053,6 +5117,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/index/repair":
                 r = api_index_repair(body or {})
                 return self._json(r, 400 if (r or {}).get("error") else 200)
+            if u.path == "/api/check/fix":
+                r = api_check_fix(body or {})
+                return self._json(r, 400 if (r or {}).get("error") else 200)
             if u.path == "/api/cloud/claim":
                 r = api_cloud_claim(body or {})
                 return self._json(r, 400 if r.get("error") else 200)
@@ -5348,6 +5415,7 @@ class Handler(BaseHTTPRequestHandler):
         if local and Path(local).is_file():
             try:
                 shutil.copy2(local, dest)
+                mm._mirror_cover_sibling(fd, dest)   # 同级也放一张（检查报告的规范位）
                 mm.cmd_scan(cfg, quiet=True)
                 mod_index(force=True)
                 return self._json({"ok": True, "img": str(dest), "how": "本机给的封面",
@@ -5365,6 +5433,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ok, why = _save_url(cfg, cover, dest, use_browser=mm.browser_running(cfg))
                 if ok:
+                    mm._mirror_cover_sibling(fd, dest)   # 同级也放一张（检查报告的规范位）
                     mm.cmd_scan(cfg, quiet=True)
                     mod_index(force=True)
                     return self._json({"ok": True, "img": str(dest), "how": "浏览器推来的封面（%s）" % why,
@@ -5398,6 +5467,7 @@ class Handler(BaseHTTPRequestHandler):
             if gc:
                 ok, why = _save_url(cfg, gc, dest, use_browser=True)
                 if ok:
+                    mm._mirror_cover_sibling(fd, dest)   # 同级也放一张（检查报告的规范位）
                     mm.cmd_scan(cfg, quiet=True)
                     mod_index(force=True)
                     return self._json({"ok": True, "img": str(dest),

@@ -291,7 +291,8 @@ onUnmounted(() => clearTimeout(timer))
         <mods-view v-if="view === 'mods'" :mods="mods" @changed="refreshAll" />
         <todos-view v-else-if="view === 'todos'" :mods="mods" :pending="pending"
                     @changed="refreshAll" @go="goView" />
-        <tools-view v-else-if="view === 'tools'" :mods="mods" @changed="refreshAll" />
+        <tools-view v-else-if="view === 'tools'" :mods="mods" @changed="refreshAll"
+            @go="goView" />
         <categories-view v-else-if="view === 'cats'" @changed="refreshAll" />
         <backup-view v-else-if="view === 'backup'" />
         <workbench-view v-else-if="view === 'work'" :mods="mods" @changed="refreshAll" />
