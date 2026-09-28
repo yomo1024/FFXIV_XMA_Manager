@@ -38,7 +38,8 @@ PKG_NAME = "ModManagerWeb_部署包_v%s" % VERSION
 ROOT_FILES = ["ModManagerWeb.exe", "启动Web版.bat", "停止Web版.bat",
               "使用说明-Web版.txt", "使用说明.txt", "app.ico"]
 WEB_DIR = "web"                                  # 前端产物整目录
-SRC_FILES = ["mod_manager.py", "mod_manager_web.py", "app_version.py", "build_web_exe.bat", "build_exe.bat",
+SRC_FILES = ["mod_manager.py", "mod_manager_web.py", "app_version.py", "quark_drive.py",
+             "build_web_exe.bat", "build_exe.bat",
              "make_package.py", "打包部署包.bat", "requirements.txt"]
 SRC_WEB = "web-src"                              # 前端源码（跳过 node_modules/dist）
 SKIP_DIRS = {"node_modules", "dist", ".vite", "__pycache__"}
@@ -205,7 +206,8 @@ def main():
         written.append("源码/%s\\（%d 个文件，不含 node_modules）" % (SRC_WEB, n))
         d = pick_dir("scripts")                          # 版本校验脚本
         if d:
-            n = add_tree(z, d, "%s/源码/scripts" % PKG_NAME)
+            # ★ 带 SKIP_DIRS：不然 scripts/__pycache__ 里的 .pyc 会被打进部署包
+            n = add_tree(z, d, "%s/源码/scripts" % PKG_NAME, SKIP_DIRS)
             written.append("源码/scripts\\（%d 个文件：版本一致性校验）" % n)
         d = pick_dir("browser-extension")                # 浏览器拓展（整包带走才叫三件套）
         if d:

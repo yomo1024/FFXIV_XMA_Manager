@@ -547,6 +547,34 @@ def same_name_tokens(a, b, author="") -> bool:
     return bool(decorated)
 
 
+def mod_row_key(row) -> tuple:
+    """「作者 + 名称」都相同 = 同一件 Mod（用来给旧路径的记录找它对应的现存记录）"""
+    return (str(row.get("author") or "").strip().lower(),
+            str(row.get("name") or "").strip().lower())
+
+
+def find_live_row(row, live_rows):
+    """在一批「磁盘上确实存在」的记录里找出这条记录对应的那一条（找不到返回 None）。
+
+    先用「作者 + 名称」精确配对 —— 改名/重排序号都不会动这两项，正常一次命中；
+    对不上时退回 `same_name_tokens` 的 token 全覆盖（对装饰差异更宽容），
+    依旧要求作者词或数字在白名单里，避免 `Botanica` / `Botanica Bodychain` 那种误配。
+    """
+    key = mod_row_key(row)
+    hits = [r for r in live_rows if mod_row_key(r) == key and key != ("", "")]
+    if len(hits) == 1:
+        return hits[0]
+    def leaf(r):
+        return os.path.basename(str(r.get("folder") or "").rstrip("\\/"))
+    for r in (hits or live_rows):
+        try:
+            if same_name_tokens(leaf(row), leaf(r), r.get("author") or row.get("author") or ""):
+                return r
+        except Exception:
+            continue
+    return None
+
+
 def installed_match(m, names, raw=None) -> bool:
     """按安装目录里的文件夹名判断这个 Mod 是否已安装。
 
@@ -660,6 +688,106 @@ def renumber(cfg, category="", subcat="", start=1, dry_run=True, export=False):
     if export:
         cmd_export(cfg)
     return done
+
+
+def index_health(cfg) -> dict:
+    """索引体检（**只看不改**）：找出「指向不存在路径」的残留记录，给出建议动作。
+
+    起因（2026-09 主人报的「一个 Mod 两条 / 删了还在」）：`rename_mod` 曾经只搬文件夹、
+    不搬索引记录，一次「重排序号」就留下成对的重复行；旧行还因为 payload_files 里有账目
+    被 `Store.prune` 永久保护。根因已修（现在改名会 `Store.migrate_folder`），
+    这个体检负责把**历史遗留**收拾干净，也方便以后随时核对「索引 vs 磁盘」。
+
+    三类：
+      · merge  —— 磁盘上没有这个文件夹，但**同一件 Mod 在库里有存在的那一条**
+                  → 建议把旧记录的云端/账目/标签并进那条（`Store.migrate_folder` 干的就是这个）
+      · orphan —— 磁盘上没有、库里也没有同名的，而且**云端也没有它的载荷**
+                  → 只清索引记录（本地那份确实已经没了）
+      · cloud  —— 文件夹在，但云端路径的目录名和当前文件夹名不一致 → 建议云端改名对齐
+
+    ⚠ 不算 ghost：`cloud_only`（本地没有文件夹，但云端还留着载荷 —— 归档/认领回来的条目）。
+      这些是 v2.32.1 明确要保护的，扫描和修复都不能动它们。
+    """
+    st = Store()
+    rows = st.all()
+    try:
+        cloud_backed = {r["folder"] for r in
+                        st.cx.execute("SELECT DISTINCT folder FROM payload_files WHERE state='archived'")}
+    except Exception:
+        cloud_backed = set()
+    st.cx.close()
+    alive = {r["folder"] for r in rows if os.path.isdir(r["folder"])}
+    live_rows = [r for r in rows if r["folder"] in alive]
+
+    merge, orphan, cloud, cloud_only = [], [], [], []
+    for r in rows:
+        f = str(r["folder"])
+        if f in alive:
+            cpath = str(r.get("cloud_path") or "")
+            if cpath:
+                leaf = cpath.rstrip("/").rsplit("/", 1)[-1]
+                if leaf and leaf != os.path.basename(f.rstrip("\\/")):
+                    cloud.append({"folder": f, "name": r.get("name"), "cloud_path": cpath,
+                                  "want": os.path.basename(f.rstrip("\\/"))})
+            continue
+        tgt = find_live_row(r, live_rows)
+        if tgt is not None:
+            merge.append({"folder": f, "name": r.get("name"), "author": r.get("author"),
+                          "target": str(tgt["folder"]),
+                          "cloud_path": str(r.get("cloud_path") or ""),
+                          "why": "本地已改名/移动，索引里这条还停在旧路径"})
+        else:
+            item = {"folder": f, "name": r.get("name"), "author": r.get("author"),
+                    "cloud_path": str(r.get("cloud_path") or "")}
+            if (r.get("cloud_state") or "") == "archived" or f in cloud_backed:
+                item["why"] = "本地没有文件夹，但云端还留着载荷（不算残留，别动它）"
+                cloud_only.append(item)
+            else:
+                item["why"] = "本地已经没有这个文件夹（云端也没有它的载荷）"
+                orphan.append(item)
+    return {"merge": merge, "orphan": orphan, "cloud": cloud, "cloud_only": cloud_only,
+            "alive": len(alive), "total": len(rows),
+            "counts": {"merge": len(merge), "orphan": len(orphan), "cloud": len(cloud),
+                       "cloud_only": len(cloud_only),
+                       "ghost": len(merge) + len(orphan)}}
+
+
+def index_repair(cfg, write=False) -> dict:
+    """按 `index_health` 的结果修索引（write=False 只报计划、一个字节都不改）。
+
+    merge 用 `Store.migrate_folder`（旧记录的云端/账目/指纹/标签并进现存的那条），
+    orphan 用 `Store.drop`（只清索引；云端目录保留，可再认领）。修完重新扫描。
+    """
+    h = index_health(cfg)
+    plan = {"merged": [{"folder": x["folder"], "into": x["target"]} for x in h["merge"]],
+            "dropped": [{"folder": x["folder"], "name": x.get("name")} for x in h["orphan"]]}
+    if not write:
+        return {"dry_run": True, "health": h, **plan, "changed": plan["merged"] + plan["dropped"]}
+    st = Store()
+    out = {"merged": [], "dropped": [], "failed": []}
+    for item in h["merge"]:
+        try:
+            info = st.migrate_folder(item["folder"], item["target"])
+            out["merged"].append({"folder": item["folder"], "into": item["target"],
+                                  "payload": info.get("payload"), "tags": info.get("tags"),
+                                  "meta": info.get("meta")})
+            log("索引修复：旧记录并入 → %s（载荷账目 %s 条、标签 %s 个）"
+                % (item["target"], info.get("payload"), info.get("tags")))
+        except Exception as e:
+            out["failed"].append({"folder": item["folder"], "error": str(e)[:160]})
+    for item in h["orphan"]:
+        try:
+            st.drop(item["folder"])
+            out["dropped"].append(item["folder"])
+            log("索引修复：清掉残留记录（本地已无文件夹）：%s" % item["folder"])
+        except Exception as e:
+            out["failed"].append({"folder": item["folder"], "error": str(e)[:160]})
+    st.cx.close()
+    if out["merged"] or out["dropped"]:
+        cmd_scan(cfg, quiet=True)
+    out["dry_run"] = False
+    out["after"] = index_health(cfg)["counts"]
+    return out
 
 
 def ensure_preview(cfg, folder, author="", name="", local_cover="", addr="") -> str:
@@ -2129,14 +2257,30 @@ def rename_mod(cfg, folder, category=None, zone=None, subdir=None, author=None, 
         parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(old), str(target))
         log("已移动到： %s" % target)
-        try:                                        # 标签跟着文件夹走
+        try:                                        # 索引 / 标签 / 载荷账目 一起跟着文件夹走
             st = Store()
-            moved = st.move_tags(str(old), str(target))
+            info = st.migrate_folder(str(old), str(target))
             st.cx.close()
-            if moved:
-                log("已带过 %d 个标签" % moved)
+            if info.get("tags"):
+                log("已带过 %d 个标签" % info["tags"])
+            if info.get("merged"):
+                log("索引合并：新路径上已有记录，旧那条的云端/账目字段已并入（%s → %s）"
+                    % (old.name, target.name))
         except Exception as e:
-            log("标签迁移失败：%s" % e)
+            log("索引迁移失败：%s" % e)
+
+        # 同级预览图按「<文件夹名>.<ext>」命名（find_image / cover_land_inside 都认这个约定）：
+        # 文件夹改名后把它一起改名，否则每重排一次序号就在分类目录里留一张孤儿图。
+        try:
+            for ext in IMG_EXT:
+                sib = old.parent / (old.name + ext)
+                if sib.is_file():
+                    tgt = target.parent / (target.name + ext)
+                    if not tgt.exists():
+                        shutil.move(str(sib), str(tgt))
+                        log("同级预览图跟着改名：%s → %s" % (sib.name, tgt.name))
+        except Exception as e:
+            log("同级预览图改名失败：%s" % e)
 
     if addr is not None:
         addr = addr.strip()
@@ -2180,12 +2324,29 @@ def delete_mod(folder, to_recycle=True) -> str:
     folder = Path(folder)
     if not folder.is_dir():
         raise SystemExit("文件夹不存在：%s" % folder)
+    # 同级预览图（`<文件夹名>.jpg`）也是这条 Mod 的东西：一起送走，别在分类目录里留孤儿图
+    sibs = [folder.parent / (folder.name + e) for e in IMG_EXT
+            if (folder.parent / (folder.name + e)).is_file()]
+    how = ""
     if to_recycle:
         if send_to_recycle_bin(folder):
-            return "已移入回收站"
-        log("  ! 移入回收站失败，改为直接删除")
-    shutil.rmtree(str(folder))
-    return "已直接删除"
+            how = "已移入回收站"
+        else:
+            log("  ! 移入回收站失败，改为直接删除")
+    if not how:
+        shutil.rmtree(str(folder))
+        how = "已直接删除"
+    for s in sibs:
+        if to_recycle and send_to_recycle_bin(str(s)):
+            pass
+        else:
+            try:
+                s.unlink()
+            except OSError:
+                pass
+    if sibs:
+        log("已一并处理 %d 张同级预览图" % len(sibs))
+    return how
 
 
 # ---------------------------------------------------------------------- store
@@ -2488,6 +2649,65 @@ class Store:
         self.cx.commit()
         return n
 
+    def migrate_folder(self, old_folder, new_folder, cloud_path=None) -> dict:
+        """文件夹改名 / 移动 / 重排序号：把这一条在索引里的记录整体搬到新路径。
+
+        ★ 为什么必须有（2026-09 主人报的「一个 Mod 变两条」）：
+          `rename_mod()` 原来只 `shutil.move` 文件夹 + 搬标签，索引里
+          `mods.folder`（主键）、`payload_files.folder`、`meta_sync.folder`、`cloud_path`
+          全留在旧路径上 → 紧接着的扫描按新路径**又插一条**（云状态为空），
+          于是同一个 Mod 在列表里出现两次；旧那条还因为有 payload_files 被 prune 永久保护。
+          修法：搬家时把这几张表一次搬完；新路径**已经有记录就合并进去**（不留重复行）。
+
+        `cloud_path` 传了才改（云端目录由网盘接口另行改名；不传 = 云端路径保持不动）。
+        返回 {moved, merged, tags, payload, meta}
+        """
+        old, new = str(old_folder), str(new_folder)
+        out = {"moved": False, "merged": False, "tags": 0, "payload": 0, "meta": False}
+        if not old or old == new:
+            return out
+        row_old = self.cx.execute("SELECT * FROM mods WHERE folder=?", (old,)).fetchone()
+        row_new = self.cx.execute("SELECT * FROM mods WHERE folder=?", (new,)).fetchone()
+        if row_new is not None:                     # 新路径已有行 → 先清掉同 rel_path，避免主键冲突
+            for r in self.cx.execute("SELECT rel_path FROM payload_files WHERE folder=?", (old,)):
+                self.cx.execute("DELETE FROM payload_files WHERE folder=? AND rel_path=?",
+                                (new, r["rel_path"]))
+        self.cx.execute("UPDATE payload_files SET folder=? WHERE folder=?", (new, old))
+        out["payload"] = self.cx.execute(
+            "SELECT COUNT(*) AS n FROM payload_files WHERE folder=?", (new,)).fetchone()["n"]
+        if row_old is not None:
+            if row_new is None:
+                self.cx.execute("UPDATE mods SET folder=? WHERE folder=?", (new, old))
+                out["moved"] = True
+            else:
+                # 扫描已经建了新那条：把旧的「云端 / 账目 / 手工填过的」字段并进去再删旧行
+                cols = ("cloud_backend", "cloud_path", "cloud_state", "cloud_size",
+                        "cloud_synced", "payload_mtime", "installed_dir", "desc", "affects",
+                        "addr", "addr_source", "races", "genders", "released", "site_updated",
+                        "site_latest", "site_version", "site_checked", "update_avail",
+                        "img", "img_source", "img_hash")
+                sets, vals = [], []
+                for c in cols:
+                    if c not in row_old.keys() or c not in row_new.keys():
+                        continue
+                    if row_new[c] in (None, "", 0) and row_old[c] not in (None, "", 0):
+                        sets.append("%s=?" % c)
+                        vals.append(row_old[c])
+                if sets:
+                    self.cx.execute("UPDATE mods SET %s WHERE folder=?" % ", ".join(sets),
+                                    vals + [new])
+                self.cx.execute("DELETE FROM mods WHERE folder=?", (old,))
+                out["merged"] = True
+        if cloud_path:
+            self.cx.execute("UPDATE mods SET cloud_path=? WHERE folder=?", (str(cloud_path), new))
+        r = self.cx.execute("SELECT digest FROM meta_sync WHERE folder=?", (old,)).fetchone()
+        if r is not None:                           # 元数据指纹（增量同步用）跟着走
+            self.set_meta_sync(new, r["digest"])
+            self.cx.execute("DELETE FROM meta_sync WHERE folder=?", (old,))
+            out["meta"] = True
+        out["tags"] = self.move_tags(old, new)
+        return out
+
     def remap_folder_prefix(self, old_prefix, new_prefix) -> int:
         """整目录改名（比如改分类名）时，把这一批 Mod 的标签一起搬到新路径"""
         old_p = str(old_prefix).rstrip("\\/")
@@ -2552,19 +2772,37 @@ class Store:
         为什么：归档/认领回来的 Mod，本地**本来就只有元数据 + 封面**（载荷在云端），
         它们的文件夹在磁盘上是「不存在」的 —— 按「不在扫描结果里就删」的规则，
         一次「重新扫描」就会把主人认领回来的条目全吃掉（实测：38 条里会被删掉 9 条）。
+
+        ★ 2026-09 收紧（主人报的「一个 Mod 两条 / 删了还在」）：
+          以前只要 `payload_files` 里出现过这个 folder 就保护，于是**改名/移动/重排序号**
+          留在旧路径上的那条永远删不掉（它的载荷账目也停在旧路径）。
+          现在只认「云端确实还留着载荷」：`cloud_state='archived'` 或有一条 `state='archived'`
+          的载荷记录。本地账目（state='local'/'cover'/'missing'）不再构成免死金牌。
         """
         keep = set()
         try:
             for r in self.cx.execute("SELECT folder FROM mods WHERE cloud_state='archived'"):
                 keep.add(r["folder"])
-            for r in self.cx.execute("SELECT DISTINCT folder FROM payload_files"):
+            for r in self.cx.execute(
+                    "SELECT DISTINCT folder FROM payload_files WHERE state='archived'"):
                 keep.add(r["folder"])
         except Exception:
             pass
         alive2 = set(alive) | keep
         dead = [r["folder"] for r in self.cx.execute("SELECT folder FROM mods")
                 if r["folder"] not in alive2]
+        live_rows = [r for r in self.all() if r["folder"] in alive2]
         for f in dead:
+            row = self.cx.execute("SELECT * FROM mods WHERE folder=?", (f,)).fetchone()
+            tgt = find_live_row(dict(row), live_rows) if row is not None else None
+            if tgt is not None:
+                # 旧路径那条只是「改名/移动前的位置」，而同一件 Mod 在新路径上活着
+                # → 并进去（云端路径、载荷账目、标签都保住），**别直接删**
+                self.migrate_folder(f, tgt["folder"])
+                continue
+            # 死行的载荷账目/指纹也一起清掉，否则它们会一直往界面上冒（而且再也对不上文件）
+            self.cx.execute("DELETE FROM payload_files WHERE folder=?", (f,))
+            self.cx.execute("DELETE FROM meta_sync WHERE folder=?", (f,))
             self.cx.execute("DELETE FROM mods WHERE folder=?", (f,))
         if dead:
             self.prune_tags(alive2)

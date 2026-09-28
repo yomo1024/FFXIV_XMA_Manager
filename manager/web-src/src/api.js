@@ -81,6 +81,10 @@ export const api = {
     { method: 'POST', body: JSON.stringify({ items }) }),
   cloudReconcile: (folders, write) => req('/api/cloud/reconcile',
     { method: 'POST', body: JSON.stringify({ folders: folders || [], write: !!write }) }),
+  // 索引体检 / 修复（「重排序号后一个 Mod 变两条」那类历史遗留）
+  indexHealth: () => req('/api/index/health'),
+  indexRepair: (write, alignCloud) => req('/api/index/repair',
+    { method: 'POST', body: JSON.stringify({ write: !!write, align_cloud: !!alignCloud }) }),
   modFileUrl: (folder, name) => '/api/mod/download?folder=' + encodeURIComponent(folder)
     + '&name=' + encodeURIComponent(name),
   history: (folder) => req('/api/mod/history?folder=' + encodeURIComponent(folder)),

@@ -1,12 +1,13 @@
 <script setup>
 // 待办聚合页：把散在「待导入 / Mod 列表 / 云存储 / 插件」的待处理事项收在一处，能一键就一键。
 // 分组逻辑在 ../todos.js（侧栏角标共用同一份，别在这儿另写一套判据）。
-import { ref, computed, h, inject } from 'vue'
+import { ref, computed, h, inject, onMounted } from 'vue'
 import {
-  NButton, NCard, NDataTable, NSpace, NAlert, NEmpty, NTag, useMessage, useDialog,
+  NButton, NCard, NDataTable, NSpace, NAlert, NEmpty, NTag, NCheckbox, useMessage, useDialog,
 } from 'naive-ui'
 import { api, canAutoUpdate } from '../api'
 import { buildTodos } from '../todos'
+import { mdNodes } from '../md'
 
 const props = defineProps({
   mods: { type: Array, default: () => [] },
@@ -25,6 +26,86 @@ const updAuto = computed(() => (props.mods || []).filter(canAutoUpdate))
 const updManual = computed(() => (props.mods || []).filter((m) => m.update_avail && !canAutoUpdate(m)))
 const summary = computed(() => todo.value.groups.filter((g) => g.items.length)
   .map((g) => `${g.label} ${g.items.length}`).join(' ｜ '))
+
+// ---- 索引体检（索引 ↔ 磁盘）----
+// 单独一块，**不并进 todo.groups**：那些判据必须「只靠 mods/pending 行算得出来」
+// （侧栏角标共用同一份 todos.js），这一项要问后端才知道，做成分组会让角标和这里对不上。
+const ih = ref(null)
+const ihBusy = ref(false)
+const ihAlign = ref(true)
+const ihBad = computed(() => !!ih.value && ((ih.value.counts || {}).ghost || 0) > 0)
+const leafName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || String(p || '')
+
+async function checkIndex(silent) {
+  ihBusy.value = true
+  try {
+    ih.value = await api.indexHealth()
+    if (!silent) {
+      const c = ih.value.counts || {}
+      msg.info(`索引体检：残留 ${c.ghost || 0} 条（可并入 ${c.merge || 0}、可清理 ${c.orphan || 0}）`
+        + `，云端名不一致 ${c.cloud || 0} 条`)
+    }
+  } catch (e) {
+    if (!silent) msg.error('索引体检失败：' + e.message)
+  } finally {
+    ihBusy.value = false
+  }
+}
+
+function repairIndex() {
+  const v = ih.value || {}
+  const merge = v.merge || []
+  const orphan = v.orphan || []
+  const cloud = v.cloud || []
+  const lines = [
+    `**要并入现存记录的 ${merge.length} 条**（本地改过名/重排过序号，索引里那条还停在旧路径；`
+      + '云端路径、载荷账目、标签都会跟着并过去）',
+    ...merge.slice(0, 5).map((x) => `・${leafName(x.folder)} → ${leafName(x.target)}`),
+    merge.length > 5 ? `・… 还有 ${merge.length - 5} 条` : '',
+    '',
+    `**要清掉索引的 ${orphan.length} 条**（本地已经没有这个文件夹，云端也没有它的载荷）`,
+    ...orphan.slice(0, 5).map((x) => `・${leafName(x.folder)}`),
+    orphan.length > 5 ? `・… 还有 ${orphan.length - 5} 条` : '',
+    '',
+    `云端还留着载荷的 ${(v.cloud_only || []).length} 条**不动**（归档 / 认领回来的条目）。`,
+    '修复**只改索引库，不删任何文件**。',
+  ].filter((x) => x !== '' || true).join('\n')
+  const content = () => h('div', { style: 'white-space: pre-wrap' }, [
+    ...mdNodes(lines),
+    cloud.length
+      ? h('div', { style: 'margin-top: 12px' }, [
+        h(NCheckbox, {
+          checked: ihAlign.value,
+          'onUpdate:checked': (x) => { ihAlign.value = !!x },
+        }, { default: () => `顺带把 ${cloud.length} 个云端目录名改成和本地一致（只改名、不覆盖）` }),
+      ])
+      : null,
+  ])
+  dialog.warning({
+    title: '修复索引残留',
+    content,
+    positiveText: '写入修复',
+    negativeText: '只看不改',
+    onPositiveClick: async () => {
+      ihBusy.value = true
+      try {
+        const r = await api.indexRepair(1, ihAlign.value && cloud.length > 0)
+        const cdone = ((r.cloud_align || {}).done || []).length
+        msg.success(`索引修复完成：并入 ${(r.merged || []).length} 条、清理 ${(r.dropped || []).length} 条`
+          + (cdone ? `、云端目录改名 ${cdone} 个` : '')
+          + (((r.failed || []).length) ? `；失败 ${r.failed.length} 条（看日志）` : ''))
+        await checkIndex(true)
+        emit('changed')
+      } catch (e) {
+        msg.error('修复失败：' + e.message)
+      } finally {
+        ihBusy.value = false
+      }
+    },
+  })
+}
+
+onMounted(() => checkIndex(true))
 
 function toggle(k) {
   openMap.value = { ...openMap.value, [k]: !openMap.value[k] }
@@ -175,6 +256,27 @@ async function fixOne(row) {
       <template v-if="total"> —— {{ summary }}</template>
       <template v-else> —— 没什么要做的 👍</template>
     </n-alert>
+
+    <n-card v-if="ih" size="small" class="grp" :class="{ zero: !ihBad }">
+      <template #header>
+        <span>索引残留（索引 ↔ 磁盘）</span>
+        <n-tag size="tiny" :bordered="false" :type="ihBad ? 'warning' : 'success'"
+               style="margin-left: 8px">{{ ih.counts.ghost }}</n-tag>
+      </template>
+      <template #header-extra>
+        <n-space :size="6">
+          <n-button size="tiny" :loading="ihBusy" @click="checkIndex(false)">重新体检</n-button>
+          <n-button size="tiny" type="primary" ghost :disabled="!ihBad"
+                    @click="repairIndex">预览并修复</n-button>
+        </n-space>
+      </template>
+      <div class="hintline">
+        把索引库和磁盘上的文件夹对一遍：<b>可并入 {{ ih.counts.merge }}</b>
+        （本地改过名/重排过序号，索引里那条还停在旧路径）、<b>可清理 {{ ih.counts.orphan }}</b>
+        （本地已经没有这个文件夹）、云端目录名不一致 <b>{{ ih.counts.cloud }}</b>、
+        云端还留着载荷、不动的 <b>{{ ih.counts.cloud_only }}</b> 条。
+      </div>
+    </n-card>
 
     <n-empty v-if="!total" description="全部处理完了，没有待办" style="margin: 48px 0" />
 

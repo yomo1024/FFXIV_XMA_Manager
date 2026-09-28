@@ -436,6 +436,28 @@ class QuarkDrive:
         return self._call("POST", PC_HOST, PC + "/file/delete", None,
                           {"action_type": 2, "filelist": [str(f) for f in fids], "exclude_fids": []})
 
+    def rename(self, fid, name):
+        """重命名文件/目录（2026-09 实测可用：POST /file/rename {fid, file_name}）。
+
+        用途：本地 Mod 改名/重排序号后，把云端那个同名目录也改过来，
+        否则云端目录名和本地对不上，之后「取回/对账」会指到不存在的目录。
+        """
+        nm = str(name or "").strip()
+        if not nm:
+            raise QuarkError("改名要给出新名字")
+        return self._call("POST", PC_HOST, PC + "/file/rename", None,
+                          {"fid": str(fid), "file_name": nm})
+
+    def move(self, fids, to_pdir_fid):
+        """把一批文件/目录挪到另一个目录（参数名是 `filelist`，不是 fids —— 报错 14001 就是这个）"""
+        fs = [str(x) for x in (fids if isinstance(fids, (list, tuple)) else [fids]) if str(x or "")]
+        if not fs:
+            raise QuarkError("移动没给要移的东西")
+        if not str(to_pdir_fid or "").strip():
+            raise QuarkError("移动没给目标目录")
+        return self._call("POST", PC_HOST, PC + "/file/move", None,
+                          {"filelist": fs, "to_pdir_fid": str(to_pdir_fid), "exclude_fids": []})
+
     # ------------------------------------------------------------- 自检
     def selftest(self) -> dict:
         """连通性自检：Cookie 体检 → 列根目录（归档真正要用的接口）→ 账号昵称 → 取直链。

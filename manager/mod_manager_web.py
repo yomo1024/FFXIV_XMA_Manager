@@ -1456,6 +1456,27 @@ def mod_cloud_path(cfg, folder) -> str:
     return base + "/" + rel.replace("\\", "/")
 
 
+def cloud_path_of(cfg, folder, stored=None) -> str:
+    """这条 Mod 在云端的目录：**先认库里记着的 `cloud_path`**，没有才按 Mod 根相对路径推导。
+
+    为什么（2026-09）：本地改名/重排序号之后，云端那个目录名可能还是旧的（旧版本留下的，
+    或者云端改名失败的那次）。库里那条记录才是「载荷到底存在哪」的权威说法；
+    按文件夹名重新推导会指到一个根本不存在的云端目录 ——
+    症状就是「明明归档过，对账却说云端没有」，再归档一次还会在云端存出第二份。
+    """
+    s = str(stored or "").strip()
+    if not s:
+        try:
+            st = mm.Store()
+            r = st.cx.execute("SELECT cloud_path FROM mods WHERE folder=?",
+                              (str(folder),)).fetchone()
+            st.cx.close()
+            s = str((r["cloud_path"] if r else "") or "").strip()
+        except Exception:
+            s = ""
+    return s or mod_cloud_path(cfg, folder)
+
+
 def _cloud_index(drv, qd, fid, prefix="", depth=0) -> dict:
     """递归列云端目录：{归一化相对路径: 条目}（最多 4 层，够用且防跑飞）"""
     idx = {}
@@ -1561,7 +1582,7 @@ def _job_cloud_reconcile(job: Job):
         if job.cancelled():
             raise mm.BackupCancelled()
         folder = r["folder"]
-        cpath = mod_cloud_path(cfg, folder)
+        cpath = cloud_path_of(cfg, folder, r.get("cloud_path"))
         job.set(i - 1, total, "%s ｜ %s" % (str(r["name"])[:24], cpath))
         try:
             fid = drv.resolve(cpath)
@@ -1648,7 +1669,7 @@ def _cloud_meta_upload(drv, cfg, folder) -> bool:
     obj = mm.index_row(cfg, folder)
     if not obj:
         return False
-    fid = drv.ensure_dir(mod_cloud_path(cfg, folder))
+    fid = drv.ensure_dir(cloud_path_of(cfg, folder))
     ok = _cloud_put_json(drv, fid, mm.MOD_META_NAME, obj)
     if ok:                      # 记指纹 → 下次同步能跳过这条（增量上传）
         try:
@@ -1833,9 +1854,104 @@ def _cloud_delete_for_folder(cfg, folder) -> dict:
         return {"error": str(e)[:160]}
 
 
+def _cloud_follow_rename(cfg, old_folder, new_folder) -> dict:
+    """本地文件夹改名/移动/重排序号之后，让**云端那个目录**也跟过来。
+
+    为什么要顺手做（2026-09 主人报的重复条目）：云端目录名就是 Mod 文件夹名，
+    本地改了名而云端没改，两边就对不上号 ——
+    之后「取回」找不到、「对账」说云端没有，再归档一次还会在云端存出第二份。
+
+    实测夸克可用：`POST /file/rename {fid, file_name}`（改目录名）、
+    `POST /file/move {filelist, to_pdir_fid}`（跨分类挪目录）。
+    改分类导致父目录也变时，先改名再挪；挪不过去就把库里记的云端路径改成**改名后的实际位置**
+    （绝不落空：库里记的就是真位置）。
+    """
+    try:
+        st = mm.Store()
+        row = st.cx.execute("SELECT cloud_path FROM mods WHERE folder=?",
+                            (str(new_folder),)).fetchone()
+        st.cx.close()
+        cpath = str((row["cloud_path"] if row else "") or "").strip()
+        if not cpath:
+            return {"skipped": "这条没归档过（云端没有它的目录）"}
+        if not (cfg.get("cloud_cookie") or "").strip():
+            return {"skipped": "没配云存储"}
+        want = mod_cloud_path(cfg, new_folder)
+        if cpath == want:
+            return {"skipped": "云端路径没变"}
+        drv = cloud_drive(cfg)
+        fid = drv.resolve(cpath)
+        if not fid:
+            _set_cloud_path(new_folder, want)
+            return {"note": "云端原来就没有这个目录，已按新路径记账", "path": want}
+        cur, new_leaf = cpath, want.rstrip("/").rsplit("/", 1)[-1]
+        if cpath.rstrip("/").rsplit("/", 1)[-1] != new_leaf:
+            drv.rename(fid, new_leaf)
+            cur = cpath.rstrip("/").rsplit("/", 1)[0] + "/" + new_leaf
+        if cur != want:                      # 父目录也变了（改了分类/类型/子分类）
+            try:
+                drv.move([fid], drv.ensure_dir(want.rstrip("/").rsplit("/", 1)[0]))
+                cur = want
+            except Exception as e:
+                mm.log("云端目录改名成功、挪到新分类失败（仍在 %s）：%s" % (cur, e))
+        _set_cloud_path(new_folder, cur)
+        mm.log("云端目录跟着改名：%s → %s" % (cpath, cur))
+        return {"moved": {"from": cpath, "to": cur}}
+    except Exception as e:
+        mm.log("云端目录跟着改名失败（库里仍指向原位置）：\n" + traceback.format_exc())
+        return {"error": str(e)[:160], "note": "云端那份位置没动，库里记录仍指向它"}
+
+
+def _cloud_align_folders(cfg, items) -> dict:
+    """把云端目录名改回和本地文件夹一致（`index_health` 的 cloud 清单）。
+
+    只改名、不动内容；目标名在云端**已被占用就跳过**（绝不覆盖）。
+    用途：老版本改名留下的「云端还是旧名」，对齐之后取回/对账/归档才是同一个目录。
+    """
+    done, skip, bad = [], [], []
+    try:
+        if not (cfg.get("cloud_cookie") or "").strip():
+            return {"skipped": "没配云存储"}
+        drv = cloud_drive(cfg)
+        for it in (items or []):
+            folder = str(it.get("folder") or "")
+            cpath = str(it.get("cloud_path") or "")
+            want = str(it.get("want") or "")
+            if not (folder and cpath and want):
+                continue
+            try:
+                fid = drv.resolve(cpath)
+                if not fid:
+                    skip.append({"folder": folder, "why": "云端没有这个目录"})
+                    continue
+                parent = cpath.rstrip("/").rsplit("/", 1)[0]
+                if drv.resolve(parent + "/" + want):
+                    skip.append({"folder": folder, "why": "云端已经有同名目录：%s" % want})
+                    continue
+                drv.rename(fid, want)
+                new_path = parent + "/" + want
+                _set_cloud_path(folder, new_path)
+                mm.log("云端目录名对齐：%s → %s" % (cpath, new_path))
+                done.append({"folder": folder, "from": cpath, "to": new_path})
+            except Exception as e:
+                bad.append({"folder": folder, "error": str(e)[:160]})
+        return {"done": done, "skipped": skip, "failed": bad}
+    except Exception as e:
+        mm.log(traceback.format_exc())
+        return {"error": str(e)[:160]}
+
+
+def _set_cloud_path(folder, path) -> None:
+    try:
+        st = mm.Store()
+        st.set_cloud(folder, path=str(path))
+        st.cx.close()
+    except Exception:
+        mm.log(traceback.format_exc())
+
+
 def _cloud_base(cfg) -> str:
     return "/" + str(cfg.get("cloud_root") or "/FFXIV/MOD").strip("/")
-
 
 def _job_cloud_discover(job: Job):
     """任务包装：真正的活在 cloud_discover_core（界面弹窗要走同步接口，同一份逻辑）"""
@@ -2124,7 +2240,7 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
             results.append({"folder": folder, "name": name, "ok": True, "files": 0, "size": 0,
                             "note": "本地已经没有载荷了"})
             continue
-        cpath = mod_cloud_path(cfg, folder)
+        cpath = cloud_path_of(cfg, folder, row.get("cloud_path"))
         recs, failed = [], []          # 载荷
         crecs, cfailed = [], []        # 预览图（state=cover）
         skipped = 0
@@ -3797,6 +3913,26 @@ def api_cloud_state():
     return {"ok": True, "counts": counts}
 
 
+def api_index_health():
+    """索引体检（**只看不改**）：列出指向不存在路径的残留记录与建议动作
+
+    对应「重排序号/改名之后一个 Mod 变两条、删了还在列表里」那类历史遗留。
+    """
+    return mm.index_health(cfg_now())
+
+
+def api_index_repair(body):
+    """索引修复：{write: 0|1, align_cloud: 0|1}。**write=0 只报计划，一个字节都不改。**"""
+    b = body or {}
+    cfg = cfg_now()
+    plan = mm.index_repair(cfg, write=bool(b.get("write")))
+    if not plan.get("dry_run"):
+        mod_index(force=True)
+        if b.get("align_cloud"):        # 顺带把云端目录名改回和本地一致（可选）
+            plan["cloud_align"] = _cloud_align_folders(cfg, mm.index_health(cfg).get("cloud"))
+    return plan
+
+
 def api_cloud_archive(body):
     """开始归档任务（folders 为空 = 全部有载荷的 mod）"""
     cfg = cfg_now()
@@ -4785,6 +4921,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_cloud_check())
                 if u.path == "/api/cloud/state":
                     return self._json(api_cloud_state())
+                if u.path == "/api/index/health":
+                    return self._json(api_index_health())
                 if u.path == "/api/cloud/file":
                     return self.api_cloud_file(q)
                 if u.path == "/api/cloud/open":
@@ -4912,6 +5050,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/cloud/index-restore":
                 r = api_cloud_index_restore(body or {})
                 return self._json(r, 400 if r.get("error") else 200)
+            if u.path == "/api/index/repair":
+                r = api_index_repair(body or {})
+                return self._json(r, 400 if (r or {}).get("error") else 200)
             if u.path == "/api/cloud/claim":
                 r = api_cloud_claim(body or {})
                 return self._json(r, 400 if r.get("error") else 200)
@@ -5069,6 +5210,7 @@ class Handler(BaseHTTPRequestHandler):
                           b.get("name") if b.get("name") is not None else None,
                           int(b["seq"]) if b.get("seq") not in (None, "") else None,
                           b.get("addr") if b.get("addr") is not None else None)
+        cloudf = _cloud_follow_rename(cfg, folder, t) if str(t) != folder else {"skipped": "路径没变"}
         mm.cmd_scan(cfg, quiet=True)
         # 「影响/替换」不在文件夹名里，改名/移动之后按新路径单独写一次
         got_aff = ""
@@ -5076,7 +5218,7 @@ class Handler(BaseHTTPRequestHandler):
             got_aff = apply_meta_after_import(cfg, t, affects=b.get("affects")).get("affects") or ""
         mod_index(force=True)
         return self._json({"ok": True, "target": str(t), "rel": safe_rel(t, cfg["root"]),
-                           "affects": got_aff})
+                           "affects": got_aff, "cloud": cloudf})
 
     def mod_batch_edit(self, b):
         """批量改分类/类型/子分类（一次扫描，不做 N 次）"""
@@ -5098,6 +5240,8 @@ class Handler(BaseHTTPRequestHandler):
                     f.get("zone") or None,
                     f.get("subcat") if f.get("subcat") is not None else None,
                     None, None, None, None)
+                if str(t) != folder:            # 云端目录跟着走（改分类/类型/子分类时父目录也会变）
+                    _cloud_follow_rename(cfg, folder, t)
                 done.append(safe_rel(t, root))
             except Exception as e:
                 bad.append("%s：%s" % (Path(folder).name, e))
