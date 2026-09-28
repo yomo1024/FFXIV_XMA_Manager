@@ -38,6 +38,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 import mod_manager as mm                      # noqa: E402
+import zipfile
 import app_version                            # noqa: E402  版本号唯一来源
 
 mm.sys.excepthook = sys.__excepthook__        # 服务端不要弹错误对话框
@@ -278,6 +279,7 @@ JOB_TITLES = {"cover_inject": "封面插包", "scan": "扫描目录", "export": 
               "fetch": "解析并下载入库",
               "update_check": "检查更新", "mod_update": "更新 Mod（覆盖下载）",
               "cloud_archive": "归档到云盘", "cloud_restore": "从云盘取回",
+             "cloud_discover": "扫描网盘新内容", "cloud_claim": "认领到库",
               "cloud_verify": "校验云端文件",
               "cloud_reconcile": "与网盘对账（重建归档状态）"}
 
@@ -303,6 +305,29 @@ def _job_scan(job: Job):
     return {"mods": len(mods), "pruned": pruned}
 
 
+def excel_auto_on(cfg) -> bool:
+    """操作后要不要自动重新生成汇总表。
+
+    ★ 默认 **False**：汇总表是**给人看的说明文档**，不属于索引（索引只有 SQLite）。
+      为什么必须能关：以前每次导入/改名/删除都会顺手重写一遍 xlsx，而 **xlsx 被 Excel/WPS 打开时写不进去**
+      → 整个任务被带成「出错」（而导入其实已经成功了）。
+    """
+    return bool(cfg.get("excel_auto", False))
+
+
+def _auto_export(job: Job, cfg) -> dict | None:
+    """按开关决定要不要自动重生成汇总表；**任何失败都不影响调用方**。"""
+    if not excel_auto_on(cfg):
+        return None
+    try:
+        return _job_export(job)
+    except mm.BackupCancelled:
+        raise
+    except Exception as e:
+        mm.log("自动生成汇总表失败（不影响本次操作）：%s\n%s" % (e, traceback.format_exc()))
+        return {"error": "汇总表没生成（%s）——它只是说明文档，不影响刚才的操作" % str(e)[:80]}
+
+
 def _job_export(job: Job):
     cfg = cfg_now()
     mods = mm.Store().all()
@@ -312,8 +337,12 @@ def _job_export(job: Job):
     hashes = {m["folder"]: m.get("img_hash") or "" for m in mods}
     job.set(0, max(1, len(mods)), "开始生成…")
     out = Path(cfg["excel"])
-    n_cat, n_mod, n_img = mm.write_excel(
-        mods, cfg, out, hashes, progress=lambda d, t, txt: job.set(d, t, txt))
+    try:
+        n_cat, n_mod, n_img = mm.write_excel(
+            mods, cfg, out, hashes, progress=lambda d, t, txt: job.set(d, t, txt))
+    except PermissionError:
+        raise RuntimeError("写不进汇总表：%s 正被 Excel/WPS 之类打开着。关掉它再试，"
+                           "或者换个文件名。\n（汇总表只是给人看的说明文档，不影响索引和其它功能）" % out)
     mod_index(force=True)
     return {"sheets": n_cat, "mods": n_mod, "images": n_img, "path": str(out)}
 
@@ -357,7 +386,7 @@ def _job_restore(job: Job):
     if inc_mods and not job.cancelled():
         job.set(1, 1, "重扫索引并重新生成 Excel…")
         _job_scan(job)
-        _job_export(job)
+        _auto_export(job, cfg)
     mod_index(force=True)
     return {k: v for k, v in r.items() if k != "renamed_list"} | {
         "renamed": [b for _a, b in r.get("renamed_list", [])]}
@@ -385,10 +414,10 @@ def _job_import(job: Job):
             targets.append(str(t))
         except Exception as e:
             errors.append("%s：%s" % (Path(str(f)).name, e))
-    job.set(len(files), len(files), "重扫索引并重新生成 Excel…")
+    job.set(len(files), len(files), "重扫索引…")
     if done:
         _job_scan(job)
-        _job_export(job)
+        _auto_export(job, cfg)          # 汇总表只是说明文档：默认不自动生成，失败也不影响导入
     ai = auto_install_after_import(cfg, targets, job)     # ★ 先装：归档会删本地载荷
     aa = auto_archive_after_import(cfg, targets, job)
     return {"ok": done, "failed": errors, "targets": targets,
@@ -676,8 +705,7 @@ def _job_fetch(job: Job):
         affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
         addr=addr)
     _site = record_site_update(cfg, target, addr)
-    if q.get("export", True):
-        _job_export(job)
+    _auto_export(job, cfg)
     ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装（见 auto_install 注释）
     aa = auto_archive_after_import(cfg, [str(target)], job)
     return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
@@ -805,8 +833,7 @@ def _job_selfdownload(job: Job):
             affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
             addr=addr)
         record_site_update(cfg, target, addr)
-        if q.get("export", True):
-            _job_export(job)
+        _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
@@ -1587,6 +1614,172 @@ def _job_cloud_reconcile(job: Job):
             "total_covers": sum(x.get("covers") or 0 for x in found)}
 
 
+def _cloud_base(cfg) -> str:
+    return "/" + str(cfg.get("cloud_root") or "/FFXIV/MOD").strip("/")
+
+
+def _job_cloud_discover(job: Job):
+    """任务包装：真正的活在 cloud_discover_core（界面弹窗要走同步接口，同一份逻辑）"""
+    return cloud_discover_core(cfg_now(), job)
+
+
+def cloud_discover_core(cfg, job=None):
+    """**反向**扫网盘：找出「云端有、库里没有」的 Mod，以及「两边都有但大小不一样」的。
+
+    为什么需要：云端从头到尾**没放过索引文件**（索引只在本地 SQLite），所以
+      · 别人传上去的 / 换机后云端多出来的 / 手工整理的 Mod —— 管理器根本不知道它们存在；
+      · 「与网盘对账」只认**库里已有的条目**，救不了这类。
+    这里从网盘根往下扫（分类/类型[/子分类]/mod 结构），产出两份清单交给界面：
+      · cloud_only —— 云端有、库里没有 → 可「认领到库」（只写索引，不下载）
+      · differ     —— 两边都有但载荷大小不一致 → 让主人选「以云端为准」还是「用本地覆盖云端」
+    """
+    if not (cfg.get("cloud_cookie") or "").strip():
+        raise RuntimeError("还没填夸克 Cookie（设置 → 云存储）")
+    drv = cloud_drive(cfg)
+    base = _cloud_base(cfg)
+    root = Path(cfg.get("root") or "")
+    st = mm.Store()
+    known = {str(r["folder"]): r for r in st.all()}
+    st.cx.close()
+    if job is not None:
+        job.set(0, 1, "列网盘目录 %s…" % base)
+    bfid = drv.resolve(base)
+    if not bfid:
+        raise RuntimeError("网盘里没有这个目录：%s（设置 → 云存储 → 云端根目录）" % base)
+    cloud_only, differ = [], []
+    seen = set()
+
+    def walk(fid, parts, depth):
+        if depth > 5 or (job is not None and job.cancelled()):
+            return
+        try:
+            items = drv.list_dir(fid)
+        except Exception:
+            mm.log(traceback.format_exc())
+            return
+        files = [x for x in items if not x.get("dir")]
+        pays = [x for x in files
+                if os.path.splitext(x.get("file_name") or "")[1].lower() in PAYLOAD_EXT]
+        # 分类/类型 这一层不该直接放载荷；只从「分类/类型/mod」起才算一条 mod
+        if pays and len(parts) >= 3:
+            rel = "/".join(parts)
+            cpath = base + "/" + rel
+            if cpath in seen:
+                return
+            seen.add(cpath)
+            size = sum(int(x.get("size") or 0) for x in pays)
+            covs = [x for x in files
+                    if os.path.splitext(x.get("file_name") or "")[1].lower() in COVER_EXT]
+            local = str(root / os.path.join(*parts)) if str(root) else ""
+            rec = {"cloud_path": cpath, "rel": rel, "folder": local,
+                   "files": len(pays), "size": size, "covers": len(covs),
+                   "name": parts[-1]}
+            row = known.get(local)
+            if row is None:
+                cloud_only.append(rec)
+            else:
+                lsize, lfiles = _payload_stat(local) if (local and os.path.isdir(local)) else (0, 0)
+                rec["local_files"], rec["local_size"] = lfiles, lsize
+                rec["db_cloud_size"] = int(row.get("cloud_size") or 0)
+                if lfiles and lsize != size:
+                    rec["why"] = "两边都有但大小不同（云端 %s ｜ 本地 %s）" % (
+                        mm.fmt_size(size), mm.fmt_size(lsize))
+                    differ.append(rec)
+                elif not lfiles and lsize == 0:
+                    # 库里记着有、云端也有，但本地载荷已经没了 → 只是状态，不算冲突
+                    pass
+            return
+        for d in [x for x in items if x.get("dir")]:
+            nm = d.get("file_name") or ""
+            if nm:
+                walk(d.get("fid"), parts + [nm], depth + 1)
+
+    walk(bfid, [], 1)
+    mm.log("扫网盘新内容：云端有 %d 条库里没有、两边都有但大小不同 %d 条（根 %s）"
+           % (len(cloud_only), len(differ), base))
+    return {"base": base, "cloud_only": cloud_only, "differ": differ,
+            "known": len(known),
+            "total_size": sum(x["size"] for x in cloud_only)}
+
+
+def _parse_mod_folder_name(name):
+    """从 mod 文件夹名（`3.[作者] 名称`）里拆出 序号/作者/名称"""
+    seq = 0
+    rest = str(name or "")
+    m = re.match(r"^\s*(\d+)\s*[.．]\s*(.*)$", rest)
+    if m:
+        seq = int(m.group(1))
+        rest = m.group(2)
+    author, nm = mm.split_mod_name(rest)
+    return seq, (author or "").strip(), (nm or rest).strip()
+
+
+def api_cloud_claim(body):
+    """把「云端有、库里没有」的 Mod **认领到索引库**（只写索引 + 云端载荷清单，不下载任何文件）。
+
+    认领后：列表里能看到它、能「检查更新」、点「安装到游戏」时会自动从云端取回。
+    本地不会多出文件 —— 载荷仍然只在云端。
+    """
+    cfg = cfg_now()
+    if not (cfg.get("cloud_cookie") or "").strip():
+        return {"error": "还没填夸克 Cookie（设置 → 云存储）"}
+    items = body.get("items") or []
+    if not items:
+        return {"error": "没选要认领的"}
+    drv = cloud_drive(cfg)
+    base = _cloud_base(cfg)
+    root = Path(cfg.get("root") or "")
+    if not str(root):
+        return {"error": "还没设 Mod 根目录"}
+    st = mm.Store()
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    ok, bad = [], []
+    for it in items:
+        rel = str(it.get("rel") or "").strip().strip("/")
+        parts = [p for p in rel.split("/") if p]
+        if len(parts) < 3:
+            bad.append({"rel": rel, "why": "云端路径太浅，认不出分类/类型/Mod 三层"})
+            continue
+        category, zone, subcat = parts[0], parts[1], "/".join(parts[2:-1])
+        if zone not in ("SFW", "NSFW"):
+            zone, subcat = "SFW", "/".join(parts[1:-1])
+        seq, author, name = _parse_mod_folder_name(parts[-1])
+        folder = str(root / os.path.join(*parts))
+        try:
+            fid = drv.resolve(base + "/" + rel)
+            allf = _cloud_walk(drv, fid) if fid else []
+        except Exception as e:
+            bad.append({"rel": rel, "why": str(e)[:120]})
+            continue
+        pays = [x for x in allf if os.path.splitext(x[0])[1].lower() in PAYLOAD_EXT]
+        covs = [x for x in allf if os.path.splitext(x[0])[1].lower() in COVER_EXT]
+        if not pays:
+            bad.append({"rel": rel, "why": "云端这个目录里没有载荷文件"})
+            continue
+        size = sum(x[1] for x in pays)
+        st.cx.execute(
+            "INSERT INTO mods (folder,category,seq,author,nsfw,subcat,name,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder) DO UPDATE SET "
+            "category=excluded.category, seq=excluded.seq, author=excluded.author, "
+            "nsfw=excluded.nsfw, subcat=excluded.subcat, name=excluded.name",
+            (folder, category, seq, author, zone, subcat, name, now))
+        st.cx.commit()
+        st.set_cloud(folder, backend="quark", path=base + "/" + rel, state="archived",
+                     size=size, synced=now)
+        st.set_payload_files(folder, [{"rel_path": x[0], "size": x[1], "cloud_fid": x[2]}
+                                      for x in pays], state="archived")
+        if covs:
+            st.set_payload_files(folder, [{"rel_path": x[0], "size": x[1], "cloud_fid": x[2]}
+                                          for x in covs], state="cover")
+        ok.append({"rel": rel, "folder": folder, "name": name, "files": len(pays),
+                   "size": size, "covers": len(covs)})
+        mm.log("认领云端 Mod：%s → %s（%d 个载荷 / %.1f MB）"
+               % (rel, name, len(pays), size / 1048576.0))
+    st.cx.close()
+    mod_index(force=True)
+    return {"ok": ok, "failed": bad, "count": len(ok)}
+
+
 def _job_cloud_archive(job: Job):
     """归档：整条 mod 的载荷树上传到夸克 → 逐文件校验 → 通过后才删本地载荷"""
     cfg = cfg_now()
@@ -2128,7 +2321,7 @@ def _job_mod_update(job: Job):
         job.set(len(folders), len(folders), "重扫索引…")
         _job_scan(job)
         if job.params.get("export", True):
-            _job_export(job)
+            _auto_export(job, cfg)
     return {"ok": done, "failed": failed}
 
 
@@ -2185,8 +2378,7 @@ def _job_import_file(job: Job):
             affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
             addr=addr)
         record_site_update(cfg, target, addr)
-        if q.get("export", True):
-            _job_export(job)
+        _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
         return {"mod": Path(target).name, "rel": safe_rel(target, cfg.get("root") or ""),
@@ -2259,6 +2451,7 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "fetch": _job_fetch,
              "update_check": _job_update_check, "mod_update": _job_mod_update,
              "cloud_reconcile": _job_cloud_reconcile,
+             "cloud_discover": _job_cloud_discover,
              "cloud_archive": _job_cloud_archive, "cloud_restore": _job_cloud_restore,
              "cloud_verify": _job_cloud_verify, "cover_inject": _job_cover_inject}
 
@@ -3373,6 +3566,7 @@ def api_settings():
     # 自动归档是三态：界面要显示**实际生效值**，并标出「这是跟着云存储推出来的默认，不是你定的」
     out["auto_archive_after_import"] = auto_archive_enabled(cfg)
     out["auto_archive_default"] = cfg.get("auto_archive_after_import", None) is None
+    out["excel_auto"] = excel_auto_on(cfg)          # 汇总表：操作后是否自动重生成（默认关）
     out["auto_install_after_import"] = auto_install_mode(cfg)
     out["auto_install_default"] = cfg.get("auto_install_after_import", None) is None
     return out
@@ -3434,8 +3628,121 @@ def bridge_call(path, body=None, method=None, timeout=20, need_token=True):
             "③「设置」里的插件地址是 %s ④ token 填了。" % (e, url))
 
 
+# 压缩包：XMA 上有的 mod 给的就是 .zip/.7z/.rar（不是 .pmp）—— 那就得**在包里找 .pmp/.ttmp2**
+ARCHIVE_EXT = (".zip", ".7z", ".rar")
+PKG_EXT_INNER = (".pmp", ".pcp", ".ttmp", ".ttmp2")
+
+
+def _seven_zip() -> str:
+    """7-Zip 可执行文件（.7z/.rar 只能靠它；本机已装 7-Zip）"""
+    for c in (os.environ.get("SEVENZIP") or "", r"C:\Program Files\7-Zip\7z.exe",
+              r"C:\Program Files (x86)\7-Zip\7z.exe", r"C:\Program Files\WinRAR\UnRAR.exe"):
+        try:
+            if c and Path(c).is_file():
+                return c
+        except OSError:
+            pass
+    return shutil.which("7z") or shutil.which("7za") or ""
+
+
+def archive_list(arc) -> list:
+    """列出压缩包里的条目（zip 用标准库；7z/rar 用 7-Zip）。列不出来返回 []。"""
+    ext = Path(str(arc)).suffix.lower()
+    if ext == ".zip":
+        try:
+            with zipfile.ZipFile(str(arc)) as z:
+                return z.namelist()
+        except Exception:
+            mm.log("读 zip 清单失败：%s\n%s" % (arc, traceback.format_exc()))
+            return []
+    exe = _seven_zip()
+    if not exe:
+        return []
+    try:
+        out = subprocess.run([exe, "l", "-ba", "-slt", str(arc)], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=180).stdout
+    except Exception:
+        mm.log("7-Zip 列清单失败：%s\n%s" % (arc, traceback.format_exc()))
+        return []
+    names, me = [], os.path.normcase(str(arc))
+    for ln in out.splitlines():
+        if ln.startswith("Path = "):
+            v = ln.split("=", 1)[1].strip()
+            if v and os.path.normcase(v) != me:
+                names.append(v)
+    return names
+
+
+def archive_extract(arc, names, dest) -> list:
+    """把压缩包里的指定条目解到 dest，返回真正落地的文件路径（zip 走标准库，7z/rar 走 7-Zip）"""
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    got = []
+    ext = Path(str(arc)).suffix.lower()
+    if ext == ".zip":
+        try:
+            with zipfile.ZipFile(str(arc)) as z:
+                for n in names:
+                    try:
+                        z.extract(n, str(dest))
+                        got.append(dest / n)
+                    except Exception:
+                        mm.log(traceback.format_exc())
+        except Exception:
+            mm.log(traceback.format_exc())
+        return [g for g in got if g.is_file()]
+    exe = _seven_zip()
+    if not exe:
+        return []
+    try:
+        subprocess.run([exe, "x", "-y", "-o" + str(dest), str(arc)] + list(names),
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+    except Exception:
+        mm.log(traceback.format_exc())
+    return [dest / n for n in names if (dest / n).is_file()]
+
+
+def _unpack_dir(folder) -> Path:
+    """从压缩包里解出来的包放这儿（放暂存目录，跟「_云端取回」一个风格）"""
+    d = Path(mm.resolve_dirs(cfg_now())[1]) / "_从压缩包解出" / Path(str(folder)).name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _find_package_in_archives(folder, arcs) -> Path:
+    """压缩包里找能装的东西：① 里面有 .pmp/.ttmp2 → 解出来用；② 包本身就是 Penumbra 包（根部 meta.json）→ 改后缀当 .pmp
+
+    Penumbra 官方对 .zip/.rar/.7z 的做法也是「搜一遍里面的 .pmp/.ttmp2，但可能只有作者的源文件」。
+    """
+    for arc in arcs:
+        names = archive_list(arc)
+        if not names:
+            continue
+        inner = [n for n in names if os.path.splitext(n)[1].lower() in PKG_EXT_INNER]
+        if inner:
+            dest = _unpack_dir(folder)
+            got = archive_extract(arc, inner, dest)
+            if got:
+                mm.log("从压缩包里取出可安装的包：%s → %s" % (Path(str(arc)).name, got[0]))
+                return got[0]
+        if any(os.path.basename(n).lower() == "meta.json" for n in names):
+            dest = _unpack_dir(folder)
+            dst = dest / (Path(str(arc)).stem + ".pmp")     # .pmp 就是「根部有 meta.json 的 zip」
+            try:
+                shutil.copy2(str(arc), str(dst))
+                mm.log("压缩包本身就是 Penumbra 包（根部有 meta.json）→ 复制成 %s" % dst.name)
+                return dst
+            except OSError:
+                mm.log(traceback.format_exc())
+    raise SystemExit(
+        "「%s」里只有压缩包（%s）：包里没找到 .pmp/.ttmp/.ttmp2，也没有 meta.json —— "
+        "Penumbra 装不了这种包（多半只是作者的源文件，不是 mod 包）。%s"
+        % (Path(str(folder)).name, "、".join(Path(str(a)).name for a in arcs[:3]),
+           "（.7z/.rar 需要装 7-Zip 才能打开）" if not _seven_zip() else ""))
+
+
 def _bridge_find_package(folder):
-    """在 Mod 文件夹里找可安装的 mod 包"""
+    """在 Mod 文件夹里找可安装的 mod 包（没有 .pmp 时**去压缩包里找** —— XMA 上有的 mod 就给压缩包）"""
     p = Path(folder)
     if not p.is_dir():
         raise SystemExit("Mod 文件夹不存在：%s" % folder)
@@ -3444,6 +3751,10 @@ def _bridge_find_package(folder):
                       key=lambda x: len(str(x)))
         if hits:
             return hits[0]
+    arcs = sorted((x for x in p.rglob("*") if x.suffix.lower() in ARCHIVE_EXT),
+                  key=lambda x: len(str(x)))
+    if arcs:
+        return _find_package_in_archives(folder, arcs)
     raise SystemExit("「%s」里没有 .pmp/.pcp/.ttmp 包，插件没法自动装（已解开的目录要先打包成 .pmp）"
                      % p.name)
 
@@ -4168,6 +4479,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_bridge())
                 if u.path == "/api/tags":
                     return self._json(api_tags())
+                if u.path == "/api/cloud/discover":
+                    # 界面弹窗要拿到清单，所以同步走一次（本机、几十秒）
+                    return self._json(cloud_discover_core(cfg_now()))
                 if u.path == "/api/cloud/check":
                     return self._json(api_cloud_check())
                 if u.path == "/api/cloud/state":
@@ -4296,6 +4610,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "kind": "cloud_reconcile",
                                    "title": JOB_TITLES.get("cloud_reconcile"),
                                    "dry_run": not a["write"]})
+            if u.path == "/api/cloud/claim":
+                r = api_cloud_claim(body or {})
+                return self._json(r, 400 if r.get("error") else 200)
             if u.path == "/api/cloud/archive":
                 a = api_cloud_archive(body)
                 if a.get("error"):
@@ -4810,7 +5127,7 @@ class Handler(BaseHTTPRequestHandler):
         allow = ("root", "excel", "download_dir", "inbox_dir", "install_dir", "backup_dir",
                  "browser_path", "browser_dir", "browser_port", "thumb_width",
                  "embed_images", "autofilter", "bridge_url", "bridge_token",
-                 "auto_open_browser", "auto_archive_after_import", "auto_install_after_import",
+                 "auto_open_browser", "auto_archive_after_import", "auto_install_after_import", "excel_auto",
                  # ---- 云存储（夸克归档）----
                  "cloud_backend", "cloud_cookie", "cloud_root", "cloud_share_url")
         changed = {}
@@ -4827,7 +5144,7 @@ class Handler(BaseHTTPRequestHandler):
                 changed["browser_port"] = int(changed["browser_port"])
             except Exception:
                 changed.pop("browser_port")
-        for k in ("embed_images", "autofilter", "auto_archive_after_import"):
+        for k in ("embed_images", "autofilter", "auto_archive_after_import", "excel_auto"):
             if k in changed:
                 changed[k] = bool(changed[k])
         for k in ("root", "excel"):

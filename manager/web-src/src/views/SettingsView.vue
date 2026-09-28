@@ -173,6 +173,7 @@ async function save() {
       cloud_root: s.value.cloud_root || '/MOD',
       cloud_share_url: s.value.cloud_share_url || '',
       auto_archive_after_import: !!s.value.auto_archive_after_import,
+      excel_auto: !!s.value.excel_auto,
     }
     const r = await api.saveSettings(body)
     msg.success('已保存：' + (r.changed || []).join('、'))
@@ -391,6 +392,16 @@ async function save() {
             <span class="opt-lbl">表头筛选</span>
             <n-switch v-model:value="s.autofilter" size="small" />
             <span class="hint">给 Excel 表头加筛选按钮</span>
+          </div>
+          <div class="opt">
+            <span class="opt-lbl">操作后自动生成</span>
+            <n-switch v-model:value="s.excel_auto" size="small" />
+            <span class="hint">
+              <b>默认关</b>：汇总表只是给人看的说明文档，不参与索引（索引在本地
+              <code>mod_manager.db</code>）。开着的话每次导入/改名/删除后都会重写一遍 xlsx ——
+              但它要是正被 Excel/WPS 打开就写不进去，所以默认不自动写，需要时点「生成 Excel」。
+              <b>无论开关如何，生成失败都不会影响你的操作。</b>
+            </span>
           </div>
         </div>
       </n-card>

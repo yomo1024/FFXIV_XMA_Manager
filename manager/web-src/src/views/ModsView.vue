@@ -352,6 +352,88 @@ function askReconcile(folders) {
   })
 }
 
+// ---------------- 扫描网盘新内容（云端有、库里没有的 Mod）----------------
+// 为什么需要：云端从来不存索引（索引只在本地），所以网盘上多出来的 Mod 管理器不知道；
+// 「与网盘对账」只认库里已有的条目，救不了这类 —— 这里反向扫一遍。
+const discOpen = ref(false)
+const discBusy = ref(false)
+const discData = ref(null)
+const discPick = ref([])
+const discTab = ref('new')
+
+async function scanCloud() {
+  discOpen.value = true
+  discBusy.value = true
+  discData.value = null
+  discPick.value = []
+  try {
+    discData.value = await api.cloudDiscover()
+    const n = ((discData.value || {}).cloud_only || []).length
+    discTab.value = n ? 'new' : 'diff'
+  } catch (e) {
+    msg.error('扫网盘失败：' + e.message, { duration: 15000 })
+    discOpen.value = false
+  } finally {
+    discBusy.value = false
+  }
+}
+
+async function claimPick() {
+  const items = (discData.value ? discData.value.cloud_only || [] : [])
+    .filter((x) => discPick.value.includes(x.rel))
+    .map((x) => ({ rel: x.rel }))
+  if (!items.length) return msg.warning('先勾要认领的')
+  discBusy.value = true
+  try {
+    const r = await api.cloudClaim(items)
+    if (r.error) throw new Error(r.error)
+    msg.success(`已认领 ${r.count} 条进索引库（只写索引，没下载任何文件）` +
+      ((r.failed || []).length ? `；${r.failed.length} 条没认成（看日志）` : ''), { duration: 12000 })
+    emit('changed')
+    await scanCloud()
+  } catch (e) {
+    msg.error('认领失败：' + e.message, { duration: 15000 })
+  } finally {
+    discBusy.value = false
+  }
+}
+
+// 冲突：以云端为准（取回覆盖本地）/ 用本地覆盖云端（重新上传）
+function conflictUseCloud(row) {
+  dialog.warning({
+    title: '以云端为准？',
+    content: `「${row.name}」会从云端取回并覆盖本地载荷（本地那份进回收站，可还原）。\n` +
+      `${row.why || ''}`,
+    positiveText: '从云端取回',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      startJob('cloud_restore', { folders: [row.folder] })
+      msg.info('开始从云端取回…')
+    },
+  })
+}
+function conflictPushLocal(row) {
+  dialog.warning({
+    title: '用本地覆盖云端？',
+    content: `会把本地「${row.name}」的载荷重新上传覆盖云端那份（云端同名旧文件先删）。\n` +
+      `${row.why || ''}\n\n本地文件会保留（不删本地）。`,
+    positiveText: '上传覆盖云端',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      startJob('cloud_archive', { folders: [row.folder], delete_local: false })
+      msg.info('开始上传覆盖云端…')
+    },
+  })
+}
+
+const discCols = computed(() => ([
+  { type: 'selection' },                 // ★ 必须有：不然勾不上（没有列就没有复选框）
+  { title: '名称', key: 'name', ellipsis: { tooltip: true } },
+  { title: '云端路径', key: 'rel', ellipsis: { tooltip: true } },
+  { title: '载荷', key: 'files', width: 70 },
+  { title: '大小', key: 'sizeh', width: 90 },
+]))
+
 // ---------------- 云端文件下载（带进度条）----------------
 const dl = ref(null)               // {name, done, total, pct, speed, state, error}
 let dlCtl = null                   // AbortController，取消用
@@ -1283,6 +1365,7 @@ async function copyPath() {
         <n-button size="small" :loading="cloudBusy" @click="archiveCloud()">归档到云盘</n-button>
         <n-button size="small" :loading="cloudBusy" @click="restoreCloud()">从云盘取回</n-button>
         <n-button size="small" :loading="cloudBusy" @click="askReconcile()">与网盘对账</n-button>
+        <n-button size="small" :loading="discBusy && discOpen" @click="scanCloud">扫描网盘新内容</n-button>
         <template v-if="updCount">
           <n-button size="small" :type="onlyUpd ? 'primary' : 'default'"
                     @click="onlyUpd = !onlyUpd">只看有新版（{{ updCount }}）</n-button>
@@ -1901,6 +1984,51 @@ async function copyPath() {
           <n-button size="small" type="primary" :loading="repReplacing" @click="submitReplace">开始替换</n-button>
         </n-space>
       </template>
+    </n-modal>
+    <n-modal v-model:show="discOpen" preset="card" style="width: 980px" title="扫描网盘新内容">
+      <n-spin :show="discBusy">
+        <div class="dim" style="margin-bottom: 10px">
+          索引只存在本地（网盘里<b>不放</b>索引），所以网盘上多出来的 Mod 管理器不知道 ——
+          这一页把网盘扫一遍给你看。认领**只写索引、不下载任何文件**，之后点「安装到游戏」时会自动从云端取回。
+        </div>
+        <n-tabs v-model:value="discTab" type="line" size="small">
+          <n-tab-pane name="new"
+                      :tab="`云端有、库里没有（${((discData || {}).cloud_only || []).length}）`">
+            <n-space align="center" style="margin-bottom: 8px">
+              <n-button size="small" type="primary" :disabled="!discPick.length" @click="claimPick">
+                认领到库（{{ discPick.length }}）
+              </n-button>
+              <n-button size="small" @click="discPick = ((discData || {}).cloud_only || []).map((x) => x.rel)">
+                全选
+              </n-button>
+              <n-button size="small" @click="discPick = []">清空</n-button>
+              <span class="dim">共 {{ ((discData || {}).cloud_only || []).length }} 条</span>
+            </n-space>
+            <n-data-table :columns="discCols" :data="((discData || {}).cloud_only || []).map((x) => ({ ...x, sizeh: humanSize(x.size) }))"
+                          size="small" :max-height="420" :scroll-x="880"
+                          :row-key="(r) => r.rel" :checked-row-keys="discPick"
+                          @update:checked-row-keys="(k) => (discPick = k)"
+                          :row-props="() => ({ style: 'cursor: default' })">
+              <template #empty><n-empty description="网盘上没有库里没有的 Mod（都是已知的）" /></template>
+            </n-data-table>
+          </n-tab-pane>
+          <n-tab-pane name="diff"
+                      :tab="`两边都有但大小不同（${((discData || {}).differ || []).length}）`">
+            <div class="dim" style="margin-bottom: 8px">
+              这些两边都有、但载荷大小不一样 —— 选一边为准：
+              <b>以云端为准</b>会取回覆盖本地；<b>用本地覆盖云端</b>会重新上传覆盖云端（本地不删）。
+            </div>
+            <n-data-table :columns="[...discCols, { title: '处理', key: '_act', width: 230, render: (r) => h('div', { style: 'display:flex;gap:6px' }, [
+                                h(NButton, { size: 'tiny', onClick: () => conflictUseCloud(r) }, { default: () => '以云端为准' }),
+                                h(NButton, { size: 'tiny', type: 'primary', ghost: true, onClick: () => conflictPushLocal(r) }, { default: () => '用本地覆盖云端' }),
+                              ]) }]"
+                          :data="((discData || {}).differ || []).map((x) => ({ ...x, sizeh: humanSize(x.size) }))"
+                          size="small" :max-height="360" :scroll-x="1080" :row-key="(r) => r.rel">
+              <template #empty><n-empty description="没有冲突（两边一致）" /></template>
+            </n-data-table>
+          </n-tab-pane>
+        </n-tabs>
+      </n-spin>
     </n-modal>
   </div>
 </template>

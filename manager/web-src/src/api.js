@@ -74,6 +74,9 @@ export const api = {
   cloudArchive: (body) => req('/api/cloud/archive', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudRestore: (body) => req('/api/cloud/restore', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudVerify: (body) => req('/api/cloud/verify', { method: 'POST', body: JSON.stringify(body || {}) }),
+  cloudDiscover: () => req('/api/cloud/discover'),          // 扫网盘（同步，几十秒）
+  cloudClaim: (items) => req('/api/cloud/claim',             // 把云端多的认领进索引库
+    { method: 'POST', body: JSON.stringify({ items }) }),
   cloudReconcile: (folders, write) => req('/api/cloud/reconcile',
     { method: 'POST', body: JSON.stringify({ folders: folders || [], write: !!write }) }),
   modFileUrl: (folder, name) => '/api/mod/download?folder=' + encodeURIComponent(folder)
