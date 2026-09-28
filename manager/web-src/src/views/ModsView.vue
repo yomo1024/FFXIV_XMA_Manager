@@ -438,6 +438,29 @@ function askIndexSync() {
 }
 
 // 从云端那份全库索引恢复（换机/丢库的最后一道保险）
+const rstOpen = ref(false)          // 预览结果**单开一个弹窗**（只弹 toast 看不出要改什么）
+const rstData = ref(null)
+const rstTab = ref('new')
+const rstColsNew = [
+  { title: '名称', key: 'name', ellipsis: { tooltip: true } },
+  { title: '分类', key: 'category', width: 92 },
+  { title: '类型', key: 'nsfw', width: 70 },
+  { title: '序号', key: 'seq', width: 62 },
+  { title: '作者', key: 'author', width: 130, ellipsis: { tooltip: true } },
+]
+const rstColsUpd = [
+  { title: '名称', key: 'name', ellipsis: { tooltip: true } },
+  { title: '分类', key: 'category', width: 92 },
+  {
+    title: '会改成什么（原 → 新）', key: '_chg', width: 430,
+    render: (r) => h('div', { style: 'font-size: 12px; line-height: 1.55' },
+      (r.fields || []).map((k) => h('div', null,
+        h('b', null, k), '：',
+        h('span', { style: 'opacity:.65' }, ((r.was || {})[k] || '(空)')),
+        ' → ',
+        h('span', null, ((r.now || {})[k] || '(空)'))))),
+  },
+]
 const askRestoreIndex = () => {
   dialog.warning({
     title: '从云端索引恢复？',
@@ -457,14 +480,22 @@ async function runRestoreIndex(write) {
   try {
     const r = await api.cloudIndexRestore(write)
     if (r.error) throw new Error(r.error)
-    const head = (write ? '已写入' : '预览（没改任何东西）')
-    msg.success(`${head}：云端索引 ${r.total} 条 ｜ 新增 ${r.created_n} 条 ｜ 需更新 ${r.updated_n} 条 ｜ 一致 ${r.same} 条` +
-      (r.tags_n ? ` ｜ 补标签 ${r.tags_n} 条` : '') +
-      (r.bad && r.bad.length ? ` ｜ ${r.bad.length} 条读不了` : '') +
-      (r.exported ? `\n云端索引生成于 ${r.exported}` : ''),
-      { duration: 20000 })
-    if (!write) console.log('云端索引预览', r)
-    if (write) { emit('changed'); await loadMeta() }
+    if (!write) {
+      // ★ 预览：单开弹窗把「要新增 / 要改成什么」列出来，并在里面直接能写入
+      rstData.value = r
+      rstTab.value = (r.created_n ? 'new' : 'upd')
+      rstOpen.value = true
+      if (!r.created_n && !r.updated_n && !r.tags_n) {
+        msg.info('预览完成：本地索引与云端索引**完全一致**，没什么要改的')
+      }
+    } else {
+      rstOpen.value = false
+      msg.success(`恢复完成：新增 ${r.created_n} 条 ｜ 更新 ${r.updated_n} 条 ｜ 一致 ${r.same} 条` +
+        (r.tags_n ? ` ｜ 补标签 ${r.tags_n} 条` : '') +
+        (r.bad && r.bad.length ? ` ｜ ${r.bad.length} 条读不了` : ''), { duration: 20000 })
+      emit('changed')
+      await loadMeta()
+    }
   } catch (e) {
     msg.error('恢复失败：' + e.message, { duration: 15000 })
   } finally {
@@ -2088,6 +2119,47 @@ async function copyPath() {
         <n-space justify="end">
           <n-button size="small" @click="showReplace = false">取消</n-button>
           <n-button size="small" type="primary" :loading="repReplacing" @click="submitReplace">开始替换</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+    <n-modal v-model:show="rstOpen" preset="card" style="width: 1020px"
+             title="云端索引预览（**还没有改任何东西**）">
+      <n-alert :type="((rstData || {}).created_n || (rstData || {}).updated_n) ? 'warning' : 'success'"
+               :show-icon="false" style="margin-bottom: 10px; font-size: 13px">
+        云端索引生成于 <b>{{ (rstData || {}).exported || '?' }}</b>
+        <span v-if="(rstData || {}).index_version">（v{{ (rstData || {}).index_version }}）</span>
+        ｜ 共 <b>{{ (rstData || {}).total || 0 }}</b> 条
+        ｜ 要新增 <b>{{ (rstData || {}).created_n || 0 }}</b> 条
+        ｜ 要更新 <b>{{ (rstData || {}).updated_n || 0 }}</b> 条
+        ｜ 一致 {{ (rstData || {}).same || 0 }} 条
+        <span v-if="(rstData || {}).tags_n">｜ 补标签 {{ (rstData || {}).tags_n }} 条</span>
+        <div class="dim" style="margin-top: 4px">
+          确认无误就点右下角「恢复写入」；不动任何 Mod 文件、不下载载荷、不改云存储状态。
+        </div>
+      </n-alert>
+      <n-tabs v-model:value="rstTab" type="line" size="small">
+        <n-tab-pane name="new" :tab="`要新增（${(rstData || {}).created_n || 0}）`">
+          <n-data-table :columns="rstColsNew" :data="(rstData || {}).created || []"
+                        size="small" :max-height="340" :scroll-x="900">
+            <template #empty><n-empty description="没有要新增的" /></template>
+          </n-data-table>
+        </n-tab-pane>
+        <n-tab-pane name="upd" :tab="`要更新（${(rstData || {}).updated_n || 0}）`">
+          <n-data-table :columns="rstColsUpd" :data="(rstData || {}).updated || []"
+                        size="small" :max-height="340" :scroll-x="1020">
+            <template #empty><n-empty description="没有要更新的（本地与云端一致）" /></template>
+          </n-data-table>
+        </n-tab-pane>
+      </n-tabs>
+      <template #footer>
+        <n-space justify="end">
+          <n-button size="small" @click="rstOpen = false">关闭</n-button>
+          <n-button size="small" type="primary" :loading="busy"
+                    :disabled="!((rstData || {}).created_n || (rstData || {}).updated_n || (rstData || {}).tags_n)"
+                    @click="runRestoreIndex(true)">
+            恢复写入{{ ((rstData || {}).created_n || (rstData || {}).updated_n)
+              ? `（${(rstData || {}).created_n + (rstData || {}).updated_n} 条）` : '' }}
+          </n-button>
         </n-space>
       </template>
     </n-modal>

@@ -1756,7 +1756,9 @@ def api_cloud_index_restore(body):
                 "site_latest": str(m.get("site_latest") or ""),
                 "site_version": str(m.get("site_version") or "")}
         if folder not in known:
-            created.append(name)
+            # 结构化返回：预览弹窗要把它列成表格（只报个数主人看不出要改什么）
+            created.append({"name": name, "category": want["category"], "nsfw": want["nsfw"],
+                            "seq": want["seq"], "author": want["author"]})
             if write:
                 st.cx.execute(
                     "INSERT OR IGNORE INTO mods (folder,category,subcat,seq,author,nsfw,name,addr,addr_source,"
@@ -1774,7 +1776,10 @@ def api_cloud_index_restore(body):
                 " FROM mods WHERE folder=?", (folder,)).fetchone()
             diff = [k for k, v in want.items() if str((cur[k] if cur else "") or "") != str(v or "")]
             if diff:
-                updated.append({"name": name, "fields": diff[:6]})
+                updated.append({"name": name, "category": want["category"], "nsfw": want["nsfw"],
+                                "author": want["author"], "fields": diff[:8],
+                                "was": {k: str((cur[k] if cur else "") or "")[:40] for k in diff[:8]},
+                                "now": {k: str(want[k] or "")[:40] for k in diff[:8]}})
                 if write:
                     st.cx.execute(
                         "UPDATE mods SET category=?,subcat=?,nsfw=?,seq=?,author=?,name=?,"
