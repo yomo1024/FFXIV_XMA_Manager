@@ -171,7 +171,9 @@ export function jobResultText(s) {
     case 'mod_update': {
       const ok = (r.ok || []).length
       const bad = (r.failed || []).length
-      return `更新完成：成功 ${ok} 条` + (bad ? `，失败 ${bad} 条（看日志）` : '')
+      const why = (r.failed || []).slice(0, 2).map((x) => String(x).split('：')[0]).join('、')
+      return `更新完成：成功 ${ok} 条` +
+        (bad ? `，失败 ${bad} 条${why ? `（${why}${bad > 2 ? '…' : ''}）` : '（看日志）'}` : '')
     }
     case 'scan':
       return `扫描完成：${r.mods} 个 Mod` + (r.pruned ? `（清理失效 ${r.pruned} 条）` : '')
