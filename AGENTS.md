@@ -10,12 +10,16 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.33.23**（最新 tag = **v2.33.12**） | `manager/app_version.py` |
+| 管理器 ModManager | **v2.33.26**（最新 tag = **v2.33.12**）｜拓展 **v1.2.5** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.33.26 / 拓展 v1.2.5 修「下载 mod 没传更新时间」**（主人报的第二次）：`content.js` 取时间的
+  那段用了 forEach 里的局部变量 `t`（外层不存在）→ 异常被自己 catch 吞掉 → `updated` 恒为空。
+  改成在已有的 `.mod-meta-block` 遍历里取（另加全文兜底）；管理器侧 `site_time_iso()` 也会剥掉
+  末尾时区括号（`(GMT+8)`）了。验证：Node 拿 git HEAD 与工作区两份代码跑同一段页面文本对比。
 - **v2.33.24 日志按分类分文件 + 拓展只留 F 盘**（主人要求）：日志统一进 `Logs\`——`全部.log`（带 `[分类]` 前缀）
   + `云盘.log`/`导入.log`/`更新.log`/`扫描.log`/`插件.log`/`浏览器.log`/`备份.log`/`检查.log`（任务按 kind、
   接口按路径设分类上下文，其余按关键词兜底，240 处老 log() 一行没改）；日志页加分类切换条 + 每行彩色分类标签 +

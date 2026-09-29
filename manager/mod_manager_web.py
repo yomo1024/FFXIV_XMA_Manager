@@ -985,17 +985,21 @@ def _job_selfdownload(job: Job):
         # 只有旧版拓展没带时间时才去补，而且不许为此弹浏览器
         #（主人 2026-09：为什么下载要新开一个浏览器？）
         upd_txt = str(q.get("updated") or info.get("updated") or "").strip()
+        site_time_ok = False
         if upd_txt and apply_site_time_from_push(cfg, target, upd_txt):
-            _site = {"source": "push"}
+            _site = {"source": "push", "updated": mm.site_time_iso(upd_txt)}
+            site_time_ok = bool(_site["updated"])
         else:
             _site = record_site_update(
                 cfg, target, addr,
                 allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
+            site_time_ok = bool((_site or {}).get("updated"))
         # 时间没记上就说清楚原因（以前静默留空，主人 2026-09 问「为什么没取更新时间」）
-        site_time_missing = not (_site or {}).get("updated")
-        if site_time_missing:
+        # ★ 判定要用 site_time_ok：以前拿 _site.get("updated") 判，而「取自拓展推送」那支的 _site
+        #   里没有 updated 键 → 明明记上了还会多打一条「没记上」，自相矛盾（2026-09-29 实测抓到）。
+        if not site_time_ok:
             mm.log("站点更新时间这次没记上：拓展没带 updated，且当前没有可用的浏览器会话"
-                   "（重载拓展到 1.2.4，或在设置里「立即接管我的浏览器」）")
+                   "（把拓展重载到 1.2.5，或在设置里「立即接管我的浏览器」）")
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)
@@ -3215,17 +3219,21 @@ def _job_import_file(job: Job):
         # 只有旧版拓展没带时间时才去补，而且不许为此弹浏览器
         #（主人 2026-09：为什么下载要新开一个浏览器？）
         upd_txt = str(q.get("updated") or info.get("updated") or "").strip()
+        site_time_ok = False
         if upd_txt and apply_site_time_from_push(cfg, target, upd_txt):
-            _site = {"source": "push"}
+            _site = {"source": "push", "updated": mm.site_time_iso(upd_txt)}
+            site_time_ok = bool(_site["updated"])
         else:
             _site = record_site_update(
                 cfg, target, addr,
                 allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
+            site_time_ok = bool((_site or {}).get("updated"))
         # 时间没记上就说清楚原因（以前静默留空，主人 2026-09 问「为什么没取更新时间」）
-        site_time_missing = not (_site or {}).get("updated")
-        if site_time_missing:
+        # ★ 判定要用 site_time_ok：以前拿 _site.get("updated") 判，而「取自拓展推送」那支的 _site
+        #   里没有 updated 键 → 明明记上了还会多打一条「没记上」，自相矛盾（2026-09-29 实测抓到）。
+        if not site_time_ok:
             mm.log("站点更新时间这次没记上：拓展没带 updated，且当前没有可用的浏览器会话"
-                   "（重载拓展到 1.2.4，或在设置里「立即接管我的浏览器」）")
+                   "（把拓展重载到 1.2.5，或在设置里「立即接管我的浏览器」）")
         _auto_export(job, cfg)
         ai = auto_install_after_import(cfg, [str(target)], job)   # ★ 先装
         aa = auto_archive_after_import(cfg, [str(target)], job)

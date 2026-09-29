@@ -33,7 +33,7 @@
     });
     const text = (document.body ? document.body.innerText : '').slice(0, 1200);
     // 站点标签：页面上是 "Tags : a, b, c" 的纯文本（.mod-meta-block 里）
-    const tags = [], meta = { races: '', genders: '', mtype: '', affects: '' };
+    const tags = [], meta = { races: '', genders: '', mtype: '', affects: '', updated: '' };
     [].slice.call(document.querySelectorAll('.mod-meta-block,div,p,li')).forEach((e) => {
       if (e.children.length > 3) return;
       const t = (e.innerText || '').trim();
@@ -47,6 +47,8 @@
       if (!meta.mtype && (m3 = t.match(/^Type\s*:\s*(.+)$/i))) meta.mtype = m3[1].trim();
       // 「影响/替换」：站点上的 Affects / Replaces（这条 mod 替换游戏里的哪件装备/哪个部位）
       if (!meta.affects && (m3 = t.match(/^Affects\s*\/\s*Replaces\s*:\s*(.+)$/i))) meta.affects = m3[1].trim();
+      // 站点「最后更新时间」（Last Version Update : …）——入库时当基线用
+      if (!meta.updated && (m3 = t.match(/Last\s+Version\s+Update\s*[:：]\s*([^\n]+)/i))) meta.updated = m3[1].trim();
     });
     const m = location.href.match(/\/modid\/(\d+)/);
     return {
@@ -57,9 +59,13 @@
       cover: img ? img.src : (imgs[0] || ''),
       imgs: imgs.slice(0, 60), dl: dl, title: document.title,
       // 站点「最后更新时间」：入库时直接当基线用，省得管理器再为一行时间开浏览器
-      updated: (function () {
+      // ★ 2026-09-29 修：以前这里用了**作用域外的变量 t**（t 只是上面 forEach 里的局部变量），
+      //   一执行就抛异常、被 catch 吞掉 → updated 永远是空 → 管理器记不到更新时间
+      //   （主人报的「下载 mod 时又没有传更新时间」就是这个）。现在优先用循环里抓到的 meta.updated
+      //   （来自 .mod-meta-block，不受下面 1200 字截断影响），再兜底扫全文。
+      updated: meta.updated || (function () {
         try {
-          const mu = t.match(/Last\s+Version\s+Update\s*[:：]\s*([^\n]+)/i);
+          const mu = (document.body ? document.body.innerText : '').match(/Last\s+Version\s+Update\s*[:：]\s*([^\n]+)/i);
           return mu ? mu[1].trim() : '';
         } catch (e) { return ''; }
       })(),
