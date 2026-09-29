@@ -194,6 +194,88 @@ def tail_log(n=80):
         return []
 
 
+# ------------------------------------------------------------------ 运行日志页（2026-09 加）
+LOG_TAIL_MAX = 5000          # 一次最多取多少行（页面默认 300）
+
+
+def _log_dir() -> Path:
+    """日志目录 = 程序目录（冻结后用 exe 所在目录，和 mm.LOG_PATH 一致）"""
+    try:
+        return Path(mm.APP_DIR)
+    except Exception:
+        return Path(mm.LOG_PATH).parent
+
+
+def _log_file(name):
+    """把 ?file= 映射成真实路径。
+
+    安全闸：只允许**程序目录里**的 .log/.txt（含 Logs/ 子目录），防止 ?file=../../.. 读别的文件。
+    """
+    base = _log_dir().resolve()
+    if not str(name or "").strip():
+        return Path(mm.LOG_PATH)
+    p = (base / str(name).replace("\\", "/")).resolve()
+    if p != base and base not in p.parents:
+        raise SystemExit("日志文件不在程序目录里：%s" % name)
+    if not p.is_file():
+        raise SystemExit("没有这个日志文件：%s" % name)
+    return p
+
+
+def api_logs():
+    """日志页的「有哪些日志可看」：程序目录里的 *.log / Logs 子目录，按修改时间倒序。"""
+    base = _log_dir()
+    out, seen = [], set()
+    for pat in ("*.log", "*.log.*", "Logs/*.log", "Logs/*.txt", "logs/*.log"):
+        for p in base.glob(pat):
+            try:
+                if not p.is_file():
+                    continue
+                st = p.stat()
+            except OSError:
+                continue
+            rel = p.relative_to(base).as_posix()
+            if rel in seen:
+                continue
+            seen.add(rel)
+            out.append({"name": rel, "size": st.st_size,
+                        "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"dir": str(base), "current": mm.LOG_PATH.name, "files": out}
+
+
+def api_log(q):
+    """读日志（给「运行日志」页面用）：?file=名字&n=行数&q=关键字
+
+    · 不给 q：取文件**最后 n 行**（默认 300）；
+    · 给 q：在**整个文件**里过滤后再取末尾 n 行 —— 想找一条报错时不用先想它在第几行。
+    返回还带 first_line/total_lines（页面要显示行号）与文件大小/修改时间（看得出有没有在长）。
+    """
+    try:
+        n = int((q.get("n") or ["300"])[0] or 300)
+    except ValueError:
+        n = 300
+    n = max(1, min(LOG_TAIL_MAX, n))
+    kw = str((q.get("q") or [""])[0] or "").strip()
+    p = _log_file((q.get("file") or [""])[0])
+    all_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    total = len(all_lines)
+    if kw:
+        low = kw.lower()
+        idx = [i for i, l in enumerate(all_lines) if low in l.lower()]
+        picked_idx = idx[-n:]
+        picked = [all_lines[i] for i in picked_idx]
+        first = (picked_idx[0] if picked_idx else 0) + 1
+    else:
+        picked = all_lines[-n:]
+        first = max(1, total - len(picked) + 1)
+    st = p.stat()
+    return {"file": p.name, "dir": str(_log_dir()), "lines": picked, "first_line": first,
+            "total_lines": total, "matched": len(picked) if kw else total,
+            "size": st.st_size, "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+            "q": kw, "n": n}
+
+
 def inside_root(path, root) -> bool:
     try:
         p, r = Path(path).resolve(), Path(root).resolve()
@@ -286,6 +368,7 @@ JOB_TITLES = {"cover_inject": "封面插包", "scan": "扫描目录", "export": 
               "cloud_archive": "归档到云盘", "cloud_restore": "从云盘取回",
              "cloud_discover": "扫描网盘新内容", "cloud_claim": "认领到库",
              "cloud_index_sync": "同步索引到网盘",
+             "cloud_index_restore": "从云端索引恢复",
               "cloud_verify": "校验云端文件",
               "cloud_reconcile": "与网盘对账（重建归档状态）"}
 
@@ -1572,8 +1655,12 @@ def _cloud_upload_one(drv, qd, pay, fid_dir, on_progress=None) -> dict:
             "why": "" if ok else "云端大小对不上（本地 %s / 云端 %s）" % (pay["size"], csize)}
 
 
-def _cloud_walk(drv, fid, prefix="", depth=0, out=None):
-    """递归列出云端某目录下的所有文件 → [(相对路径, 大小, fid)]"""
+def _cloud_walk(drv, fid, prefix="", depth=0, out=None, on_dir=None):
+    """递归列出云端某目录下的所有文件 → [(相对路径, 大小, fid)]
+
+    `on_dir(当前相对路径)` 可选：每进一个目录回调一次，给任务报进度用
+    （云端目录多的时候这一步要几十秒，主人 2026-09：「像卡死」）。
+    """
     out = [] if out is None else out
     if depth > 8:
         return out
@@ -1582,10 +1669,38 @@ def _cloud_walk(drv, fid, prefix="", depth=0, out=None):
         if not nm:
             continue
         if it.get("dir"):
-            _cloud_walk(drv, it.get("fid"), prefix + nm + "/", depth + 1, out)
+            if on_dir:
+                on_dir(prefix + nm + "/")
+            _cloud_walk(drv, it.get("fid"), prefix + nm + "/", depth + 1, out, on_dir)
         else:
             out.append((prefix + nm, int(it.get("size") or 0), it.get("fid") or ""))
     return out
+
+
+def _cloud_find_index(drv, bfid, on_step=None):
+    """找云端那份全库索引（`_modmanager_index.json`）→ (相对路径, 大小, fid) 或 None。
+
+    ★ **先看云端根目录**：同步索引时就写在根上，一步 list 就够。
+      以前这里一上来就 `_cloud_walk` 递归遍历**整个网盘**去找文件名 —— 26 条 mod 实测 **33.4 秒**，
+      主人点「预览」看到的就是这段「没有任何反应」（2026-09 报）。
+      根目录没有（老结构/被手工搬走）才退回去递归找，并且边走边报进度。
+    """
+    name = mm.INDEX_JSON_NAME
+    try:
+        for it in drv.list_dir(bfid):
+            if (it.get("file_name") or "") == name and not it.get("dir"):
+                return (name, int(it.get("size") or 0), it.get("fid") or "")
+    except Exception:
+        mm.log(traceback.format_exc())
+    seen = {"n": 0}
+
+    def _on_dir(path):
+        seen["n"] += 1
+        if on_step and seen["n"] % 3 == 0:
+            on_step(seen["n"], path)
+
+    hit = [x for x in _cloud_walk(drv, bfid, on_dir=_on_dir) if os.path.basename(x[0]) == name]
+    return hit[0] if hit else None
 
 
 def _job_cloud_reconcile(job: Job):
@@ -1755,27 +1870,50 @@ def _job_cloud_index_sync(job: Job):
 
 
 def api_cloud_index_restore(body):
+    """（同步版，留着给老客户端）从云端索引恢复 —— 界面现在走任务版 `cloud_index_restore`。"""
+    return cloud_index_restore_core(cfg_now(), bool((body or {}).get("write")), None)
+
+
+def _job_cloud_index_restore(job: Job):
+    """从云端索引恢复（任务版）：**能报进度、能取消**。
+
+    为什么必须任务化：这个动作实测 33 秒（递归遍历网盘找索引文件），
+    主人 2026-09 点「预览」时界面一点反馈都没有，看着就是卡死。
+    """
+    return cloud_index_restore_core(cfg_now(), bool(job.params.get("write")), job)
+
+
+def cloud_index_restore_core(cfg, write, job=None):
     """从**云端那份全库索引**恢复管理数据（分类/子分类/类型/序号/作者/名称/地址/影响替换/站点信息/标签）。
 
-    body: {write: 0/1} —— 0 = 只预览（**什么都不改**），1 = 写回。
+    `write=False` = 只预览（**什么都不改**），`True` = 写回。
     用途：换电脑、索引库丢了、手工改乱了 —— 云端那份索引是最后一道保险（`_modmanager_index.json`）。
+    `job` 可选：给了就上报进度 + 支持取消。
     """
-    cfg = cfg_now()
-    write = bool(body.get("write"))
+    def step(done, total, text=""):
+        if job:
+            job.set(done, total, text)
+
+    if job and job.cancelled():
+        raise mm.BackupCancelled()
     if not (cfg.get("cloud_cookie") or "").strip():
         return {"error": "还没填夸克 Cookie（设置 → 云存储）"}
     root = Path(cfg.get("root") or "")
     if not str(root):
         return {"error": "还没设 Mod 根目录"}
+    step(0, 2, "读取云端索引…")
     try:
         drv = cloud_drive(cfg)
         bfid = drv.resolve(_cloud_base(cfg))
         if not bfid:
             return {"error": "云端根目录不存在：%s" % _cloud_base(cfg)}
-        hit = [x for x in _cloud_walk(drv, bfid) if os.path.basename(x[0]) == mm.INDEX_JSON_NAME]
+        # 先看根目录（快），没有再递归找（边走边报「已扫 N 个目录」）
+        hit = _cloud_find_index(drv, bfid, on_step=lambda n, p: step(
+            0, 2, "找云端索引：已扫 %d 个目录（%s）" % (n, str(p)[:36])))
         if not hit:
             return {"error": "云端没有 %s —— 先点「同步索引到网盘」" % mm.INDEX_JSON_NAME}
-        raw_j = _cloud_download(drv, cfg, hit[0][2])
+        step(1, 2, "下载云端索引（%s）…" % mm.fmt_size(hit[1]))
+        raw_j = _cloud_download(drv, cfg, hit[2])
         data = json.loads((raw_j or b"").decode("utf-8", "ignore") or "{}")
     except Exception as e:
         mm.log("读云端索引失败：\n" + traceback.format_exc())
@@ -1783,12 +1921,18 @@ def api_cloud_index_restore(body):
     rows = data.get("mods") or []
     if not rows:
         return {"error": "云端索引里没有条目"}
+    total_steps = 2 + len(rows)
     st = mm.Store()
     known = {str(r["folder"]) for r in st.all()}
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     created, updated, bad, tags_n, same = [], [], [], 0, 0
-    for m in rows:
+    for idx, m in enumerate(rows):
+        if job and job.cancelled():
+            raise mm.BackupCancelled()
         rel = str(m.get("rel") or "").strip().strip("/")
+        if job and (idx == 0 or idx % 5 == 0 or idx == len(rows) - 1):
+            step(2 + idx, total_steps, "比对 %d/%d：%s"
+                 % (idx + 1, len(rows), str(m.get("name") or rel or "?")[:26]))
         if not rel:
             bad.append({"name": m.get("name") or "", "why": "这条索引没有相对路径"})
             continue
@@ -2054,6 +2198,8 @@ def cloud_discover_core(cfg, job=None):
             if nm:
                 walk(d.get("fid"), parts + [nm], depth + 1)
 
+    # 注：这里**故意不报进度**。云端目录总数事先不知道，硬凑一个分母只会显示假进度；
+    # 界面走的是「全局加载条」（来回跑的动画条 + 已用秒数），那个永远不会骗人。
     walk(bfid, [], 1)
     mm.log("扫网盘新内容：云端有 %d 条库里没有、两边都有但大小不同 %d 条（根 %s）"
            % (len(cloud_only), len(differ), base))
@@ -3095,6 +3241,7 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "cloud_reconcile": _job_cloud_reconcile,
              "cloud_discover": _job_cloud_discover,
              "cloud_index_sync": _job_cloud_index_sync,
+             "cloud_index_restore": _job_cloud_index_restore,
              "cloud_archive": _job_cloud_archive, "cloud_restore": _job_cloud_restore,
              "cloud_verify": _job_cloud_verify, "cover_inject": _job_cover_inject}
 
@@ -5300,7 +5447,12 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/raw":
                     return self.api_raw(q)
                 if u.path == "/api/log":
-                    return self._json({"lines": tail_log(int((q.get("n") or ["80"])[0]))})
+                    try:
+                        return self._json(api_log(q))
+                    except SystemExit as e:          # 「没有这个日志文件」这类可读错误
+                        return self._json({"error": "%s" % e}, 400)
+                if u.path == "/api/logs":
+                    return self._json(api_logs())
                 if u.path == "/api/inspect":
                     return self._json(api_inspect(q))
                 if u.path == "/api/browser":

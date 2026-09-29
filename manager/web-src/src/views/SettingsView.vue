@@ -4,7 +4,7 @@ import {
   NButton, NCard, NSpace, NForm, NFormItem, NInput, NInputNumber, NSwitch, NAlert,
   NDivider, NSelect, NRadioGroup, NRadioButton, useMessage, useDialog,
 } from 'naive-ui'
-import { api } from '../api'
+import { api, withDialogProgress } from '../api'
 import { MdText, mdDialog } from '../md'
 
 const emit = defineEmits(['changed'])
@@ -35,7 +35,8 @@ function takeoverBrowser() {
       busy.value = true
       try {
         await api.saveSettings({ browser_mode: 'user' })
-        const r = await api.browserTakeover()
+        const r = await withDialogProgress('正在接管你的浏览器（要关掉它再带调试端口重启）',
+      () => api.browserTakeover())
         if (r && r.ok) msg.success(`已接管（调试端口 ${r.port}，关掉了 ${r.closed} 个进程）`)
         else msg.error((r && r.error) || '接管失败，看日志')
         await load()
@@ -181,7 +182,8 @@ async function testCloud() {
       cloud_cookie: s.value.cloud_cookie || '',
       cloud_root: root,
     })
-    cloudRes.value = await api.cloudCheck()
+    cloudRes.value = await withDialogProgress('正在做云盘体检（会真下载一个文件打个来回）',
+      () => api.cloudCheck())
   } catch (e) {
     cloudRes.value = { ok: false, error: e.message }
   } finally {

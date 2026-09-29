@@ -5,7 +5,7 @@ import { ref, computed, h, inject, onMounted } from 'vue'
 import {
   NButton, NCard, NDataTable, NSpace, NAlert, NEmpty, NTag, NCheckbox, useMessage, useDialog,
 } from 'naive-ui'
-import { api, canAutoUpdate } from '../api'
+import { api, canAutoUpdate, runJob, withDialogProgress } from '../api'
 import { buildTodos } from '../todos'
 import { mdNodes } from '../md'
 
@@ -89,7 +89,8 @@ function repairIndex() {
     onPositiveClick: async () => {
       ihBusy.value = true
       try {
-        const r = await api.indexRepair(1, ihAlign.value && cloud.length > 0)
+        const r = await withDialogProgress('正在修复索引残留',
+          () => api.indexRepair(1, ihAlign.value && cloud.length > 0))
         const cdone = ((r.cloud_align || {}).done || []).length
         msg.success(`索引修复完成：并入 ${(r.merged || []).length} 条、清理 ${(r.dropped || []).length} 条`
           + (cdone ? `、云端目录改名 ${cdone} 个` : '')
@@ -143,7 +144,8 @@ function colsFor(g) {
 async function checkUpdates() {
   busy.value = 'check'
   try {
-    await startJob('update_check', { folders: [] })
+    await withDialogProgress('正在检查更新（逐条读站点）',
+      () => runJob('update_check', { folders: [] }))
     msg.info('开始检查更新（只查 XMA / heliosphere）…')
     emit('changed')
   } catch (e) {
@@ -173,7 +175,8 @@ function doUpdate() {
     onPositiveClick: async () => {
       busy.value = 'update'
       try {
-        await startJob('mod_update', { folders: list, mode: 'same_name', export: true })
+        await withDialogProgress('正在更新 Mod（下载并替换）',
+      () => runJob('mod_update', { folders: list, mode: 'same_name', export: true }))
       } catch (e) {
         msg.error('启动更新失败：' + e.message)
       } finally {
@@ -196,7 +199,8 @@ function doArchive() {
     onPositiveClick: async () => {
       busy.value = 'archive'
       try {
-        await startJob('cloud_archive', { folders, delete_local: true })
+        await withDialogProgress('正在归档到云盘',
+        () => runJob('cloud_archive', { folders, delete_local: true }))
       } catch (e) {
         msg.error('启动归档失败：' + e.message)
       } finally {
@@ -209,7 +213,8 @@ function doArchive() {
 async function doReconcile() {
   busy.value = 'reconcile'
   try {
-    await startJob('cloud_reconcile', { folders: [], write: false })
+    await withDialogProgress('正在与网盘对账（只看不改）',
+      () => runJob('cloud_reconcile', { folders: [], write: false }))
     msg.info('开始与网盘对账（只看不改，结果在任务条里看）')
   } catch (e) {
     msg.error('启动对账失败：' + e.message)

@@ -81,6 +81,10 @@ def consumer_calls():
                 for i, ln in enumerate(lines):
                     for m in re.finditer(r"['\"](/api/[A-Za-z0-9_/\-]*)", ln):
                         path = m.group(1)
+                        # 纯映射表里的**键**（`'/api/quit': '退出服务',` —— 见 api.js 的 BUSY_LABELS
+                        # 「路径→中文名」）不是调用点，别当成 GET 调用来报错
+                        if re.match(r"^\s*['\"]%s['\"]\s*:" % re.escape(path), ln):
+                            continue
                         # 动词判定：① 前面的调用名（jpost/post 等）② 同一次调用里的 method:'POST'
                         # 窗口到「下一个 /api 出现」为止，避免窜到下一行调用上去
                         at = len("\n".join(lines[:i])) + m.start() + (1 if i else 0)

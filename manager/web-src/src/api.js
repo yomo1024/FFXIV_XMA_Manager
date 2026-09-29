@@ -1,13 +1,125 @@
 // 统一的接口调用：失败时抛出后端返回的中文错误
-async function req(path, opts = {}) {
-  const r = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  })
-  const ct = r.headers.get('content-type') || ''
-  const body = ct.includes('application/json') ? await r.json().catch(() => ({})) : await r.text()
-  if (!r.ok) throw new Error((body && body.error) || 'HTTP ' + r.status)
-  return body
+import { reactive } from 'vue'
+
+// ★ 全局「正在加载」反馈：任何接口在飞的时候都能让界面显示条 + 名字 + 已用秒数。
+//   为什么要全局做：以前只有「任务」（job）有进度条，而**同步接口**（索引体检、云端索引恢复、
+//   云盘体检、查重、检查报告……）点下去界面一点动静都没有 —— 主人 2026-09 说「像卡死」。
+//   有了它：新加的接口自动就有反馈，不用每个按钮各写一遍 loading。
+export const busy = reactive({ n: 0, label: '', t0: 0, visible: false, dialog: '', dlgT0: 0, dlgLabel: '' })
+let busyTimer = null
+
+/** 弹窗类按钮专用：动作期间显示**弹窗自己的**进度浮层（任务=真进度，同步接口=动画条）
+ *
+ *  用法：await withDialogProgress('正在从云端索引恢复', () => api.cloudIndexRestore(false))
+ *  为什么不用 busy.t0 计时：任务轮询会不停重置 busy.t0，浮层要用自己的 dlgT0 才走得准。
+ */
+export async function withDialogProgress(label, fn) {
+  busy.dialog = label || '正在处理'
+  busy.dlgLabel = label || '正在处理'      // 浮层里显示的「在等什么」用这个，
+  busy.dlgT0 = Date.now()                  // 别用 busy.label（那是所有请求共用的，会被后台轮询刷掉）
+  try {
+    return await fn()
+  } finally {
+    busy.dialog = ''
+    busy.dlgLabel = ''
+  }
+}
+
+/** 进「加载中」：第一个请求开始计时，超过 300ms 才真的显示条（秒回的接口不闪） */
+function beginBusy(label) {
+  if (busy.n === 0) {
+    busy.t0 = Date.now()
+    busy.label = label || ''
+    busyTimer = setTimeout(() => { busy.visible = true }, 300)
+  }
+  busy.n += 1
+}
+
+/** 出「加载中」：全部请求都回来了才收起 */
+function endBusy() {
+  busy.n -= 1
+  if (busy.n <= 0) {
+    busy.n = 0
+    busy.visible = false
+    busy.label = ''
+    if (busyTimer) { clearTimeout(busyTimer); busyTimer = null }
+  }
+}
+
+/** 接口路径 → 中文名（点下去要看懂在等什么）；带 ?xxx 的会先切掉再查 */
+const BUSY_LABELS = {
+  '/api/state': '读取状态',
+  '/api/mods': '读取 Mod 列表',
+  '/api/categories': '读取分类',
+  '/api/pending': '读取待处理项',
+  '/api/dupes': '查重（比对文件）',
+  '/api/install': '安装检查',
+  '/api/check': '检查报告',
+  '/api/settings': '读取/保存设置',
+  '/api/inspect': '读取包内容',
+  '/api/mod/files': '读取文件清单',
+  '/api/bridge': '查询游戏插件',
+  '/api/bridge/propose': '送到游戏里',
+  '/api/bridge/install': '装进游戏',
+  '/api/cloud/state': '云盘状态统计',
+  '/api/cloud/check': '云盘体检（会真下载）',
+  '/api/cloud/index-restore': '从云端索引恢复',
+  '/api/cloud/index-preview': '云端索引预览',
+  '/api/cloud/discover': '扫描网盘新内容（同步，可能几十秒）',
+  '/api/cloud/claim': '把云端内容认领进库',
+  '/api/mod/replace': '上传替换载荷',
+  '/api/index/health': '索引体检',
+  '/api/index/repair': '索引修复',
+  '/api/inbox/page': '读取浏览器推来的页面',
+  '/api/tags': '读取标签',
+  '/api/affects': '读取影响/替换',
+  '/api/backups': '读取备份列表',
+  '/api/fetch/parse': '解析页面信息',
+  '/api/browser/capture': '抓取内置浏览器当前页',
+  '/api/log': '读取日志',
+  '/api/logs': '列出日志文件',
+  '/api/quit': '退出服务',
+}
+
+async function req(path, opts = {}, label) {
+  const key = String(path).split('?')[0]
+  beginBusy(label || BUSY_LABELS[key] || key)
+  try {
+    const r = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    })
+    const ct = r.headers.get('content-type') || ''
+    const body = ct.includes('application/json') ? await r.json().catch(() => ({})) : await r.text()
+    if (!r.ok) throw new Error((body && body.error) || 'HTTP ' + r.status)
+    return body
+  } finally {
+    endBusy()
+  }
+}
+
+// ---- 让「长动作」当任务跑：起任务 → 轮询 → 返回最终 result ----
+// 为什么要它：有些动作要几十秒（从云端索引恢复实测 33 秒），走同步接口时前端只能干等、
+// 界面**一点反馈都没有**（主人 2026-09：「都应该有个进度条让我知道系统没卡死」）。
+// 走任务就有真进度条（标题/进度/文字/取消都由任务机制给），调用点的写法完全不用变。
+export async function runJob(kind, params, opts = {}) {
+  const timeoutMs = opts.timeoutMs || 30 * 60 * 1000
+  // 起任务本身是秒回的；失败（比如已有任务在跑）会抛后端那句中文错误
+  await req('/api/job', { method: 'POST', body: JSON.stringify({ kind, params: params || {} }) },
+    JOB_TITLES[kind] || kind)
+  const t0 = Date.now()
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 400))
+    const s = await req('/api/job')
+    if (s && s.state === 'running') {
+      if (Date.now() - t0 > timeoutMs) throw new Error('任务超时（可在任务条上点取消）')
+      continue
+    }
+    if (!s || s.state === 'idle') throw new Error('任务不见了（服务可能重启过）')
+    if (s.state === 'error') throw new Error(s.error || '任务失败')
+    if (s.state === 'cancelled') throw new Error('已取消')
+    return s.result
+  }
 }
 
 export const api = {
@@ -75,8 +187,7 @@ export const api = {
   cloudRestore: (body) => req('/api/cloud/restore', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudVerify: (body) => req('/api/cloud/verify', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudDiscover: () => req('/api/cloud/discover'),          // 扫网盘（同步，几十秒）
-  cloudIndexRestore: (write) => req('/api/cloud/index-restore',   // 从云端索引恢复（0=预览）
-    { method: 'POST', body: JSON.stringify({ write: !!write }) }),
+  cloudIndexRestore: (write) => runJob('cloud_index_restore', { write: !!write }),  // 走任务：有真进度条
   cloudClaim: (items) => req('/api/cloud/claim',             // 把云端多的认领进索引库
     { method: 'POST', body: JSON.stringify({ items }) }),
   cloudReconcile: (folders, write) => req('/api/cloud/reconcile',
@@ -95,11 +206,17 @@ export const api = {
   // ---- 检查更新 / 更新 Mod ----
   replaceMod: (body) => req('/api/mod/replace', { method: 'POST', body: JSON.stringify(body) }),
   // 浏览器上传新文件替换：走 FormData，别手动设 Content-Type（要让浏览器自己带 boundary）
+  // 上传可能很久（几十 MB 到几百 MB）→ 也要进全局加载条
   replaceModUpload: async (form) => {
-    const r = await fetch('/api/mod/replace', { method: 'POST', body: form })
-    const j = await r.json().catch(() => ({}))
-    if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status)
-    return j
+    beginBusy('上传替换载荷')
+    try {
+      const r = await fetch('/api/mod/replace', { method: 'POST', body: form })
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status)
+      return j
+    } finally {
+      endBusy()
+    }
   },
 
   // ---- 影响/替换（这条 Mod 替换游戏里的哪些装备/部位） ----
@@ -136,6 +253,16 @@ export const api = {
   thumb: (folder, w = 900, v = '') =>
     `/api/thumb?f=${encodeURIComponent(folder)}&w=${w}&v=${v || ''}`,
   raw: (folder) => `/api/raw?f=${encodeURIComponent(folder)}`,
+
+  // ---- 运行日志 ----
+  logs: () => req('/api/logs'),
+  log: (opts = {}) => {
+    const p = new URLSearchParams()
+    if (opts.file) p.set('file', opts.file)
+    p.set('n', String(opts.n || 300))
+    if (opts.q) p.set('q', opts.q)
+    return req('/api/log?' + p.toString())
+  },
 }
 
 export const JOB_TITLES = {
@@ -152,6 +279,7 @@ export const JOB_TITLES = {
   update_check: '检查更新',
   mod_update: '更新 Mod（覆盖下载）',
   cloud_index_sync: '同步索引到网盘',
+  cloud_index_restore: '从云端索引恢复',
   cloud_discover: '扫描网盘新内容',
   cloud_claim: '认领到库',
   // ★ 补齐（以前缺这几个 → 进度条上直接显示英文 kind，如 cloud_archive）。

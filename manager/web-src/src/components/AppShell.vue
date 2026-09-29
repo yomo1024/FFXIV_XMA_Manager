@@ -9,7 +9,7 @@ import {
   DownloadOutline, SettingsOutline, PowerOutline, MoonOutline, SunnyOutline,
   RefreshOutline, DocumentTextOutline, RocketOutline, CheckmarkCircleOutline,
 } from '@vicons/ionicons5'
-import { api, JOB_TITLES, jobResultText } from '../api'
+import { api, JOB_TITLES, jobResultText, busy } from '../api'
 import { mdToast } from '../md'
 import ModsView from '../views/ModsView.vue'
 import ToolsView from '../views/ToolsView.vue'
@@ -19,6 +19,8 @@ import PendingView from '../views/PendingView.vue'
 import WorkbenchView from '../views/WorkbenchView.vue'
 import SettingsView from '../views/SettingsView.vue'
 import TodosView from '../views/TodosView.vue'
+import LogsView from '../views/LogsView.vue'
+import TaskProgress from './TaskProgress.vue'
 import { buildTodos } from '../todos'
 
 const props = defineProps({ dark: Boolean })
@@ -35,6 +37,15 @@ const buildShort = (function () {
 const state = ref(null)
 const managerVer = computed(() => (state.value && state.value.manager_version) || '')
 const job = ref(null)
+// 结果由发起方弹窗自己展示的任务（这里不重复弹提示消息）
+const QUIET_JOBS = ['cloud_index_restore']
+// ★ 全局「正在加载」条：任何接口在飞（超过 300ms）就显示，并带自己走的「已用 Ns」。
+//   主人 2026-09：「所有的加载，比如从云端索引恢复，我点了预览，都应该有个进度条让我知道系统没卡死」
+//   「已用 Ns」的秒表**只在挂载时建一次**：以前是 watch(busy.visible) 里建/清 interval，
+//   实测会在中途停跳（截图里卡在 17s 不动 —— 那反而更像卡死），所以不再动态销毁。
+const now = ref(Date.now())
+const busySecs = computed(() => (busy.visible ? Math.max(0, Math.round((now.value - busy.t0) / 1000)) : 0))
+let busyTick = null
 const mods = ref([])
 const pending = ref([])          // 「待导入」的文件清单：侧栏待办角标要用
 const view = ref(new URLSearchParams(location.search).get('view') || 'mods')
@@ -54,6 +65,7 @@ const MENU = computed(() => [
   { label: '下载工作台', key: 'work', icon: icon(GlobeOutline) },
   { label: '待导入', key: 'pending', icon: icon(DownloadOutline) },
   { label: '设置', key: 'settings', icon: icon(SettingsOutline) },
+  { label: '运行日志', key: 'logs', icon: icon(DocumentTextOutline) },
 ])
 const TITLES = {
   mods: ['Mod 列表', '浏览、筛选、批量整理你的 Mod'],
@@ -64,6 +76,7 @@ const TITLES = {
   work: ['下载工作台', '内置浏览器读页面、抓封面、盯下载'],
   pending: ['待导入', '下载目录 / 暂存目录里还没入库的文件'],
   settings: ['设置', '路径、缩略图、浏览器等偏好'],
+  logs: ['运行日志', '程序在干什么、哪一步出错 —— 一个页面看全（自动刷新、关键字查找）'],
 }
 
 // bus 必须在 provide 之前声明，否则会 TDZ（压缩后就是那条很难查的
@@ -113,7 +126,11 @@ function pollJob() {
       await bus.refresh?.()
     } catch (e) {}
     // 任务结果文案里可能带 **粗体**/`代码` → 统一走 markdown 渲染（不然是一堆星号）
-    s.state === 'error' ? msg.error(mdToast(jobResultText(s))) : msg.success(mdToast(jobResultText(s)))
+    // 有些任务的结果由**发起它的那个弹窗**自己展示（「从云端索引恢复」要弹预览表格）→
+    // 这里就别再弹一遍，免得两条消息打架。
+    if (!QUIET_JOBS.includes(s.kind)) {
+      s.state === 'error' ? msg.error(mdToast(jobResultText(s))) : msg.success(mdToast(jobResultText(s)))
+    }
     setTimeout(() => (job.value = null), 6000)
   }, 300)
 }
@@ -195,6 +212,8 @@ const meta = computed(() => {
 })
 
 onMounted(async () => {
+  // 秒表：挂载时建一次、永不销毁（只在这些接口真的在飞时才去刷新 now，几乎零开销）
+  busyTick = setInterval(() => { if (busy.visible) now.value = Date.now() }, 1000)
   try {
     await refreshAll()
     const s = await api.job()
@@ -206,7 +225,7 @@ onMounted(async () => {
     msg.error('加载失败：' + e.message)
   }
 })
-onUnmounted(() => clearTimeout(timer))
+onUnmounted(() => { clearTimeout(timer); if (busyTick) clearInterval(busyTick) })
 </script>
 
 <template>
@@ -277,6 +296,16 @@ onUnmounted(() => clearTimeout(timer))
         </div>
       </header>
 
+      <!-- ★ 全局加载条：同步接口（索引体检、云端索引恢复、云盘体检、查重…）点下去这里的条会动 + 已用秒数在走 -->
+      <div v-if="busy.visible" class="jobbar loadbar-row">
+        <b class="jobkind">处理中</b>
+        <div class="loadbar"><i></i></div>
+        <span class="jobtext loadtext">
+          <span class="jobwhat" :title="busy.label">{{ busy.label }}…</span>
+          <span class="num jobelapsed dim">已用 {{ busySecs }}s</span>
+        </span>
+      </div>
+
       <div v-if="job" class="jobbar">
         <b class="jobkind">{{ job.title || JOB_TITLES[job.kind] || job.kind }}</b>
         <n-progress type="line" :percentage="job.pct" :show-indicator="false" :height="8"
@@ -306,9 +335,13 @@ onUnmounted(() => clearTimeout(timer))
         <workbench-view v-else-if="view === 'work'" :mods="mods" @changed="refreshAll" />
         <pending-view v-else-if="view === 'pending'" @changed="refreshAll" />
         <settings-view v-else-if="view === 'settings'" @changed="refreshAll" />
+        <logs-view v-else-if="view === 'logs'" />
       </main>
     </div>
   </n-layout>
+
+  <!-- 弹窗类按钮的进度浮层（任务=真进度+可取消；同步接口=动画条+秒数） -->
+  <task-progress />
 
   <n-modal v-model:show="wizard" preset="card" style="width: 620px"
            title="首次使用：先告诉它 Mod 放在哪">
@@ -532,6 +565,36 @@ onUnmounted(() => clearTimeout(timer))
   flex: 0 0 auto;
   min-width: 8ch;
   text-align: right;
+}
+/* ★ 全局加载条（同步接口用）：一条来回跑的蓝条 + 「已用 Ns」自己走 —— 一眼看出没卡死 */
+.loadbar-row {
+  background: rgba(32, 128, 240, 0.08);
+}
+.loadbar {
+  flex: 1 1 0;
+  min-width: 120px;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(128, 128, 128, 0.22);
+  overflow: hidden;
+  position: relative;
+}
+.loadbar > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  border-radius: 4px;
+  background: #2080f0;
+  animation: loadslide 1.1s ease-in-out infinite;
+}
+@keyframes loadslide {
+  0% { left: -38%; }
+  100% { left: 100%; }
+}
+.loadtext {
+  flex: 1 1 auto;
+  max-width: none;
 }
 .content {
   flex: 1 1 auto;

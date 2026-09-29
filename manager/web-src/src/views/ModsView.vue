@@ -7,7 +7,7 @@ import {
   NSpace, NAlert, NEmpty, NTooltip, NDivider, NButtonGroup, NDynamicTags,
   NCheckboxGroup, NCheckbox, NTabs, NTabPane, NSpin, NProgress, useMessage, useDialog,
 } from 'naive-ui'
-import { api, canAutoUpdate, isHelio } from '../api'
+import { api, canAutoUpdate, isHelio, runJob, withDialogProgress } from '../api'
 import { mdDialog, mdToast, mdNodes, MdText } from '../md'
 
 const props = defineProps({ mods: { type: Array, default: () => [] } })
@@ -352,9 +352,11 @@ async function checkUpdates() {
   const folders = checked.value.length ? [...checked.value] : []
   updateChecking.value = true
   try {
-    await startJob('update_check', { folders })
-    msg.info(folders.length ? `开始检查选中的 ${folders.length} 条…` : '开始检查全部（有站点地址的）…')
-    setTimeout(() => { updateChecking.value = false }, 4000)
+    withDialogProgress('正在检查更新（逐条读站点）',
+      () => runJob('update_check', { folders }))
+      .then(() => msg.success('检查更新完成'))
+      .catch((e) => msg.error('检查更新失败：' + e.message))
+      .finally(() => setTimeout(() => { updateChecking.value = false }, 2000))
   } catch (e) {
     updateChecking.value = false
     msg.error('启动检查失败：' + e.message)
@@ -373,11 +375,15 @@ function askReconcile(folders) {
     positiveText: '对账并修正（写回索引）',
     negativeText: '只看不改（预览）',
     onPositiveClick: () => {
-      startJob('cloud_reconcile', { folders: list, write: true })
+      withDialogProgress('正在与网盘对账（写回索引）',
+        () => runJob('cloud_reconcile', { folders: list, write: true }))
+        .catch((e) => msg.error('对账失败：' + e.message))
       msg.info('开始对账并写回索引库；跑完列表会自动刷新，没变就 Ctrl+F5', { duration: 12000 })
     },
     onNegativeClick: () => {
-      startJob('cloud_reconcile', { folders: list, write: false })
+      withDialogProgress('正在与网盘对账（只看不改）',
+        () => runJob('cloud_reconcile', { folders: list, write: false }))
+        .catch((e) => msg.error('对账失败：' + e.message))
       msg.info('只看不改：跑完会告诉你云端有多少条、哪些对不上，不会动索引库')
     },
   })
@@ -398,7 +404,8 @@ async function scanCloud() {
   discData.value = null
   discPick.value = []
   try {
-    discData.value = await api.cloudDiscover()
+    discData.value = await withDialogProgress('正在扫描网盘（找云端有、库里没有的）',
+      () => api.cloudDiscover())
     const n = ((discData.value || {}).cloud_only || []).length
     discTab.value = n ? 'new' : 'diff'
   } catch (e) {
@@ -416,7 +423,7 @@ async function claimPick() {
   if (!items.length) return msg.warning('先勾要认领的')
   discBusy.value = true
   try {
-    const r = await api.cloudClaim(items)
+    const r = await withDialogProgress('正在把云端内容认领进索引库', () => api.cloudClaim(items))
     if (r.error) throw new Error(r.error)
     const notes = (r.ok || []).flatMap((x) => x.notes || [])
     msg.success(`已认领 ${r.count} 条进索引库` +
@@ -456,7 +463,8 @@ function askIndexSync() {
     onPositiveClick: async () => {
       idxBusy.value = true
       try {
-        await startJob('cloud_index_sync', { force: idxForce.value })
+        await withDialogProgress('正在把索引同步到网盘',
+          () => runJob('cloud_index_sync', { force: idxForce.value }))
         msg.info(mdToast(idxForce.value ? '开始**全部重传**索引到网盘…' : '开始同步索引（只推变化过）…'),
           { duration: 12000 })
       } catch (e) {
@@ -509,7 +517,8 @@ const askRestoreIndex = () => {
 async function runRestoreIndex(write) {
   busy.value = true
   try {
-    const r = await api.cloudIndexRestore(write)
+    const r = await withDialogProgress(write ? '正在按云端索引写回' : '正在比对云端索引（只看不改）',
+      () => api.cloudIndexRestore(write))
     if (r.error) throw new Error(r.error)
     if (!write) {
       // ★ 预览：单开弹窗把「要新增 / 要改成什么」列出来，并在里面直接能写入
@@ -543,8 +552,9 @@ function conflictUseCloud(row) {
     positiveText: '从云端取回',
     negativeText: '取消',
     onPositiveClick: () => {
-      startJob('cloud_restore', { folders: [row.folder] })
-      msg.info('开始从云端取回…')
+      withDialogProgress('正在从云端取回这一条',
+        () => runJob('cloud_restore', { folders: [row.folder] }))
+        .catch((e) => msg.error('取回失败：' + e.message))
     },
   })
 }
@@ -556,7 +566,9 @@ function conflictPushLocal(row) {
     positiveText: '上传覆盖云端',
     negativeText: '取消',
     onPositiveClick: () => {
-      startJob('cloud_archive', { folders: [row.folder], delete_local: false })
+      withDialogProgress('正在上传覆盖云端',
+        () => runJob('cloud_archive', { folders: [row.folder], delete_local: false }))
+        .catch((e) => msg.error('上传失败：' + e.message))
       msg.info('开始上传覆盖云端…')
     },
   })
@@ -678,7 +690,8 @@ async function archiveCloud(folders) {
     onPositiveClick: async () => {
       cloudBusy.value = true
       try {
-        await startJob('cloud_archive', { folders: list, delete_local: true })
+        await withDialogProgress('正在归档到云盘',
+          () => runJob('cloud_archive', { folders: list, delete_local: true }))
         msg.info('已开始归档，进度看上面的任务条')
       } catch (e) {
         msg.error('启动归档失败：' + e.message)
@@ -703,8 +716,9 @@ async function verifyCloud(folders) {
     onPositiveClick: async () => {
       cloudBusy.value = true
       try {
-        await startJob('cloud_verify', { folders: rows.map((m) => m.folder) })
-        msg.info('已开始校验，进度看上面的任务条')
+        await withDialogProgress('正在校验云端文件（会真下载回来比对）',
+          () => runJob('cloud_verify', { folders: rows.map((m) => m.folder) }))
+        msg.success('校验完成，结果看任务条 / 日志')
       } catch (e) {
         msg.error('启动校验失败：' + e.message)
       } finally {
@@ -722,7 +736,8 @@ async function restoreCloud(folders) {
   if (!rows.length) return msg.warning('选中的里面没有「已归档」的 Mod')
   cloudBusy.value = true
   try {
-    await startJob('cloud_restore', { folders: rows.map((m) => m.folder) })
+    await withDialogProgress('正在从云盘取回',
+      () => runJob('cloud_restore', { folders: rows.map((m) => m.folder) }))
     msg.info(`开始从云盘取回 ${rows.length} 条…`)
   } catch (e) {
     msg.error('启动取回失败：' + e.message)
@@ -771,9 +786,10 @@ function doUpdate(folders, manualMods) {
     negativeText: '取消',
     onPositiveClick: () => {
       updating.value = true
-      startJob('mod_update', { folders: list, mode: replaceMode.value, export: true })
-        .catch((e) => msg.error('启动更新失败：' + e.message))
-        .finally(() => setTimeout(() => { updating.value = false }, 4000))
+      withDialogProgress('正在更新 Mod（下载并替换）',
+        () => runJob('mod_update', { folders: list, mode: replaceMode.value, export: true }))
+        .catch((e) => msg.error('更新失败：' + e.message))
+        .finally(() => setTimeout(() => { updating.value = false }, 2000))
     },
   })
 }
