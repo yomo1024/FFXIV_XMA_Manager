@@ -100,6 +100,26 @@ def consumer_calls():
     return found
 
 
+# 别名组：同一个东西，前后端历史上用过**不同名字** —— 只认一个就会「静默不生效」。
+# subcat（网页）/ subdir（拓展、工作台、后端 import_mod 形参）就是这么一对：
+# 2026-09 主人报「编辑 Mod 改子分类不生效」= mod_edit 只读 subdir，网页发的 subcat 被丢掉，
+# 接口还回 ok=true。规矩：写接口一律走 `_sub_of(b)`，别自己 `.get("subcat")` / `.get("subdir")`。
+SUB_WRITERS = ("mod_add", "mod_edit", "mod_batch_edit")
+
+
+def alias_guard():
+    """写接口必须用 `_sub_of()` 取子分类（两种叫法都认），否则报错。"""
+    src = read(BACKEND)
+    problems = []
+    for m in re.finditer(r"\n    def (%s)\(.*?\n(.*?)(?=\n    def )" % "|".join(SUB_WRITERS), src, re.S):
+        name, body = m.group(1), m.group(2)
+        direct = sorted(set(re.findall(r'\.get\("(subcat|subdir)"\)', body)))
+        if direct and "_sub_of(" not in body:
+            problems.append("%s() 直接读了 %s —— 请改用 _sub_of()（网页发 subcat、拓展发 subdir，两种都要认）"
+                            % (name, "/".join(direct)))
+    return problems
+
+
 def main():
     routes = backend_routes()
     if not routes["GET"] and not routes["POST"]:
@@ -125,6 +145,8 @@ def main():
         for k in keys:
             if not re.search(r"['\"]%s['\"]" % re.escape(k), src):
                 problems.append("后端源码里找不到 %s 的字段 %r（消费者在读它）" % (path, k))
+
+    problems.extend(alias_guard())
 
     if problems:
         print("接口契约有问题：")

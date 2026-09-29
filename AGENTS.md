@@ -10,12 +10,15 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.33.20**（最新 tag = **v2.33.12**） | `manager/app_version.py` |
+| 管理器 ModManager | **v2.33.21**（最新 tag = **v2.33.12**） | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.33.21 修「编辑 Mod 改子分类不生效」**（主人报的）：网页发 `subcat`、后端 `mod_edit`/`mod_add` 只读
+  `subdir` → 字段被静默丢掉（接口还回 ok=true，看着像成功）。现在统一走 `_sub_of(b)`（两种叫法都认），
+  并给 `check_api_contract.py` 加了护栏：写接口里直接读 `subcat`/`subdir` 就报错
 - **v2.33.18~20 「运行日志」页面 + 弹窗自己的进度条**（主人报的）：侧栏新增「运行日志」（自动刷新 /
   关键字全库查找 / 报错警告高亮计数 / 复制 / 打开日志目录）；`withDialogProgress()` + `TaskProgress.vue`
   浮层 —— 弹窗类按钮点下去，**弹窗上直接压一层进度卡**（任务=真百分比+可取消，同步接口=动画条+秒数），

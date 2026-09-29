@@ -276,6 +276,25 @@ def api_log(q):
             "q": kw, "n": n}
 
 
+def _sub_of(b) -> str | None:
+    """取「子分类」字段：前端**两种叫法**都在用，这里统一认。
+
+    · 网页（ModsView / 待导入 / 工作台）历史上发的是 `subcat`；
+    · 浏览器拓展、工作台的部分入口发的是 `subdir`（后端 import_mod/rename_mod 的形参也叫 subdir）。
+    返回值：None = **这次没提这个字段**（=不改）；"" = 清空子分类（移到「分类/类型」下）。
+
+    ⚠ 2026-09 主人报「编辑 Mod 改子分类不生效」的真根因：`mod_edit` 只读 `subdir`，
+      而网页发的是 `subcat` → 字段被静默丢掉，接口还回 ok=true（看着像成功）。
+      所以这里两种都认；以后再对齐命名也只改这一处。
+    """
+    if not isinstance(b, dict):
+        return None
+    for k in ("subcat", "subdir"):
+        if k in b and b[k] is not None:
+            return str(b[k])
+    return None
+
+
 def inside_root(path, root) -> bool:
     try:
         p, r = Path(path).resolve(), Path(root).resolve()
@@ -5748,7 +5767,7 @@ class Handler(BaseHTTPRequestHandler):
         if not cat:
             return self._json({"error": "请选择分类"}, 400)
         t = mm.import_mod(cfg, src, cat, str(b.get("zone") or "SFW"),
-                          str(b.get("subdir") or ""), b.get("author") or None,
+                          str(_sub_of(b) or ""), b.get("author") or None,
                           b.get("name") or None,
                           int(b["seq"]) if b.get("seq") else None,
                           mm.norm_addr(b.get("addr") or ""), bool(b.get("move")))
@@ -5767,7 +5786,7 @@ class Handler(BaseHTTPRequestHandler):
         if not m and not inside_root(folder, cfg.get("root") or ""):
             return self._json({"error": "找不到这条 Mod，或路径不在 Mod 目录里"}, 400)
         t = mm.rename_mod(cfg, folder, b.get("category") or None, b.get("zone") or None,
-                          b.get("subdir") if b.get("subdir") is not None else None,
+                          _sub_of(b),
                           b.get("author") if b.get("author") is not None else None,
                           b.get("name") if b.get("name") is not None else None,
                           int(b["seq"]) if b.get("seq") not in (None, "") else None,
@@ -5800,7 +5819,7 @@ class Handler(BaseHTTPRequestHandler):
                     cfg, folder,
                     f.get("category") or None,
                     f.get("zone") or None,
-                    f.get("subcat") if f.get("subcat") is not None else None,
+                    _sub_of(f),                       # 子分类：两套叫法都认（见 _sub_of）
                     None, None, None, None)
                 if str(t) != folder:            # 云端目录跟着走（改分类/类型/子分类时父目录也会变）
                     _cloud_follow_rename(cfg, folder, t)
