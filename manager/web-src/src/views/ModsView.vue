@@ -21,13 +21,18 @@ const cur = ref(null)
 // ---- NSFW 显示开关（设置 → 显示）----
 // 列表里哪些行出现、由后端按 /api/settings 的 show_nsfw 决定（后端一处判据，五处共用）；
 // 这里只管两件事：封面要不要打码、被藏起来时给条提示 + 一键打开。
-const revealed = ref([])                       // 这一次会话里点开过的 NSFW 封面（刷新即恢复模糊）
+const revealed = ref([])                       // 这一次会话里**点**开过（想一直看清）的 NSFW 封面
 const blurOn = computed(() => !!(state.value && state.value.blur_nsfw_covers))
 const nsfwHidden = computed(() => (state.value && state.value.hidden_nsfw) || 0)
+const BLUR_HINT = 'NSFW 封面已模糊：鼠标移上去就能看清（点一下可以一直看）'
 function isNsfw(m) {
   return !!m && String(m.nsfw || '').toUpperCase() === 'NSFW'
 }
 function isBlur(m) {
+  // 「鼠标移上去就解除模糊、移开自动恢复」**由 CSS :hover 负责**（见文件末尾的全局样式），
+  // 不用 JS 记悬停状态 —— 实测：naive-ui 表格悬停约 1.5 秒后会自己重渲染一次，
+  // 新节点拿不到 mouseenter（鼠标没动），JS 的悬停状态就这么丢了 → 图又糊回去（2026-09 踩到）。
+  // CSS :hover 由浏览器在 DOM 变动后重新命中测试，不受影响。
   return blurOn.value && isNsfw(m) && !revealed.value.includes(m.folder)
 }
 function reveal(m) {
@@ -1247,11 +1252,15 @@ const columns = computed(() => [
       // ★ 这里用**内联样式**做模糊，别用 scoped class：h() 造出来的节点拿不到 scoped 的
       //   `data-v-xxx` 属性，`.nsfw-blur[data-v-…]` 根本选不中（2026-09 实测 filter 仍是 none）。
       return h('img', {
-        class: 'cell-thumb',
-        style: blur ? 'filter: blur(12px); cursor: pointer' : '',
+        // ★ 模糊用内联样式（h() 的节点拿不到 scoped class）；「悬停解除」靠结尾全局样式里的
+        //   `img.cell-thumb.nsfw-blur-cell:hover{filter:none!important}`，不写 JS 悬停状态。
+        class: blur ? 'cell-thumb nsfw-blur-cell' : 'cell-thumb',
+        style: 'cursor: pointer;'
+          + (blur ? ' filter: blur(12px);' : '')
+          + ' transition: filter .14s ease',
         src: api.thumb(r.folder, 120, r.ih), loading: 'lazy',
-        title: blur ? 'NSFW 封面已模糊：点一下看这张' : '',
-        onClick: blur ? (e) => { e.stopPropagation(); reveal(r) } : undefined,
+        title: blur ? BLUR_HINT : '',
+        onClick: (e) => { e.stopPropagation(); reveal(r) },
       })
     },
   },
@@ -1613,7 +1622,7 @@ async function copyPath() {
                @click="cur = m">
             <img v-if="m.has_img" :src="api.thumb(m.folder, 320, m.ih)" loading="lazy" alt=""
                  :class="{ 'nsfw-blur': isBlur(m) }"
-                 :title="isBlur(m) ? 'NSFW 封面已模糊：点一下看这张' : ''"
+                 :title="isBlur(m) ? BLUR_HINT : ''"
                  @click.stop="selectAndReveal(m)" />
             <div v-else class="noimg">无预览图</div>
             <div class="cap">
@@ -1702,7 +1711,7 @@ async function copyPath() {
                                    : api.thumb(cur.folder, 900, cur.ih)"
                      object-fit="contain" class="pv-img"
                      :class="{ 'pv-blur': isBlur(cur) }"
-                     :title="isBlur(cur) ? 'NSFW 封面已模糊：点一下看这张' : ''"
+                     :title="isBlur(cur) ? BLUR_HINT : ''"
                      :img-props="{ style: 'width:100%;height:100%;object-fit:contain' }"
                      @click="reveal(cur)" />
             <div v-else class="ph">← 左侧点一条看预览图</div>
@@ -2286,13 +2295,29 @@ async function copyPath() {
 
 <!-- 兜底：h()/子组件根节点可能没有 scoped 属性，这条放全局（选择器名字够独特，不会误伤） -->
 <style>
+/* ★ 悬停=临时解除模糊、移开=自动恢复：交给 CSS :hover，别用 JS 记悬停状态。
+   为什么（2026-09 实测）：naive-ui 的表格会在悬停约 1.5 秒后自己重渲染一次，
+   新节点不会自己触发 mouseenter（鼠标没动）→ JS 的悬停状态就丢了，封面又糊回去。
+   浏览器对 :hover 会在 DOM 变动后重新命中测试，不受影响。 */
 .nsfw-blur {
   filter: blur(14px);
   cursor: pointer;
+  transition: filter .14s ease;      /* 解除/恢复时平滑过渡，不要「啪」地跳 */
+}
+.nsfw-blur:hover {
+  filter: none;
+}
+/* 表格缩略图的模糊写在**内联样式**里（h() 节点选不中 scoped），所以这里要 !important 才压得住 */
+img.cell-thumb.nsfw-blur-cell:hover {
+  filter: none !important;
 }
 .pv-blur img {
   filter: blur(18px);
   cursor: pointer;
+  transition: filter .14s ease;
+}
+.pv-blur:hover img {
+  filter: none;
 }
 </style>
 

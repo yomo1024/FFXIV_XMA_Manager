@@ -464,10 +464,10 @@ async function save() {
           <n-form-item label="模糊 NSFW 封面">
             <div style="flex: 1 1 auto">
               <n-switch v-model:value="s.blur_nsfw_covers" :disabled="!s.show_nsfw" />
-              <span class="dim" style="margin-left: 10px">开着时 NSFW 的封面打码，想看清点一下那张图</span>
+              <span class="dim" style="margin-left: 10px">开着时 NSFW 的封面打码：<b>鼠标移上去自动看清，移开自动恢复模糊</b>；点一下那张图可以一直看</span>
               <div class="hint" style="margin-top: 4px">
                 只影响界面上的显示（列表缩略图 / 卡片墙 / 详情大图 / 画廊）；<b>不动磁盘上的图</b>，
-                也不影响 Excel 汇总表和网盘里的那份。点开是临时的，刷新页面就恢复模糊。
+                也不影响 Excel 汇总表和网盘里的那份。点开的那张是临时的，刷新页面就恢复模糊。
               </div>
             </div>
           </n-form-item>

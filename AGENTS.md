@@ -10,12 +10,17 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.33.21**（最新 tag = **v2.33.12**） | `manager/app_version.py` |
+| 管理器 ModManager | **v2.33.23**（最新 tag = **v2.33.12**） | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.33.22~23 NSFW 封面改「悬停看清、移开自动模糊」**（主人报的）：原来只能点一下才解除。
+  用 **CSS `:hover`**（不用 JS 记悬停状态：naive-ui 表格会在悬停约 1.5 秒后重渲染，JS 状态会丢）；
+  表格缩略图的模糊在内联样式里 → 加 `nsfw-blur-cell` 标记 + `:hover{filter:none!important}`。
+  排查中发现的「假 bug」：顶部「处理中」条消失让整页上移 39px，鼠标底下换了元素 —— 不是 hover 失效；
+  验证 hover 类效果要**等页面静置**再测，并用 `elementFromPoint` 判断鼠标底下还是不是它。
 - **v2.33.21 修「编辑 Mod 改子分类不生效」**（主人报的）：网页发 `subcat`、后端 `mod_edit`/`mod_add` 只读
   `subdir` → 字段被静默丢掉（接口还回 ok=true，看着像成功）。现在统一走 `_sub_of(b)`（两种叫法都认），
   并给 `check_api_contract.py` 加了护栏：写接口里直接读 `subcat`/`subdir` 就报错
