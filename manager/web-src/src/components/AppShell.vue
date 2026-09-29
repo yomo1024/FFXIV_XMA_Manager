@@ -270,7 +270,7 @@ onUnmounted(() => clearTimeout(timer))
       </header>
 
       <div v-if="job" class="jobbar">
-        <b class="jobkind">{{ JOB_TITLES[job.kind] || job.kind }}</b>
+        <b class="jobkind">{{ job.title || JOB_TITLES[job.kind] || job.kind }}</b>
         <n-progress type="line" :percentage="job.pct" :show-indicator="false" :height="8"
                     class="jobprog" />
         <!-- ★ 这三段都会随时间变（0/12→10/12、秒数进位、文件名换）——

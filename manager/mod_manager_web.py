@@ -266,7 +266,11 @@ class Job:
             pct = int(self.done * 100 / self.total) if self.total else 0
             if self.state == "done":
                 pct = 100
-            return {"kind": self.kind, "state": self.state, "done": self.done,
+            return {"kind": self.kind,
+                    # ★ 中文标题由后端给（单一来源）：前端以前自己维护 JOB_TITLES，漏了某个 kind
+                    #   就直接显示英文 kind（主人 2026-09 看到「cloud_archive」）
+                    "title": JOB_TITLES.get(self.kind, self.kind),
+                    "state": self.state, "done": self.done,
                     "total": self.total, "pct": max(0, min(100, pct)),
                     "text": self.text, "error": self.error, "result": self.result,
                     "elapsed": round((self.t1 or time.time()) - self.t0, 1)}
@@ -1549,14 +1553,15 @@ def _cloud_dedupe_dirs(drv, qd, dir_cache) -> tuple:
     return n_del, n_bytes
 
 
-def _cloud_upload_one(drv, qd, pay, fid_dir) -> dict:
+def _cloud_upload_one(drv, qd, pay, fid_dir, on_progress=None) -> dict:
     """上传一个载荷文件并立刻校验（秒传命中 = 内容一致；否则比对云端大小）"""
     try:
         md5, sha1 = qd.file_hashes(pay["abs"])
     except Exception as e:
         return {"ok": False, "why": "算哈希失败：%s" % str(e)[:80]}
     try:
-        r = drv.upload_file(pay["abs"], fid_dir, name=os.path.basename(pay["rel"]))
+        r = drv.upload_file(pay["abs"], fid_dir, name=os.path.basename(pay["rel"]),
+                            progress=on_progress)      # 每 8MB 一片回调一次 → 大文件也能看出在动
     except Exception as e:
         return {"ok": False, "why": str(e)[:160], "md5": md5, "sha1": sha1}
     instant = bool(r.get("finish"))
@@ -2243,6 +2248,7 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
                     for p in pays:
                         if os.path.basename(p["abs"]) == os.path.basename(str(lib_pkg)):
                             stt = os.stat(rr["dst"])
+                            p["orig_abs"] = p["abs"]      # ★ 记住原件：删本地要删它，不是删那份注入副本
                             p["abs"], p["size"], p["mtime"] = rr["dst"], stt.st_size, stt.st_mtime
                             mm.log("归档前自动插封面：%s → %s（上传带图的包）"
                                    % (Path(str(lib_pkg)).name, Path(rr["dst"]).name))
@@ -2250,12 +2256,19 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
         except Exception:
             mm.log(traceback.format_exc())
         plan.append((f, pays, local_covers(f)))
-    total = max(1, sum(len(p) + len(c) for _, p, c in plan))
-    done, results = 0, []
+    # ★ 进度按**字节**报（以前按文件数：一条 246MB 只有一个文件 → 整段时间条都停在 0/1，主人 2026-09 报的）
+    total_bytes = max(1, sum(int(x.get("size") or 0)
+                             for _f, _pays, _covs in plan for x in (list(_pays) + list(_covs))))
+    total_files = sum(len(x) + len(y) for _, x, y in plan)
+    done_bytes = done_files = 0
+    job.set(0, total_bytes, "清点完成：%d 个文件 / %s，开始上传…"
+            % (total_files, mm.fmt_size(total_bytes)))
+    results = []
     for folder, pays, covers in plan:
         row = rows.get(folder) or {}
         name = row.get("name") or Path(folder).name
         if not pays and not covers:
+            job.set(done_bytes, total_bytes, "%s：本地已经没有载荷，跳过" % str(name)[:24])
             st.set_cloud(folder, state="archived" if row.get("cloud_path") else "local")
             results.append({"folder": folder, "name": name, "ok": True, "files": 0, "size": 0,
                             "note": "本地已经没有载荷了"})
@@ -2275,8 +2288,10 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
         for kind, pay in tasks:
             if job.cancelled():
                 break
-            job.set(done, total, "%s%s：%s" % (str(name)[:22], "（封面）" if kind == "cover" else "",
-                                               str(pay["rel"])[:46]))
+            job.set(done_bytes, total_bytes,
+                    "%s%s：%s（第 %d/%d 个文件）" % (str(name)[:20],
+                                                 "（封面）" if kind == "cover" else "",
+                                                 str(pay["rel"])[:34], done_files + 1, total_files))
             sub_dir = os.path.dirname(pay["rel"].replace("\\", "/"))
             fid_dir = drv.ensure_dir(cpath + ("/" + sub_dir if sub_dir else ""))
             idx = cloud_index(fid_dir)
@@ -2291,7 +2306,8 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
                     {"rel_path": pay["rel"], "size": pay["size"], "md5": md5,
                      "sha1": sha1, "cloud_fid": str(hit.get("fid") or "")})
                 skipped += 1
-                done += 1
+                done_files += 1
+                done_bytes += int(pay["size"] or 0)
                 continue
             if hit is not None:             # 同名但大小不同 = 云端那份是旧的 → 先删再传，保持一物一件
                 try:
@@ -2300,8 +2316,22 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
                 except Exception:
                     mm.log(traceback.format_exc())
                 idx.pop(base, None)
-            out = _cloud_upload_one(drv, qd, pay, fid_dir)
-            done += 1
+            # 每片回调一次 → 进度条在「一个大文件」内部也会动
+            def _on_up(sent, _parts, _s2, _sz, _nm, _base=done_bytes, _pay=pay,
+                       _name=name, _kind=kind):
+                try:
+                    job.set(_base + int(sent or 0), total_bytes,
+                            "%s%s：%s（%d%%）" % (str(_name)[:20],
+                                                "（封面）" if _kind == "cover" else "",
+                                                str(_pay["rel"])[:34],
+                                                int((sent or 0) * 100 / max(1, int(_pay["size"] or 1)))))
+                except Exception:
+                    pass
+
+            out = _cloud_upload_one(drv, qd, pay, fid_dir, on_progress=_on_up)
+            done_files += 1
+            done_bytes += int(pay["size"] or 0)
+            job.set(done_bytes, total_bytes, "%s：已传 %d/%d 个文件" % (str(name)[:20], done_files, total_files))
             if out["ok"]:
                 (crecs if kind == "cover" else recs).append(
                     {"rel_path": pay["rel"], "size": pay["size"], "md5": out["md5"],
@@ -2337,7 +2367,10 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
         if delete_local:
             for pay in pays:                       # 进回收站，随时能还原
                 try:
-                    if mm.send_to_recycle_bin(pay["abs"]):
+                    # ★ 删的是**原件**（pay["abs"] 可能已被换成 `_封面已注入` 里那份带图副本，
+                    #   删副本 = 原件还占着本地空间，等于白归档 —— 主人 2026-09 实测发现）
+                    victim = pay.get("orig_abs") or pay["abs"]
+                    if mm.send_to_recycle_bin(victim):
                         deleted += 1
                 except Exception:
                     mm.log(traceback.format_exc())

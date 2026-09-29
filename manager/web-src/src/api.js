@@ -154,6 +154,15 @@ export const JOB_TITLES = {
   cloud_index_sync: '同步索引到网盘',
   cloud_discover: '扫描网盘新内容',
   cloud_claim: '认领到库',
+  // ★ 补齐（以前缺这几个 → 进度条上直接显示英文 kind，如 cloud_archive）。
+  //   真正的来源是后端 job.title（Job.snap 里给），这里只是老后端/兜底用。
+  cover_inject: '封面插包',
+  selfdownload: '在自己浏览器里下载 → 自动入库',
+  importfile: '入库（浏览器下好的文件）',
+  cloud_archive: '归档到云盘',
+  cloud_restore: '从云盘取回',
+  cloud_verify: '校验云端文件',
+  cloud_reconcile: '与网盘对账（重建归档状态）',
 }
 
 // ---- 更新能力的共享判据（原来只写在 ModsView 里，待办页也要用 → 提到这里做唯一来源）----
