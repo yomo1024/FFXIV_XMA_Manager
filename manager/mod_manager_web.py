@@ -308,6 +308,45 @@ def inside_root(path, root) -> bool:
         return False
 
 
+def _open_roots(cfg) -> list:
+    """「打开文件夹 / 在文件夹中显示」的**目录白名单**。
+
+    为什么要白名单：这两个动作会真的让系统打开文件夹/选中文件，不限制就等于「任意路径打开」。
+
+    ★ 程序目录和 Logs **必须**在里面：日志页的「打开 Logs 目录」、设置里的路径按钮都要用 ——
+      2026-09 主人报「打开 Logs 目录怎么显示路径不在 Mod 目录里」，就是这里只认了 Mod 目录。
+    """
+    roots = []
+    try:
+        roots.extend(Path(p).resolve() for p in _backup_dirs(cfg))
+    except Exception:
+        pass
+    dl, ib = mm.resolve_dirs(cfg) if cfg.get("root") else ("", "")
+    for extra in (cfg.get("root"), dl, ib, mm.find_install_dir(cfg),
+                  str(mm.APP_DIR), str(mm.LOG_DIR)):
+        if extra:
+            try:
+                roots.append(Path(extra).resolve())
+            except Exception:
+                pass
+    return roots
+
+
+def _under_any(path, roots) -> bool:
+    """path 是否落在白名单里的某个目录（含自身）之下。"""
+    try:
+        rp = Path(path).resolve()
+    except Exception:
+        return False
+    for rt in roots:
+        try:
+            if rp == rt or rt in rp.parents:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def safe_rel(path, root) -> str:
     try:
         return os.path.relpath(str(path), str(root))
@@ -6614,8 +6653,9 @@ class Handler(BaseHTTPRequestHandler):
         kind = str(body.get("kind") or "")
         folder = str(body.get("f") or "")
         if kind == "folder":
-            if not inside_root(folder, cfg.get("root") or ""):
-                return self._json({"error": "路径不在 Mod 目录里"}, 403)
+            # 白名单：Mod 根 / 程序目录 / Logs / 备份 / 下载 / 待导入 / 安装目录（不只认 Mod 目录）
+            if not _under_any(folder, _open_roots(cfg)):
+                return self._json({"error": "路径不在允许打开的范围内：%s" % folder}, 403)
             mm.open_path(Path(folder))
             return self._json({"ok": True})
         if kind == "addr":
@@ -6629,24 +6669,7 @@ class Handler(BaseHTTPRequestHandler):
             if not p or not Path(p).exists():
                 return self._json({"error": "文件不存在"}, 400)
             rp = Path(p).resolve()
-            roots = list(_backup_dirs(cfg))
-            dl2, ib2 = mm.resolve_dirs(cfg) if cfg.get("root") else ("", "")
-            for extra in (cfg.get("root"), dl2, ib2, mm.find_install_dir(cfg),
-                          str(mm.APP_DIR), str(mm.LOG_DIR)):   # 程序目录 + Logs 都允许打开
-                if extra:
-                    try:
-                        roots.append(Path(extra).resolve())
-                    except Exception:
-                        pass
-            hit = False
-            for rt in roots:
-                try:
-                    rp.relative_to(rt)
-                    hit = True
-                    break
-                except Exception:
-                    continue
-            if not hit:
+            if not _under_any(rp, _open_roots(cfg)):
                 return self._json({"error": "这个位置不在允许打开的范围内"}, 403)
             subprocess.Popen(["explorer", "/select,", str(rp)])
             return self._json({"ok": True})
