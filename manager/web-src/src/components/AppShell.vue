@@ -128,9 +128,17 @@ async function startJob(kind, params) {
   }
 }
 
+// 计数显示：字节级的任务（归档/校验）数字能到十亿，直接摆出来没法读 → 换成 MB
+function jobCount(j) {
+  if (!j || !j.total) return '—'
+  const d = Number(j.done || 0)
+  const t = Number(j.total || 0)
+  if (t >= 1048576) return `${Math.round(d / 1048576)}/${Math.round(t / 1048576)} MB`
+  return `${d}/${t}`
+}
+
 function doQuit() {
   dialog.warning({
-    title: '退出服务',
     content: '关掉后台服务，页面会失效（Mod 数据不受影响）。下次双击「启动Web版」即可。',
     positiveText: '退出服务',
     negativeText: '取消',
@@ -277,7 +285,7 @@ onUnmounted(() => clearTimeout(timer))
              所以各自占**固定宽度的槽**：数字右对齐 + 等宽数字，中间那段自己省略号截断，
              这样进度条和「取消」按钮的位置在整个任务里纹丝不动（主人 2026-09 提的） -->
         <span class="jobtext">
-          <span class="num jobcount">{{ job.total ? `${job.done}/${job.total}` : '—' }}</span>
+          <span class="num jobcount">{{ jobCount(job) }}</span>
           <span class="jobwhat" :title="job.text">{{ job.text }}</span>
           <span class="num jobelapsed dim">已用 {{ job.elapsed }}s</span>
         </span>
@@ -506,10 +514,10 @@ onUnmounted(() => clearTimeout(timer))
   font-size: 12px;
   white-space: nowrap;
 }
-/* 计数「3/12」：固定 6 个字符宽、右对齐 —— 位数变多也不会顶开后面 */
+/* 计数「3/12」或「695/2433 MB」：定宽 + 右对齐 —— 位数变多也不会顶开后面 */
 .jobcount {
   flex: 0 0 auto;
-  min-width: 6ch;
+  min-width: 12ch;
   text-align: right;
 }
 /* 中间那段（文件名/动作）才是会变长的：让它自己截断，别去挤别人 */

@@ -2231,13 +2231,20 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
     # ★ 预览图也要跟着载荷一起上云。原来只传 PAYLOAD_EXT，图从来没上过云 →
     #   新电脑上「本地只剩元数据+地址.txt」，推给游戏插件时无图可写、目录里就一直没有图。
     #   顺手先把「只存在于分类目录的同级大图」复制进 mod 文件夹（自包含，复制不删原件）。
-    for f in folders:
+    # ★ 准备阶段也要**报进度 + 能取消**：这一步（必要时把封面插进包 = 重压整包）在大包上要 1~2 分钟，
+    #   以前整段一句都不上报 → 界面看着就是「点了归档没反应」（主人 2026-09 报的真根因）。
+    n_folders = max(1, len(folders))
+    job.set(0, n_folders, "准备 %d 条 Mod（必要时把封面插进包，大包要一两分钟）…" % len(folders))
+    plan, work_used = [], {}
+    for idx, f in enumerate(folders, 1):
+        if job.cancelled():
+            mm.log("归档：准备阶段被取消（%d/%d）" % (idx, n_folders))
+            raise mm.BackupCancelled()
+        job.set(idx - 1, n_folders, "准备（%d/%d）：%s" % (idx, n_folders, Path(str(f)).name[:26]))
         try:
             ensure_cover_inside(f)
         except Exception:
             mm.log(traceback.format_exc())
-    plan = []
-    for f in folders:
         pays = local_payloads(f)
         # ★ 归档前自动插：拿"带封面的包"去上传 → 云端那份从此带图（换机/取回天然带图）
         try:
@@ -2250,8 +2257,10 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
                             stt = os.stat(rr["dst"])
                             p["orig_abs"] = p["abs"]      # ★ 记住原件：删本地要删它，不是删那份注入副本
                             p["abs"], p["size"], p["mtime"] = rr["dst"], stt.st_size, stt.st_mtime
-                            mm.log("归档前自动插封面：%s → %s（上传带图的包）"
-                                   % (Path(str(lib_pkg)).name, Path(rr["dst"]).name))
+                            work_used.setdefault(f, str(rr["dst"]))
+                            mm.log("归档前自动插封面：%s → %s（%s）"
+                                   % (Path(str(lib_pkg)).name, Path(rr["dst"]).name,
+                                      "复用上次的带图包" if rr.get("reused") else "重压了一遍"))
                             break
         except Exception:
             mm.log(traceback.format_exc())
@@ -2264,6 +2273,7 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
     job.set(0, total_bytes, "清点完成：%d 个文件 / %s，开始上传…"
             % (total_files, mm.fmt_size(total_bytes)))
     results = []
+    work_freed = 0                     # 这次清掉的「带图工作副本」字节数（能随时重做，留着只是白占本地空间）
     for folder, pays, covers in plan:
         row = rows.get(folder) or {}
         name = row.get("name") or Path(folder).name
@@ -2374,6 +2384,20 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
                         deleted += 1
                 except Exception:
                     mm.log(traceback.format_exc())
+            # ★ 这次用过的「带图工作副本」也一起清掉：它能随时重做（重新插一遍封面即可），
+            #   留着就是白占本地空间（以前一直堆在 `_封面已注入`：主人机器实测攒到 1496 MB）。
+            #   这里**不进回收站**：回收站里的文件照样占着磁盘，等于没释放 —— 它不是用户数据，
+            #   是本次归档自己产出的中转件（载荷原件那一条走的是回收站，不受影响）。
+            _w = work_used.get(folder)
+            if _w and os.path.isfile(_w):
+                try:
+                    _wsz = os.path.getsize(_w)
+                    os.remove(_w)
+                    work_freed += _wsz
+                    mm.log("归档后清掉带图工作副本：%s（%.1f MB，能随时重做）"
+                           % (Path(_w).name, _wsz / 1048576.0))
+                except OSError:
+                    mm.log(traceback.format_exc())
             for dp, dn, fn in os.walk(folder, topdown=False):
                 if os.path.abspath(dp) != os.path.abspath(folder) and not os.listdir(dp):
                     try:
@@ -2388,14 +2412,16 @@ def cloud_archive_core(cfg, folders, delete_local, job, tag="归档"):
                         "cloud": cpath, "seconds": round(time.time() - job.t0, 1)})
     st.cx.close()
     okn = sum(1 for r in results if r.get("ok"))
-    mm.log("归档：%d 条（成功 %d）、载荷 %.1f MB、封面 %d 张、跳过（云端已有）%d 个文件、删本地 %d 个文件"
+    mm.log("归档：%d 条（成功 %d）、载荷 %.1f MB、封面 %d 张、跳过（云端已有）%d 个文件、删本地 %d 个文件、清工作副本 %.1f MB"
            % (len(results), okn, sum(r.get("size") or 0 for r in results) / 1048576.0,
               sum(r.get("covers") or 0 for r in results),
-              sum(r.get("skipped") or 0 for r in results), sum(r.get("deleted") or 0 for r in results)))
+              sum(r.get("skipped") or 0 for r in results), sum(r.get("deleted") or 0 for r in results),
+              work_freed / 1048576.0))
     return {"done": len(results), "ok": okn, "items": results,
             "bytes": sum(r.get("size") or 0 for r in results),
             "covers": sum(r.get("covers") or 0 for r in results),
-            "deleted": sum(r.get("deleted") or 0 for r in results)}
+            "deleted": sum(r.get("deleted") or 0 for r in results),
+            "freed_work": work_freed}
 
 
 def auto_archive_enabled(cfg) -> bool:
@@ -4654,7 +4680,29 @@ def default_cover_inject_dir(cfg) -> str:
     return str(base / "_封面已注入")
 
 
-def inject_cover_into_package(folder, dest_dir, m=None) -> dict:
+def _injected_ok(dst, pkg) -> bool:
+    """这份「带图包」能不能**直接复用**（三条都过才算）：能读出中央目录、不比原件旧、里面真有覆盖图。
+
+    为什么需要它：主人 2026-09 报「点了归档根本没反应」的真根因就是这里 —— 每次点归档都把
+    整包**从头重压一遍**（插封面），一条 338 MB 的包要 1~2 分钟、一批十几条 = 好几分钟，
+    而这段时间界面什么都没显示。复用之后第二次起秒过。
+    """
+    try:
+        dst, pkg = Path(str(dst)), Path(str(pkg))
+        if not dst.is_file() or not pkg.is_file():
+            return False
+        if dst.stat().st_mtime < pkg.stat().st_mtime - 1:
+            return False                       # 原件更新过 → 这份过期了，得重做
+        import zipfile as _zip
+        with _zip.ZipFile(str(dst)) as z:      # 半成品/坏包在这里抛错 → 不复用
+            names = [n.replace("\\", "/").lower() for n in z.namelist()]
+        return (any(n.startswith("cover.") and "/" not in n for n in names)
+                and any(n.startswith("images/_metaimage") for n in names))
+    except Exception:
+        return False
+
+
+def inject_cover_into_package(folder, dest_dir, m=None, force=False) -> dict:
     """把封面**插进包**，输出一个「带封面的包」（**原包一个字节都不动**）。
 
     规则与插件 CoverWriter.InjectIntoPackage 完全一致：
@@ -4683,9 +4731,17 @@ def inject_cover_into_package(folder, dest_dir, m=None) -> dict:
     dest_dir = Path(str(dest_dir))
     dest_dir.mkdir(parents=True, exist_ok=True)
     dst = dest_dir / Path(str(pkg)).name
+    # ★ 复用上次做好的「带图包」→ 不再重压整包（大包一次要 1~2 分钟，是「点了没反应」的真根因）
+    if not force and _injected_ok(dst, pkg):
+        return {"ok": True, "src": str(pkg), "dst": str(dst), "added": [], "kept": [],
+                "size": dst.stat().st_size, "cover": str(cover), "reused": True}
     added, kept, meta_json = [], [], None
+    # 先写 .part、完了再原子改名：中途失败/进程被杀都不会留下半个包被骗去复用
+    part = dst.with_name(dst.name + ".part")
     try:
-        with _zip.ZipFile(str(pkg)) as zsrc, _zip.ZipFile(str(dst), "w", _zip.ZIP_DEFLATED, compresslevel=6) as zdst:
+        # 压缩级别从 6 降到 1：实测 55 MB 包 8.1 s → 3.3 s（.tex 段 5.1 s → 1.3 s），代价是体积 +12%。
+        # 这份带图包只是「上传用的中转件」+「交给 Penumbra 的包」，体积代价换来的是操作不卡。
+        with _zip.ZipFile(str(pkg)) as zsrc, _zip.ZipFile(str(part), "w", _zip.ZIP_DEFLATED, compresslevel=1) as zdst:
             for it in zsrc.infolist():
                 if it.is_dir():
                     continue
@@ -4723,7 +4779,19 @@ def inject_cover_into_package(folder, dest_dir, m=None) -> dict:
                     pass
                 zdst.writestr("meta.json", meta_json.encode("utf-8"))
     except Exception as e:
+        try:
+            part.unlink()
+        except OSError:
+            pass
         return {"ok": False, "why": "插包失败：%s" % str(e)[:140], "src": str(pkg)}
+    try:
+        os.replace(str(part), str(dst))                 # 原子落盘（同盘改名，瞬间完成）
+    except OSError as e:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        return {"ok": False, "why": "插包落盘失败：%s" % str(e)[:140], "src": str(pkg)}
     return {"ok": True, "src": str(pkg), "dst": str(dst), "added": added, "kept": kept,
             "size": dst.stat().st_size, "cover": str(cover)}
 
