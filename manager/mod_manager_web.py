@@ -194,62 +194,67 @@ def tail_log(n=80):
         return []
 
 
-# ------------------------------------------------------------------ 运行日志页（2026-09 加）
+# ------------------------------------------------------------------ 运行日志页（2026-09 加；09-29 改成按分类分文件）
 LOG_TAIL_MAX = 5000          # 一次最多取多少行（页面默认 300）
 
 
 def _log_dir() -> Path:
-    """日志目录 = 程序目录（冻结后用 exe 所在目录，和 mm.LOG_PATH 一致）"""
+    """日志目录 = 程序目录下的 Logs\\（见 mod_manager.LOG_DIR）"""
     try:
-        return Path(mm.APP_DIR)
+        return Path(mm.LOG_DIR)
     except Exception:
-        return Path(mm.LOG_PATH).parent
+        return Path(mm.APP_DIR) / "Logs"
 
 
-def _log_file(name):
+def _log_path_of(name):
     """把 ?file= 映射成真实路径。
 
-    安全闸：只允许**程序目录里**的 .log/.txt（含 Logs/ 子目录），防止 ?file=../../.. 读别的文件。
+    安全闸：只允许 **Logs 目录里**的 .log 文件，防止 ?file=../../.. 读别的文件。
     """
     base = _log_dir().resolve()
-    if not str(name or "").strip():
-        return Path(mm.LOG_PATH)
-    p = (base / str(name).replace("\\", "/")).resolve()
+    nm = str(name or "").strip().replace("\\", "/").lstrip("/")
+    if not nm:
+        nm = mm.LOG_ALL_NAME
+    p = (base / nm).resolve()
     if p != base and base not in p.parents:
-        raise SystemExit("日志文件不在程序目录里：%s" % name)
+        raise SystemExit("日志文件不在 Logs 目录里：%s" % name)
     if not p.is_file():
         raise SystemExit("没有这个日志文件：%s" % name)
     return p
 
 
 def api_logs():
-    """日志页的「有哪些日志可看」：程序目录里的 *.log / Logs 子目录，按修改时间倒序。"""
+    """日志页的「有哪些日志可看」：Logs\\ 下的分类文件 + 分类名。
+
+    排序 = 固定分类顺序（全部在最前），这样页面下拉里就是「全部 / 管理器 / 云盘 / 导入 …」，
+    而不是按修改时间乱跳。
+    """
     base = _log_dir()
-    out, seen = [], set()
-    for pat in ("*.log", "*.log.*", "Logs/*.log", "Logs/*.txt", "logs/*.log"):
-        for p in base.glob(pat):
-            try:
-                if not p.is_file():
-                    continue
-                st = p.stat()
-            except OSError:
-                continue
-            rel = p.relative_to(base).as_posix()
-            if rel in seen:
-                continue
-            seen.add(rel)
-            out.append({"name": rel, "size": st.st_size,
-                        "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))})
-    out.sort(key=lambda x: x["mtime"], reverse=True)
-    return {"dir": str(base), "current": mm.LOG_PATH.name, "files": out}
+    order = ["全部"] + list(mm.LOG_CATS)
+    out = []
+    for p in base.glob("*.log"):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        cat = p.stem
+        out.append({"name": p.name, "cat": cat, "size": st.st_size,
+                    "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+                    "_ord": order.index(cat) if cat in order else 99})
+    out.sort(key=lambda x: (x["_ord"], x["name"]))
+    for x in out:
+        x.pop("_ord", None)
+    legacy = Path(mm.APP_DIR) / "mod_manager.log"
+    return {"dir": str(base), "current": mm.LOG_ALL_NAME, "files": out, "cats": order,
+            "legacy": str(legacy) if legacy.is_file() else ""}
 
 
 def api_log(q):
-    """读日志（给「运行日志」页面用）：?file=名字&n=行数&q=关键字
+    """读日志（给「运行日志」页面用）：?file=分类文件名&n=行数&q=关键字
 
-    · 不给 q：取文件**最后 n 行**（默认 300）；
-    · 给 q：在**整个文件**里过滤后再取末尾 n 行 —— 想找一条报错时不用先想它在第几行。
-    返回还带 first_line/total_lines（页面要显示行号）与文件大小/修改时间（看得出有没有在长）。
+    · 不给 file：读「全部.log」（所有消息，带 [分类] 前缀）；
+    · 不给 q：取文件**最后 n 行**（默认 300）；给了 q：在**整个文件**里过滤后再取末尾 n 行。
+    返回带 first_line/total_lines（页面要显示绝对行号）与文件大小/修改时间。
     """
     try:
         n = int((q.get("n") or ["300"])[0] or 300)
@@ -257,7 +262,7 @@ def api_log(q):
         n = 300
     n = max(1, min(LOG_TAIL_MAX, n))
     kw = str((q.get("q") or [""])[0] or "").strip()
-    p = _log_file((q.get("file") or [""])[0])
+    p = _log_path_of((q.get("file") or [""])[0])
     all_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
     total = len(all_lines)
     if kw:
@@ -270,8 +275,8 @@ def api_log(q):
         picked = all_lines[-n:]
         first = max(1, total - len(picked) + 1)
     st = p.stat()
-    return {"file": p.name, "dir": str(_log_dir()), "lines": picked, "first_line": first,
-            "total_lines": total, "matched": len(picked) if kw else total,
+    return {"file": p.name, "cat": p.stem, "dir": str(_log_dir()), "lines": picked,
+            "first_line": first, "total_lines": total, "matched": len(picked) if kw else total,
             "size": st.st_size, "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
             "q": kw, "n": n}
 
@@ -3265,6 +3270,45 @@ JOB_FUNCS = {"scan": _job_scan, "export": _job_export, "run": _job_run,
              "cloud_verify": _job_cloud_verify, "cover_inject": _job_cover_inject}
 
 
+# 任务类型 → 日志分类（进 Logs\<分类>.log；页面按分类分开看）
+JOB_CAT = {
+    "scan": "扫描", "export": "扫描", "run": "扫描", "renumber": "扫描",
+    "backup": "备份", "restore": "备份",
+    "import": "导入", "download": "导入", "watch": "导入", "selfdownload": "导入",
+    "importfile": "导入", "fetch": "导入",
+    "update_check": "更新", "mod_update": "更新",
+    "cloud_archive": "云盘", "cloud_restore": "云盘", "cloud_verify": "云盘",
+    "cloud_reconcile": "云盘", "cloud_discover": "云盘", "cloud_index_sync": "云盘",
+    "cloud_index_restore": "云盘", "cloud_claim": "云盘",
+    "cover_inject": "浏览器",
+}
+
+
+def cat_of_path(path: str) -> str:
+    """接口路径 → 日志分类（同步接口里的日志也自动归类）。
+
+    返回 "" 表示**不设**，让 log() 自己按消息关键词兜底 —— 比瞎归一类准。
+    """
+    p = str(path or "")
+    if p.startswith("/api/cloud"):
+        return "云盘"
+    if p.startswith("/api/bridge") or p.startswith("/api/install"):
+        return "插件"
+    if p.startswith(("/api/browser", "/api/fetch", "/api/inbox", "/api/img", "/api/thumb",
+                     "/api/raw", "/api/images", "/api/mod/fix-cover", "/api/mod/add-image",
+                     "/api/mod/delete-image", "/api/mod/set-preview")):
+        return "浏览器"
+    if p.startswith("/api/check") or p.startswith("/api/dupes"):
+        return "检查"
+    if p.startswith("/api/index"):
+        return "扫描"
+    if p.startswith("/api/backup"):
+        return "备份"
+    if p.startswith("/api/renumber"):
+        return "扫描"
+    return ""
+
+
 def start_job(kind: str, params: dict | None = None):
     if kind not in JOB_FUNCS:
         return None, "不认识的任务：%s" % kind
@@ -3276,6 +3320,7 @@ def start_job(kind: str, params: dict | None = None):
         JOBS["cur"] = job
 
     def run():
+        mm.set_log_cat(JOB_CAT.get(kind, "管理器"))     # 这个任务里的日志 → 对应分类文件
         try:
             job.result = JOB_FUNCS[kind](job)
             job.state = "cancelled" if job.cancelled() else "done"
@@ -4726,7 +4771,7 @@ def cover_to_decodable(src, quality=88, max_w=1920):
         if is_jpeg and src.suffix.lower() in (".jpg", ".jpeg"):
             return src                              # 本来就是能解码的 jpg
         from PIL import Image
-        out_dir = Path(mm.LOG_PATH).parent / "cover_cache_draw"
+        out_dir = Path(mm.APP_DIR) / "cover_cache_draw"        # ★ 缓存跟程序目录走，别跟着日志目录跑
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = "%s_%d" % (re.sub(r"[^\w\-]+", "_", src.stem)[:60], int(src.stat().st_mtime))
         out = out_dir / (stamp + ".jpg")
@@ -4764,7 +4809,7 @@ def cover_to_webp(src, quality=88, max_w=1920):
         if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
             return src                      # 本来就是 WebP
         from PIL import Image
-        out_dir = Path(mm.LOG_PATH).parent / "cover_cache_webp"
+        out_dir = Path(mm.APP_DIR) / "cover_cache_webp"        # ★ 同上
         out_dir.mkdir(parents=True, exist_ok=True)
         stamp = "%s_%d" % (re.sub(r"[^\w\-]+", "_", src.stem)[:60], int(src.stat().st_mtime))
         out = out_dir / (stamp + ".webp")
@@ -5447,6 +5492,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(u.query)
+        mm.set_log_cat(cat_of_path(u.path))       # 接口里的日志按分类归档
         try:
             if u.path.startswith("/api/"):
                 routes = {
@@ -5550,6 +5596,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- POST ----------
     def do_POST(self):
         u = urllib.parse.urlsplit(self.path)
+        mm.set_log_cat(cat_of_path(u.path))       # 接口里的日志按分类归档
         n = int(self.headers.get("Content-Length") or 0)
         ctype = self.headers.get("Content-Type") or ""
         body = {}
@@ -6585,7 +6632,7 @@ class Handler(BaseHTTPRequestHandler):
             roots = list(_backup_dirs(cfg))
             dl2, ib2 = mm.resolve_dirs(cfg) if cfg.get("root") else ("", "")
             for extra in (cfg.get("root"), dl2, ib2, mm.find_install_dir(cfg),
-                          str(mm.LOG_PATH.parent)):
+                          str(mm.APP_DIR), str(mm.LOG_DIR)):   # 程序目录 + Logs 都允许打开
                 if extra:
                     try:
                         roots.append(Path(extra).resolve())

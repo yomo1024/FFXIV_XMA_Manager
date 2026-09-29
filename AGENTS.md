@@ -16,6 +16,10 @@
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.33.24 日志按分类分文件 + 拓展只留 F 盘**（主人要求）：日志统一进 `Logs\`——`全部.log`（带 `[分类]` 前缀）
+  + `云盘.log`/`导入.log`/`更新.log`/`扫描.log`/`插件.log`/`浏览器.log`/`备份.log`/`检查.log`（任务按 kind、
+  接口按路径设分类上下文，其余按关键词兜底，240 处老 log() 一行没改）；日志页加分类切换条 + 每行彩色分类标签 +
+  分类计数。浏览器拓展只在 `F:\REPO\FFXIV_XMA_M\browser-extension`（旧路径那份已删，主人手动在 Chrome 重新加载）
 - **v2.33.22~23 NSFW 封面改「悬停看清、移开自动模糊」**（主人报的）：原来只能点一下才解除。
   用 **CSS `:hover`**（不用 JS 记悬停状态：naive-ui 表格会在悬停约 1.5 秒后重渲染，JS 状态会丢）；
   表格缩略图的模糊在内联样式里 → 加 `nsfw-blur-cell` 标记 + `:hover{filter:none!important}`。
@@ -154,8 +158,9 @@ python scripts\check_api_contract.py        # 拓展/前端 ↔ 后端 的路由
 
 ## 7. 硬规则（违反 = 返工）
 
-- **运行数据一个都不许碰**：`mod_manager.json` / `mod_manager.db` / `mod_manager.log` / `backup/` /
-  `browser_profile/`（150MB 登录态，删了要重新登录）/ `.thumb_cache/` / `cover_cache*/`。
+- **运行数据一个都不许碰**：`mod_manager.json` / `mod_manager.db` / `Logs/`（日志，按分类分文件）/
+  `backup/` / `browser_profile/`（150MB 登录态，删了要重新登录）/ `.thumb_cache/` / `cover_cache*/`。
+  老的单文件 `mod_manager.log` 已不用：程序启动后第一次写日志时会自动搬进 `Logs\全部.log`。
   覆盖线上副本时只覆盖程序文件，清理只清可再生的 `build/ dist/ __pycache__/ web_proto/`。
 - 不提交运行时产物：`*.exe *.zip`（例外：`plugin/release/*.zip`）、`.db`、`.log`、`node_modules/`、`shots/`（见 `.gitignore`）。
 - 行尾统一 CRLF。改文件用字节级读写，读时把 `\r\n` 归一成 `\n` 再写回（**双转换会产生 `\r\r\n`**，

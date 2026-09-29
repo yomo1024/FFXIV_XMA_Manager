@@ -39,6 +39,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.parse
@@ -65,7 +66,18 @@ CONFIG_PATH = APP_DIR / "mod_manager.json"
 DB_PATH = APP_DIR / "mod_manager.db"
 THUMB_DIR = APP_DIR / ".thumb_cache"
 BACKUP_DIR = APP_DIR / "backup"
-LOG_PATH = APP_DIR / "mod_manager.log"
+# ---- 日志：统一放 Logs\ 下，并按分类分文件（2026-09-29 主人要求）----
+#   Logs\全部.log     —— 所有消息（带 `[分类]` 前缀），排查时看这一份
+#   Logs\<分类>.log   —— 该分类自己的文件（页面上按分类分开看）
+LOG_DIR = APP_DIR / "Logs"
+LOG_ALL_NAME = "全部.log"
+LOG_PATH = LOG_DIR / LOG_ALL_NAME                 # 兼容老代码：还是那个「主日志」
+LEGACY_LOG_PATH = APP_DIR / "mod_manager.log"     # 老位置，启动时搬进 Logs\
+LOG_CATS = ("管理器", "云盘", "导入", "更新", "扫描", "插件", "浏览器", "备份", "检查")
+_log_ctx = threading.local()                      # 当前线程的日志分类（任务/接口入口设一次）
+_log_lock = threading.Lock()
+_log_dir_ready = False
+_log_migrated = False
 
 DEFAULT_CONFIG = {
     "root": "",                 # Mod 根目录（首次运行会让你选）
@@ -196,14 +208,87 @@ def _excepthook(exc_type, exc, tb):
 sys.excepthook = _excepthook
 
 
-def log(msg=""):
-    line = str(msg)
-    print(line)
+def set_log_cat(cat: str = ""):
+    """给**当前线程**设日志分类：任务/接口入口设一次，里面所有 log() 自动归类。
+
+    不设就走关键词兜底（见 guess_log_cat）——这样 240 处老 log() 调用一行都不用改。
+    """
+    _log_ctx.cat = str(cat or "")
+
+
+def get_log_cat() -> str:
+    return getattr(_log_ctx, "cat", "") or ""
+
+
+# 关键词兜底：没设上下文时，按消息内容猜分类（宁可归到「管理器」，也别乱塞）
+_CAT_HINTS = (
+    ("云盘", ("云盘", "云端", "夸克", "归档", "取回", "对账", "网盘", "秒传", "上传", "下载云端")),
+    ("浏览器", ("浏览器", "登录态", "cookie", "Cookie", "封面", "Cloudflare", "内置")),
+    ("插件", ("插件", "ModBridge", "Penumbra", "装进游戏", "送进游戏", "游戏里", "游戏内", "插件没连上")),
+    ("导入", ("入库", "导入", "待导入", "解压", "压缩包", "拓展推", "推来", "下载完成")),
+    ("更新", ("检查更新", "更新 Mod", "有新版", "站点更新", "版本历史", "update_history")),
+    ("备份", ("备份", "恢复", "打包")),
+    ("检查", ("检查", "查重", "安装检查", "体检", "序号重复", "缺失")),
+    ("扫描", ("扫描", "索引", "序号", "汇总表", "导出", "重排", "改名", "重命名", "移动")),
+)
+
+
+def guess_log_cat(msg) -> str:
+    s = str(msg)
+    for cat, words in _CAT_HINTS:
+        for w in words:
+            if w in s:
+                return cat
+    return "管理器"
+
+
+def _log_file(cat: str) -> Path:
+    return LOG_DIR / (("全部" if cat == "全部" else cat) + ".log")
+
+
+def _ensure_log_dir():
+    global _log_dir_ready, _log_migrated
+    if not _log_dir_ready:
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        _log_dir_ready = True
+    if not _log_migrated:
+        _log_migrated = True
+        # 老位置的日志搬进 Logs\（只在目标还不存在时搬，别覆盖新日志）
+        try:
+            if LEGACY_LOG_PATH.is_file() and not LOG_PATH.exists():
+                LEGACY_LOG_PATH.replace(LOG_PATH)
+        except Exception:
+            pass
+
+
+def _append_line(path: Path, text: str):
     try:
-        with LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text)
     except Exception:
         pass
+
+
+def log(msg="", cat=None):
+    """写一行日志。
+
+    · 分类：显式 cat > 当前线程上下文（set_log_cat）> 关键词兜底 > 管理器；
+    · 去处：Logs\\全部.log（**带 [分类] 前缀**）+ Logs\\<分类>.log（不含前缀）；
+    · 顺便 print()，命令行/控制台照旧能看到。
+    """
+    line = str(msg)
+    print(line)
+    c = str(cat or "").strip() or get_log_cat() or guess_log_cat(line)
+    if c not in LOG_CATS:
+        c = "管理器"
+    _ensure_log_dir()
+    with _log_lock:
+        _append_line(LOG_PATH, "[%s] %s\n" % (c, line))
+        if c != "全部":
+            _append_line(_log_file(c), line + "\n")
 
 
 def load_config() -> dict:
