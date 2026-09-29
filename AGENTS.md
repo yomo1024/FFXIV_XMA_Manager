@@ -78,13 +78,15 @@ FFXIV Mod 管理器「三件套」，服务于 XIVModArchive / Heliosphere 两�
 | 用途 | 路径 |
 |---|---|
 | 仓库（开发主目录，权威） | `E:\Hermes\FFXIV_XMA_Manager` |
-| 线上运行副本（**只在交付时覆盖程序文件**） | `G:\Games\FFXIV\Soft` |
-| 真实 Mod 库 | `G:\Games\FFXIV\MOD\202609` |
+| 线上运行副本（**只在交付时覆盖程序文件**） | `F:\REPO\FFXIV_XMA_M`（2026-09-29 从 G:\Games\FFXIV\Soft 迁来） |
+| 真实 Mod 库 | `G:\Games\FFXIV\MOD\202609`（**没动过**，管理器换地方不影响它） |
+| 浏览器拓展（Chrome「已解压」加载路径） | `G:\Games\FFXIV\Soft\browser-extension` —— **故意留在旧路径**：已解压拓展的 ID 由路径算出来，一挪 ID 就变；所以旧路径并不是残留，更新拓展时**这里和 F 盘那份都要放**（或让主人从 F 盘重新加载拓展后再删） |
 | .NET 10 SDK（**不在 PATH**） | `C:\Users\qwe26\AppData\Local\Microsoft\dotnet\dotnet.exe` |
 | Dalamud 引用库（编译插件必需） | `E:\Hermes\dalamud-dev` → 环境变量 `DALAMUD_HOME` |
 | Node 22 / npm | `C:\Users\qwe26\.hermes-web-ui\desktop-runtime\hermes\0.21.3\win-x64\node` |
 | Python 3.12（含 PyInstaller 6.22.3 + tkinter） | `C:\Users\qwe26\AppData\Local\Programs\Python\Python312\python.exe` |
 
+- **G 盘不是 NTFS**（`fsutil`/`Get-Volume` 显示 Unknown，实际 exFAT 类）：**不能建 junction / 符号链接**（`mklink /J` 报「需要本地 NTFS 卷」），而且 G↔F 之间复制很慢（实测约 17 MB/分钟，1.1 GB 花了 5 分半）—— 大批量搬运要后台跑 + 进度核对。
 - **git remote 必须走 SSH**（`git@github.com:yomo1024/FFXIV_XMA_Manager.git`）；HTTPS 到 github.com 在本机不通。
 - 偶发 `ssh: Could not resolve hostname github.com`（代理抖动）→ 直接重试，不要改 remote。
 - 网络请求用 Python `requests`/`urllib`；本机 `curl` 常失败（rc=255）。
@@ -146,7 +148,7 @@ python scripts\check_api_contract.py        # 拓展/前端 ↔ 后端 的路由
 3. 变更清单：改了哪些文件、为什么、影响面（哪些接口/页面/组件受牵连）。
 4. 若动了 `/api/*`：先搜这四处消费者 `browser-extension/content.js`、`browser-extension/sw.js`、
    `manager/web-src/src/api.js`、`manager/web-src/src/views/*.vue`。**新字段只增不删**。
-5. 交付物：可直接覆盖的产物（exe / 发布包 zip / 插件 zip）+ 自测证据；要同步 `G:\Games\FFXIV\Soft`。
+5. 交付物：可直接覆盖的产物（exe / 发布包 zip / 插件 zip）+ 自测证据；要同步 `F:\REPO\FFXIV_XMA_M`。
 6. 收尾按项目发布策略：小改（文案/界面/小优化）只升版本号 + commit/push；**功能新增或重要修复才打 tag + Release**。
    打 tag 前先 GET `https://api.github.com/user` 用 `C:\Users\qwe26\github_token.txt` 验 token；Release 附件名必须纯 ASCII。
 
