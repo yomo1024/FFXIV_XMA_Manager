@@ -10,11 +10,20 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.33.26**（最新 tag = **v2.33.12**）｜拓展 **v1.2.5** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.33.28**（最新 tag = **v2.33.12**）｜拓展 **v1.2.6** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
+
+- **v2.33.28 / 拓展 v1.2.6 修「封面取成缩略图」**（主人报的）：封面**改从页面头图轮播取** ——
+  `<img class="d-block w-100 mod-carousel-image">` 里的 `mod-images/<uuid>.jpg` 才是本体（实测 1920×1080）；
+  `mod-thumbnails/<uuid>.jpg`（355×200）是缩略图，页面下方「相关 Mod」卡片用的就是它，以前有被当成封面的风险。
+  更关键的是取图手段：**urllib 直连 / 带浏览器 Cookie 的 urllib 抓 static.xivmodarchive.com 都是 403**
+  （cf_clearance 绑浏览器指纹），页面里跨域 `fetch` 又被 CORS 挡 —— 新 `browser_fetch_bytes()` 改用
+  **开后台标签页停在图片网址上再 `fetch(location.href)`（同源）**，实测拿回 1920×1080 / 1.2 MB。
+  另外：只有缩略图地址时先用**同 UUID**换 `mod-thumbnails → mod-images`；低清兜底落盘前比大小，
+  **已有更大的封面就不许顶掉**（`_bigger_cover_kept()`）。
 
 - **v2.33.26 / 拓展 v1.2.5 修「下载 mod 没传更新时间」**（主人报的第二次）：`content.js` 取时间的
   那段用了 forEach 里的局部变量 `t`（外层不存在）→ 异常被自己 catch 吞掉 → `updated` 恒为空。

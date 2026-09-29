@@ -30,6 +30,7 @@ FFXIV Mod 管理工具
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as _dt
 import hashlib
 import json
@@ -1072,7 +1073,10 @@ PAGE_INFO_JS = (
     "var dl=null,href='';"
     "for(var i=0;i<cands.length;i++){var hh=cands[i].getAttribute('href')||'';"
     "  if(hh&&hh!=='#'&&hh.indexOf('javascript:')!==0){dl=cands[i];href=hh;break;}}"
-    "var img=document.querySelector('img[src*=\"/mod-images/\"]');"
+    # 封面：先取页面头图轮播里那张大图 <img class="d-block w-100 mod-carousel-image">
+    # （主人 2026-09-29 指定的位置；实测 1920×1080 的 mod-images 大图），没有了再退到第一张 mod-images
+    "var carEl=document.querySelector('img.mod-carousel-image')||document.querySelector('.mod-carousel-image');"
+    "var img=carEl||document.querySelector('img[src*=\"/mod-images/\"]');"
     "var author='';"
     "links.forEach(function(e){"
     "  if(!author&&(e.getAttribute('href')||'').indexOf('/user/')===0){author=e.innerText.trim();}});"
@@ -1115,7 +1119,7 @@ PAGE_INFO_JS = (
     "    var r2=s.match(/[^\\s\"']*\\/(?:private|files)\\/(?:[^\\s\"']+)/);"
     "    if(r2&&dlc.indexOf(r2[0])<0)dlc.push(abs(r2[0]));});}"
     "return {url:location.href,title:document.title,"
-    "name:h1?h1.innerText.trim():'',author:author,cover:img?img.src:'',"
+    "name:h1?h1.innerText.trim():'',author:author,cover:img?(img.currentSrc||img.src||''):'',"
     "dl:dl?abs(href):'',dlRaw:href,dlCands:dlc.slice(0,5),filesTab:filesTab,"
     "tags:tags.slice(0,40),races:races,genders:genders,mtype:mtype,affects:affects,"
     "lastUpdate:lastUp,firstRelease:firstRel,"
@@ -1329,6 +1333,18 @@ class CDP:
                     raise RuntimeError("%s -> %s" % (method, msg["error"]))
                 return msg.get("result", {})
 
+    def call_s(self, session, method, **params):
+        """在某个 flatten 会话（Target.attachToTarget）里调用方法"""
+        self.n += 1
+        self.ws.send(json.dumps({"id": self.n, "method": method,
+                                 "params": params, "sessionId": session}))
+        while True:
+            msg = json.loads(self.ws.recv())
+            if msg.get("id") == self.n:
+                if "error" in msg:
+                    raise RuntimeError("%s -> %s" % (method, msg["error"]))
+                return msg.get("result", {})
+
     def js(self, expr, await_promise=False):
         r = self.call("Runtime.evaluate", expression=expr,
                       returnByValue=True, awaitPromise=await_promise)
@@ -1417,7 +1433,9 @@ CF_TITLES = ("请稍候", "just a moment", "checking your browser", "attention r
 
 PAGE_STATE_JS = ("JSON.stringify({t:document.title,u:location.href,"
                  "h:(document.querySelector('h1')||{}).innerText||'',"
-                 "i:(document.querySelector('img[src*=\"/mod-images/\"]')||{}).src||''})")
+                 "i:(function(){var c=document.querySelector('img.mod-carousel-image')||document.querySelector('.mod-carousel-image');"
+                 "var f=c||document.querySelector('img[src*=\"/mod-images/\"]');"
+                 "return f?(f.currentSrc||f.src||''):'';})()})")
 
 
 def browser_page_state(cfg, prefer="xivmodarchive"):
@@ -1835,12 +1853,92 @@ def browser_capture(cfg) -> dict:
     return info
 
 
+_SAME_ORIGIN_JS = (
+    "(async function(){try{"
+    "var r=await fetch(location.href,{credentials:'include',cache:'no-store'});"
+    "if(!r.ok)return JSON.stringify({e:'HTTP '+r.status});"
+    "var b=new Uint8Array(await r.arrayBuffer());"
+    "var s='';for(var i=0;i<b.length;i+=0x8000){s+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));}"
+    "return JSON.stringify({n:b.length,d:btoa(s)});"
+    "}catch(e){return JSON.stringify({e:String(e)})}})()")
+
+
+def browser_fetch_bytes(cfg, url, dest, keep_tab=False) -> int:
+    """在**真浏览器里同源取字节**（封面图等）：开一个后台标签页停在图片网址上，
+    再用 `fetch(location.href)` 把字节拿回来；取完关掉标签页，不动主人别的页面。
+
+    为什么非这样不可（2026-09-29 实测，主人问「你封面图怎么找那个缩略图？」的根子）：
+      · urllib 直连 static.xivmodarchive.com 的图 → Cloudflare 403（cf_clearance 绑浏览器指纹）；
+      · 带浏览器 Cookie 的 urllib（也就是下面 browser_fetch 的老做法）**照样 403**；
+      · 在 Mod 页面里跨域 fetch 同一张图 → 被 CORS 挡（Failed to fetch）；
+      · 把标签页**停在图片网址上**再 fetch 就是同源 → 实测 200，拿回 1920×1080 / 1.2 MB 的真封面。
+    """
+    url = (url or "").strip()
+    if not url:
+        raise SystemExit("没有抓到封面地址（页面可能还没加载好）")
+    dest = Path(dest)
+    bcdp = _cdp_get(cfg, False)          # 浏览器级连接（能开/关标签页）
+    tid = ""
+    try:
+        try:
+            r = bcdp.call("Target.createTarget", url=url, background=True)
+        except Exception:
+            r = bcdp.call("Target.createTarget", url=url)
+        tid = r.get("targetId") or ""
+        if not tid:
+            raise RuntimeError("开标签页没拿到 targetId")
+        sess = bcdp.call("Target.attachToTarget", targetId=tid, flatten=True)["sessionId"]
+        out = None
+        for i in range(12):              # 图片大/网络慢时多等几轮
+            time.sleep(0.8 if i else 1.2)
+            try:
+                res = bcdp.call_s(sess, "Runtime.evaluate", expression=_SAME_ORIGIN_JS,
+                                  awaitPromise=True, returnByValue=True)
+            except Exception:
+                continue
+            val = (res.get("result") or {}).get("value")
+            if not val:
+                continue
+            d = json.loads(val)
+            if d.get("e"):
+                raise RuntimeError("同源取图失败：%s" % d["e"])
+            out = d
+            break
+        if not out:
+            raise RuntimeError("同源取图超时")
+        n = int(out.get("n") or 0)
+        if n <= 0:
+            raise RuntimeError("同源取图拿到空内容")
+        if n > 24 * 1024 * 1024:
+            raise RuntimeError("图太大（%.1f MB）" % (n / 1048576.0))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(base64.b64decode(out["d"]))
+        return n
+    finally:
+        if tid and not keep_tab:
+            try:
+                bcdp.call("Target.closeTarget", targetId=tid)
+            except Exception:
+                pass
+
+
 def browser_fetch(cfg, url, dest) -> int:
-    """借用浏览器 Cookie 抓资源（封面图等），保存到 dest"""
+    """借用浏览器抓资源（封面图等），保存到 dest。
+
+    先走**同源标签页**（能过 Cloudflare，拿到的是全尺寸），失败才退回老的
+    「带浏览器 Cookie 的 urllib」——那条路对 static.xivmodarchive.com 基本是 403，
+    只能拿到公开缩略图（这就是以前封面会糊成 355×200 的原因）。
+    """
     import urllib.request
     if not (url or "").strip():
         raise SystemExit("没有抓到封面地址（页面可能还没加载好）")
     dest = Path(dest)
+    try:
+        return browser_fetch_bytes(cfg, url, dest)
+    except SystemExit:
+        raise
+    except Exception as e0:
+        log("同源取图没成，改用带 Cookie 的直连再试：%s" % str(e0)[:90])
     cdp = _cdp_get(cfg, True)
     ua = cdp.js("navigator.userAgent") or "Mozilla/5.0"
     try:

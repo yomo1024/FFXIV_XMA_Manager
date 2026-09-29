@@ -25,10 +25,21 @@
     }
     const h1 = document.querySelector('h1');
     const ua = links.filter((e) => (e.getAttribute('href') || '').indexOf('/user/') === 0)[0];
-    const img = document.querySelector('img[src*="/mod-images/"]');
+    // 封面 = 页面头图轮播里那张大图：取 <img class="d-block w-100 mod-carousel-image"> 的图
+    // （2026-09-29 主人指出：「你封面图怎么找那个缩略图？找 HTML 中
+    //   class='d-block w-100 mod-carousel-image' 的元素里的图」）。
+    // 实测：该元素 src = static.xivmodarchive.com/mod-images/<uuid>.jpg，1920×1080，就是封面本体；
+    // 页面下方「相关 Mod」卡片用的是 mod-thumbnails/<uuid>.jpg（355×200 缩略图），绝不能拿来当封面。
+    const car = document.querySelector('img.mod-carousel-image') || document.querySelector('.mod-carousel-image');
+    const img = car || document.querySelector('img[src*="/mod-images/"]');
     const imgs = [];
+    // 轮播里的图排最前：它们才是这个 Mod 自己的全尺寸图（其它候选含相关 Mod 卡片/头像）
+    [].slice.call(document.querySelectorAll('.mod-carousel-image')).forEach((i) => {
+      const u = i.currentSrc || i.src || '';
+      if (u && imgs.indexOf(u) < 0) imgs.push(u);
+    });
     [].slice.call(document.querySelectorAll('img')).forEach((i) => {
-      const u = i.src || '';
+      const u = i.currentSrc || i.src || '';
       if (/mod-images|xmimg|static\.xivmodarchive/i.test(u) && imgs.indexOf(u) < 0) imgs.push(u);
     });
     const text = (document.body ? document.body.innerText : '').slice(0, 1200);
@@ -56,7 +67,7 @@
       tags: tags, races: meta.races, genders: meta.genders, mtype: meta.mtype, affects: meta.affects,
       name: h1 ? h1.innerText.trim() : document.title.replace(/\s*\|.*$/, ''),
       author: ua ? ua.innerText.trim() : '',
-      cover: img ? img.src : (imgs[0] || ''),
+      cover: img ? (img.currentSrc || img.src || '') : (imgs[0] || ''),
       imgs: imgs.slice(0, 60), dl: dl, title: document.title,
       // 站点「最后更新时间」：入库时直接当基线用，省得管理器再为一行时间开浏览器
       // ★ 2026-09-29 修：以前这里用了**作用域外的变量 t**（t 只是上面 forEach 里的局部变量），

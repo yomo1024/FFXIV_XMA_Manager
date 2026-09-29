@@ -3100,6 +3100,37 @@ def _retire_lowres_cover(folder, old_img, new_img) -> None:
         mm.log("清理旧低清封面失败（不影响使用）：%s" % str(e)[:80])
 
 
+def _bigger_cover_kept(folder, tmp) -> str:
+    """低清兜底落盘前的护栏：已有**更大的**封面（同级同名 / 文件夹内）就返回它，别再写小的。
+
+    为什么（2026-09-29 主人：「你封面图怎么找那个缩略图？」）：入库时如果只取到缩略图，
+    以前会直接写上去，把包里自带的大封面、或之前已经抓好的大图**降级**成 355×200 的糊图。
+    现在先下到临时文件比大小：比不过就整张丢弃（find_image 第 1 顺位是同级同名，写下去就顶掉了）。
+    """
+    try:
+        new = Path(tmp).stat().st_size
+    except OSError:
+        return ""
+    folder = Path(folder)
+    cands = [folder.parent / (folder.name + e) for e in (".jpg", ".jpeg", ".png", ".webp")]
+    try:
+        cands += [q for q in folder.iterdir()
+                  if q.is_file() and q.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
+    except OSError:
+        pass
+    best, best_sz = "", 0
+    for q in cands:
+        try:
+            sz = q.stat().st_size
+        except OSError:
+            continue
+        if sz > best_sz:
+            best, best_sz = str(q), sz
+    if best and best_sz > new:
+        return "%s（%d B > %d B）" % (Path(best).name, best_sz, new)
+    return ""
+
+
 def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
     """给刚入库的 Mod 抓封面：全尺寸拿不到就退到**公共缩略图**（保证不留空封面）。
 
@@ -3124,17 +3155,38 @@ def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
 
     tried = []
     cu = str(cover_url or "").strip()
+    # ★ 第一优先：封面本体（mod-images/<uuid> 的全尺寸大图）。
+    #   若拿到的地址本身就是缩略图（mod-thumbnails/<uuid>），先换成**同 UUID** 的全尺寸再抓。
+    #   为什么（2026-09-29 主人：「你封面图怎么找那个缩略图？要找 HTML 中
+    #   class='d-block w-100 mod-carousel-image' 的元素里的图」）：
+    #   站点上封面本体就是轮播那张 <img class="d-block w-100 mod-carousel-image">，
+    #   地址为 static.xivmodarchive.com/mod-images/<uuid>.jpg（实测 1920×1080）；
+    #   而 mod-thumbnails/<uuid>.jpg 是同一张图的 355×200 缩略图。
+    #   同 UUID 换路径 = 同一张图的不同尺寸，不会像换图那样取错（UUID 不同的一律不碰）。
+    first_cands = []
     if cu.lower().startswith("http"):
-        ext = _ext_of(cu)
+        if "/mod-thumbnails/" in cu:
+            first_cands.append(cu.replace("/mod-thumbnails/", "/mod-images/"))
+        first_cands.append(cu)
+    for f_u in first_cands:
+        is_big = "/mod-images/" in f_u
+        ext = _ext_of(f_u)
         try:
-            ok, why = _save_url(cfg, cu, _sib(ext), use_browser=mm.browser_running(cfg))
+            ok, why = _save_url(cfg, f_u, _sib(ext), use_browser=mm.browser_running(cfg))
             if ok:
                 cover_land_inside(folder)
-                mm.log("入库补封面：全尺寸（%s）" % why)
-                return {"ok": True, "how": "全尺寸", "lowres": False, "path": str(_sib(ext))}
-            tried.append("全尺寸：%s" % why)
+                if is_big:
+                    mm.log("入库补封面：全尺寸（%s）" % why)
+                    return {"ok": True, "how": "全尺寸", "lowres": False, "path": str(_sib(ext))}
+                # 手上就只有缩略图：照写，但**如实标成低清**（别谎报全尺寸），
+                # 后面「补预览图」会把它换成大图（<80KB 会被判低清）
+                mm.log("入库补封面：只有缩略图（%s，%s）—— 之后可用「补预览图」换全尺寸"
+                       % (Path(f_u).name[:28], why))
+                return {"ok": True, "how": "缩略图（暂用，可补预览图升级）", "lowres": True,
+                        "path": str(_sib(ext)), "tried": tried}
+            tried.append("%s：%s" % ("全尺寸" if is_big else "缩略图", why))
         except Exception as e:
-            tried.append("全尺寸：%s" % str(e)[:70])
+            tried.append("%s：%s" % ("全尺寸" if is_big else "缩略图", str(e)[:70]))
     # ★ 全尺寸拿不到时，退到**封面自己的缩略图**：把 mod-images/<uuid> 换成 mod-thumbnails/<uuid>
     #   （同一张图的低分辨率版，实测公开可取 200）。
     #   ⚠ 千万别拿 imgs 里别的图当封面 —— 那些 UUID 不同、是画廊里的**另一张图**，
@@ -3153,13 +3205,28 @@ def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
             cands.append(u)
     for u in cands:
         ext = _ext_of(u)
+        tmp = _sib(".part" + ext)          # 先落临时名：好比对大小，必要时原样丢弃
         try:
-            ok, why = _save_url(cfg, u, _sib(ext), use_browser=False)
+            ok, why = _save_url(cfg, u, tmp, use_browser=False)
             if ok:
+                keep = _bigger_cover_kept(folder, tmp)
+                if keep:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                    mm.log("入库补封面：已有更大的封面，保留原图、不降级成缩略图（%s）" % keep)
+                    return {"ok": True, "how": "保留已有封面（比缩略图大）", "lowres": False,
+                            "path": keep, "tried": tried}
+                os.replace(str(tmp), str(_sib(ext)))
                 cover_land_inside(folder)
                 mm.log("入库补封面：低清兜底（封面自己的缩略图 %s）" % Path(u).name[:28])
                 return {"ok": True, "how": "低清兜底（封面自己的缩略图）", "lowres": True,
                         "path": str(_sib(ext)), "tried": tried}
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
             tried.append("%s：%s" % (Path(u).name[:20], why))
         except Exception as e:
             tried.append("%s：%s" % (Path(u).name[:20], str(e)[:60]))
