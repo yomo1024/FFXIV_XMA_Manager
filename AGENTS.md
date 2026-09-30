@@ -10,12 +10,14 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.35.1**（最新 tag = **v2.34.3**）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.35.1**（最新 tag = **v2.35.1**，已发 Release）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.35.1 已发版**（tag + Release + 附件 `XMA-Manager-v2.35.1.zip`，纯 ASCII 名）：
+  Release 正文把 v2.35.0 的实时刷新一起写了（两版合并发布）。
 - **v2.35.1 修「拓展下载入库后序号是错的」**（主人 2026-09-30 报）：序号的不变量是
   **每个分类各自 1..N**（`renumber_plan` 按分类连续排、`cmd_check` 按「(分类, 序号)」判重复、
   库里现有数据也是这个口径 —— 衣服 1..12 里 3 号住在子分类 Katami ☆），
