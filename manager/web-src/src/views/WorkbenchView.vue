@@ -174,6 +174,10 @@ function onVisible() {
 }
 const parseErr = ref('')
 const parseWarn = ref('')
+// heliosphere **没有「页面直链」**—— 它是管理器自己去读 GraphQL 清单、下 zstd 文件、
+// 在本地打包成 .pmp（见 manager/heliosphere.py）。所以「能不能下载」不能只看 page.dl，
+// 不然解析成功也会被误判成「没读到下载链接」。
+const canDownload = computed(() => !!(parsed.value?.dl || parsed.value?.helio))
 const form = ref({ category: '', zone: 'SFW', subcat: '', author: '', name: '', seq: null,
                    affects: '', affectsFromPage: '', cover: true, export: true })
 
@@ -370,7 +374,7 @@ function doFetch() {
   const u = parsed.value?.addr || urlInput.value.trim()
   if (!u) return msg.warning('先解析一个 Mod 链接')
   if (!form.value.category) return msg.warning('选一下导入到哪个分类')
-  if (!parsed.value?.dl) {
+  if (!parsed.value?.dl && !parsed.value?.helio) {
     return msg.warning(parsed.value?.warn || parseWarn.value ||
       '这个页面没找到下载链接（可能要登录，或作者没上传文件）—— ' +
       '可以在内置浏览器里手动点下载，然后用「监视下载目录」', { duration: 15000 })
@@ -468,7 +472,7 @@ const pendColumns = [
             <n-button size="small" type="primary" :loading="parsing" @click="parse">
               解析链接
             </n-button>
-            <n-button size="small" type="warning" secondary
+            <n-button v-if="!parsed?.helio" size="small" type="warning" secondary
                       :disabled="!(parsed?.dl || inboxPage?.dl)"
                       @click="downloadWithMyBrowser">
               ⬇ 用我自己的浏览器下载 → 自动入库
@@ -527,7 +531,8 @@ const pendColumns = [
             <n-collapse-item title="不想开内置浏览器？用你自己的浏览器读取（拖一个书签到书签栏）">
               <div class="dim" style="margin-bottom: 6px">
                 把下面这个链接拖到浏览器书签栏，然后在任意 xivmodarchive 的 Mod 页面点一下它：
-                页面上的 名称 / 作者 / 封面 / 下载直链 就会自动送进这里（解析不用内置浏览器）。注意：真正下载文件时仍需要内置浏览器处于登录状态 —— 点上面的「同步登录状态」即可。
+                页面上的 名称 / 作者 / 封面 / 下载直链 就会自动送进这里（解析不用内置浏览器）。注意：真正下载文件时仍需要内置浏览器处于登录状态 —— 点上面的「同步登录状态」即可。<br />
+                <b>heliosphere.app 是个例外</b>：它匿名就能读页面、下文件、取封面 —— 粘个链接点「下载并入库」就行，不必开内置浏览器，也没有「页面直链」这回事。
               </div>
               <n-space align="center" style="margin-bottom: 8px">
                 <a class="bm" :href="bookmarklet" @click.prevent="msg.info('把这个链接拖到书签栏，然后在 Mod 页面点它')">
@@ -565,8 +570,9 @@ const pendColumns = [
                   作者：{{ parsed.author || '—' }} ｜ modid：{{ parsed.modid || '—' }}
                 </div>
                 <div class="dim">
-                  下载链接：<b :style="parsed.dl ? 'color:#18a058' : 'color:#d03050'">
-                    {{ parsed.dl ? '找到了' : '页面上没有（可能要登录）' }}
+                  下载链接：<b :style="parsed.dl || parsed.helio ? 'color:#18a058' : 'color:#d03050'">
+                    {{ parsed.helio ? 'heliosphere：管理器直接下载（不用页面直链）'
+                       : (parsed.dl ? '找到了' : '页面上没有（可能要登录）') }}
                   </b>
                 </div>
                 <div class="dim">影响/替换：<b>{{ form.affects || '（页面没写，可自己填）' }}</b>
@@ -609,7 +615,7 @@ const pendColumns = [
             <n-space align="center">
               <n-checkbox v-model:checked="form.cover">抓封面当预览图</n-checkbox>
               <n-checkbox v-model:checked="form.export">完事重新生成 Excel</n-checkbox>
-              <n-button size="small" type="primary" :disabled="!parsed.dl" @click="doFetch">
+              <n-button size="small" type="primary" :disabled="!canDownload" @click="doFetch">
                 下载并入库
               </n-button>
               <n-button size="small" quaternary @click="useAsNewMod">只用这个地址去手动添加</n-button>

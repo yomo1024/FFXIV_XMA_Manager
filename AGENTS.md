@@ -10,12 +10,21 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.34.0**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.34.1**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.34.1 修「工作台对 heliosphere 误报没有读到下载链接」**（主人当天就撞上了）：
+  `doFetch()` 用 `page.dl` 判「能不能下载」，而 heliosphere **没有页面直链**这个字段
+  （下载是管理器读 GraphQL 清单后本地打包），后端早已返回 `has_download: true` ——
+  于是解析成功、按钮却是灰的、点了就报「这个页面没找到下载链接」。
+  修法：新增 `canDownload = dl || helio`，「下载并入库」按钮与 `doFetch()` 都改用它；
+  heliosphere 时隐藏「用我自己的浏览器下载」（那条路只对 XMA 有意义）；
+  「下载链接」一行改显示「heliosphere：管理器直接下载（不用页面直链）」。
+  取证：无头 Edge 真点一遍工作台（解析 → 按钮可点、无警告 → 下载入库 78 秒完成、封面已抓，带截图）。
+  ⚠ 教训：**加新站点支持时要连前端判据一起扫** —— 凡是拿 `page.dl` 当下载前置条件的入口都要过一遍。
 - **v2.34.0 heliosphere.app 正式并入：从该站下载 mod + 取封面**（主人 2026-09-30 要求）：
   侦查结论（别再猜）——① 页面是 SvelteKit，**SSR 里内嵌了 `/api/graphql` 的响应，匿名就能读到**
   名称/作者/标签/Affects/版本/更新时间/下载大小/`versionId`/封面图 id（没有 Cloudflare、不用登录）；
