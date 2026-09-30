@@ -10,11 +10,32 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.35.2**（最新 tag = **v2.35.2**，已发 Release）｜拓展 **v1.2.8** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.35.3**（最新 tag = **v2.35.2**）｜拓展 **v1.2.8** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
+
+- **v2.35.3 修「新电脑上点从云盘取回 → 没有已归档的 Mod」**（主人 2026-09-30 在新电脑报的）：
+  **归档状态只存在本地索引里**（`cloud_state` + `payload_files` 云端载荷清单），新机器索引是空的
+  → 取回必然找不到东西。而且界面的判定还只看 `archived_files`（载荷清单条数），
+  那个字段**只有归档/对账才会填**，索引恢复不填 —— 所以就算先恢复了索引，取回照样说「没有已归档」
+  （这就是主人看到那句的真正出处：`ModsView.restoreCloud()` 的前端提示，不是后端）。
+  修法三件：
+  ① **取回自愈** `_heal_archive_state()`：一条归档记录都没有 → 先「从云端索引恢复」，
+     再对这些条目「与网盘对账」重建载荷清单（全程只读云端 + 写本地索引，不下载载荷、不动云端）；
+     `api_cloud_restore` 在没归档记录时不再直接报错，而是返回 `{heal: True}` 让任务先自愈；
+     真没得取时按 `cloud_probe()` 的结果给准确原因（没填 Cookie / 云端根读不到 / 云端没索引文件）。
+  ② **装进游戏也自愈**：`_ensure_payload_for_install` 遇到「有条目但载荷清单空」先对账这一条再装。
+  ③ 界面：新增 **`GET /api/cloud/ready`**（只读自检：本地条数/已归档/有载荷清单/云端根/云端索引）
+     + 「换机恢复…」按钮与弹窗（①只恢复索引 ②只对账 ③只取回 + 「自动按顺序做完」）；
+     `restoreCloud`/`verifyCloud` 的判定改成 `hasCloud()`（cloud_state=archived 或 archived_files 或 cloud_size）。
+     `cloud_reconcile` 拆出 `cloud_reconcile_core(cfg, write, folders, job=None)` 好让自愈只对几条复用。
+  **实测**：空库 + 桩云端 → `_heal_archive_state` 依次调用索引恢复(1 次)与对账(只对这 2 条)，
+  载荷清单真的建出来、第二轮幂等；`_job_cloud_restore({heal:True})` 全桩跑通 1 个文件、状态转 local；
+  无头 Edge 实测：工具栏「换机恢复…」与「取回碰壁」都弹自检弹窗（含建议、云存储没配好时动作按钮禁用），
+  旧那句「选中的里面没有已归档的 Mod」不再出现。**只读自检实测（主人这台旧机）**：
+  本地 56 条 / 已归档 55 条 / 有载荷清单 55 条 / 云端根读到 / **云端索引文件有** → 新电脑走「换机恢复」即可。
 
 - **v2.35.2 发版：把拓展 1.2.8 打进部署包**（主人 2026-09-30 要「带 1.2.8 的部署包 + 新 tag/Release」）。
   管理器代码**没有任何改动**，纯粹是**版本落点**跟着走一版（否则同一个 v2.35.1 的附件换内容会说不清）；

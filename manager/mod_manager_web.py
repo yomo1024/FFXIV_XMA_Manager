@@ -1914,26 +1914,32 @@ def _cloud_find_index(drv, bfid, on_step=None):
 
 
 def _job_cloud_reconcile(job: Job):
+    """任务包装：与网盘对账（真正的活在 cloud_reconcile_core，好让取回自愈能只对几条复用）"""
+    return cloud_reconcile_core(cfg_now(), bool(job.params.get("write", True)),
+                                job.params.get("folders") or [], job)
+
+
+def cloud_reconcile_core(cfg, write=True, folders=None, job=None):
     """与网盘对账：以**云端实况**为准，重建每条 Mod 的归档状态与云端载荷清单。
 
     用途：迁机后 / 索引库丢了云状态 / 云端被手工整理过 —— 只要云盘里那份还在，就能认回来。
+    `folders` 为空 = 全部；`job` 可为 None（取回自愈时会只对几条跑一次，不占任务条）。
     """
-    cfg = cfg_now()
     if not (cfg.get("cloud_cookie") or "").strip():
         raise RuntimeError("还没填夸克 Cookie（设置 → 云存储）")
     drv = cloud_drive(cfg)
-    write = bool(job.params.get("write", True))
-    only = {str(f) for f in (job.params.get("folders") or [])}
+    only = {str(f) for f in (folders or [])}
     st = mm.Store()
     rows = [r for r in st.all() if (not only or r["folder"] in only)]
     total = max(1, len(rows))
     found, missing, local_only, errs = [], [], [], []
     for i, r in enumerate(rows, 1):
-        if job.cancelled():
+        if job and job.cancelled():
             raise mm.BackupCancelled()
         folder = r["folder"]
         cpath = cloud_path_of(cfg, folder, r.get("cloud_path"))
-        job.set(i - 1, total, "%s ｜ %s" % (str(r["name"])[:24], cpath))
+        if job:
+            job.set(i - 1, total, "%s ｜ %s" % (str(r["name"])[:24], cpath))
         try:
             fid = drv.resolve(cpath)
         except Exception as e:
@@ -1985,6 +1991,128 @@ def _job_cloud_reconcile(job: Job):
             "total_files": sum(x["files"] for x in found),
             "total_size": sum(x["size"] for x in found),
             "total_covers": sum(x.get("covers") or 0 for x in found)}
+
+
+def _heal_archive_state(cfg, folders=None, job=None) -> dict:
+    """换机 / 新电脑第一次取回时的**自愈**：把「云端有归档、本地索引却不知道」补齐。
+
+    主人 2026-09-30 在新电脑上点「从云盘取回」得到「没有已归档的 Mod」就是这个场景 ——
+    归档状态（`cloud_state` + 云端载荷清单）**只存在本地索引里**，新机器索引是空的。
+
+    两步，**都只读云端、只写本地索引**（不下载载荷、不动云端任何东西）：
+      ① 一条归档记录都没有 → 先「从云端索引恢复」（把条目和 cloud_state 带回来）；
+      ② 这些条目还没有**云端载荷清单** → 「与网盘对账」扫一遍云端目录把它重建出来
+         （索引恢复只带管理字段；取回和「装进游戏」都依赖载荷清单，缺它就是「看着已归档、却没什么可下」）。
+    """
+    out = {"restored_index": False, "reconciled": 0, "notes": []}
+
+    def say(txt):
+        mm.log("取回自愈：" + txt)
+        if job:
+            try:
+                job.set(job.done or 0, max(job.total or 0, 1), txt)
+            except Exception:
+                pass
+
+    only = {str(f) for f in (folders or [])}
+
+    def _rows():
+        st = mm.Store()
+        rr = [r for r in st.all() if (not only or r["folder"] in only)]
+        st.cx.close()
+        return rr
+
+    rows = _rows()
+    if not any((r.get("cloud_state") or "") == "archived" for r in rows):
+        say("本地索引里没有归档记录 → 先从云端索引恢复…")
+        rep = cloud_index_restore_core(cfg, True, None)
+        if rep.get("error"):
+            out["notes"].append("云端索引恢复没成：%s" % str(rep["error"])[:120])
+        else:
+            out["restored_index"] = True
+        rows = _rows()
+    todo = []
+    st = mm.Store()
+    for r in rows:
+        if (r.get("cloud_state") or "") != "archived":
+            continue
+        if not st.payload_files_of(r["folder"], ["archived", "missing", "cover"]):
+            todo.append(r["folder"])
+    st.cx.close()
+    if todo:
+        say("这 %d 条还没有云端载荷清单 → 与网盘对账（只扫云端目录）…" % len(todo))
+        try:
+            rep2 = cloud_reconcile_core(cfg, True, todo, None)
+            out["reconciled"] = len(rep2.get("found") or [])
+        except Exception as e:
+            out["notes"].append("对账没成：%s" % str(e)[:120])
+    return out
+
+
+def cloud_probe(cfg) -> dict:
+    """换机自检（**只读：不改本地、不动云端**）：本地索引有多少条、云端能不能读、云端有没有那份索引。"""
+    out = {"cloud_enabled": bool(str(cfg.get("cloud_backend") or "")),
+           "cookie": bool(str(cfg.get("cloud_cookie") or "").strip()),
+           "cloud_root": _cloud_base(cfg), "root_ok": False, "index": False,
+           "mod_dirs": 0, "error": ""}
+    st = mm.Store()
+    rows = st.all()
+    st.cx.close()
+    out["local_mods"] = len(rows)
+    out["archived"] = sum(1 for r in rows if (r.get("cloud_state") or "") == "archived")
+    if not out["cloud_enabled"]:
+        out["error"] = "云存储没启用（设置 → 云存储 → 启用归档）"
+        return out
+    if not out["cookie"]:
+        out["error"] = "还没填夸克 Cookie（设置 → 云存储）"
+        return out
+    try:
+        drv = cloud_drive(cfg)
+        bfid = drv.resolve(_cloud_base(cfg))
+        if not bfid:
+            out["error"] = "云端根目录不存在：%s" % _cloud_base(cfg)
+            return out
+        out["root_ok"] = True
+        items = drv.list_dir(bfid) or []
+        out["mod_dirs"] = sum(1 for it in items if it.get("dir"))
+        # 只看根目录（不递归）：索引就写在根上，深扫一次要几十秒，自检不该那么慢
+        out["index"] = any((it.get("file_name") or "") == mm.INDEX_JSON_NAME and not it.get("dir")
+                           for it in items)
+    except Exception as e:
+        out["error"] = str(e)[:160]
+    return out
+
+
+def api_cloud_ready():
+    """GET /api/cloud/ready —— 「这台机器现在该点哪个按钮」的自检（**只读**）。
+
+    主人 2026-09-30 在新电脑上撞的那个坑（点取回 → 没有已归档的 Mod）根因是：
+    界面上没有一条把「先恢复索引 / 先对账 / 再取回」讲清楚的路径，得靠人猜。这个接口就是给界面
+    算那条路径用的 —— 它只读，不写本地也不动云端。
+    """
+    cfg = cfg_now()
+    pr = cloud_probe(cfg)
+    st = mm.Store()
+    arc = [r for r in st.all() if (r.get("cloud_state") or "") == "archived"]
+    with_pay = sum(1 for r in arc
+                   if st.payload_files_of(r["folder"], ["archived", "missing", "cover"]))
+    st.cx.close()
+    if not pr["cloud_enabled"] or not pr["cookie"]:
+        nxt = "设置 → 云存储：先启用归档并填好夸克 Cookie"
+    elif not pr["root_ok"]:
+        nxt = "云端根目录读不到（%s）—— 检查设置里的云盘根目录和 Cookie" % pr["cloud_root"]
+    elif not pr["local_mods"]:
+        nxt = ("本地索引是空的：先「从云端索引恢复」（云端有 %s）" % mm.INDEX_JSON_NAME) if pr["index"] \
+            else "本地索引是空的、云端也没有索引文件：用「扫描网盘新内容 → 认领」把云端目录收回索引"
+    elif not arc:
+        nxt = "本地有索引但没有一条标记为已归档：先「与网盘对账」按云端实况重建归档状态"
+    elif with_pay < len(arc):
+        nxt = "有 %d 条已归档但缺云端载荷清单：先「与网盘对账」重建清单，再取回" % (len(arc) - with_pay)
+    else:
+        nxt = "可以直接「从云盘取回」"
+    return {"local_mods": pr["local_mods"], "archived": len(arc), "archived_with_payload": with_pay,
+            "next": nxt, **pr}
+
 
 
 def _cloud_put_json(drv, parent_fid, name, obj) -> bool:
@@ -2972,7 +3100,20 @@ def _ensure_payload_for_install(cfg, folder) -> str:
     st.cx.close()
     pays = [x for x in rows if str(x.get("state") or "") != "cover"]
     if not pays:
-        raise SystemExit("这条 Mod 本地没有载荷，也没有云端归档记录——没法装（可以先「从站点更新」重新下一份）")
+        # ★ 换机自愈：索引是从云端恢复的（有条目、有 cloud_state），但**载荷清单**还没建
+        #   （清单只由归档/对账产生）→ 先把这一条对账出来再装，别让主人自己去点「与网盘对账」。
+        try:
+            mm.log("装进游戏前：这条没有云端载荷清单 → 先对这一条做一次对账")
+            cloud_reconcile_core(cfg, True, [folder], None)
+            st2 = mm.Store()
+            rows = st2.payload_files_of(folder, ["archived", "missing", "cover"])
+            st2.cx.close()
+            pays = [x for x in rows if str(x.get("state") or "") != "cover"]
+        except Exception:
+            mm.log(traceback.format_exc())
+    if not pays:
+        raise SystemExit("这条 Mod 本地没有载荷，也没有云端归档记录——没法装"
+                         "（先到「云盘 → 与网盘对账」补一下归档状态，或用「从站点更新」重新下一份）")
     dest = Path(mm.resolve_dirs(cfg)[1]) / "_云端取回" / Path(str(folder)).name
     if dest.is_dir():                                   # 先清掉上一次取回的残留
         import shutil as _sh
@@ -2992,12 +3133,30 @@ def _ensure_payload_for_install(cfg, folder) -> str:
 
 
 def _job_cloud_restore(job: Job):
-    """取回：把云端载荷下载回本地（逐文件校验大小 + sha1）"""
+    """取回：把云端载荷下载回本地（逐文件校验大小 + sha1）。
+
+    ★ 开头先自愈（`heal` 或「一条归档都没有」时）：新电脑上归档状态只在本地索引里，
+      先「从云端索引恢复 + 与网盘对账」把状态补出来，否则这里只会空手而归。
+    """
     cfg = cfg_now()
     drv = cloud_drive(cfg)
     qd = _qd()
     import hashlib
     folders = [str(f) for f in (job.params.get("folders") or [])]
+    if job.params.get("heal") or not folders:
+        _heal_archive_state(cfg, folders or None, job)
+        st0 = mm.Store()
+        if not folders:
+            folders = [r["folder"] for r in st0.all()
+                       if (r.get("cloud_state") or "") == "archived"]
+        st0.cx.close()
+    if not folders:
+        pr = cloud_probe(cfg)
+        raise RuntimeError(
+            "这台机器的索引里没有已归档的 Mod，云端也没能补上 —— %s"
+            "（云端根目录：%s%s）"
+            % (pr["error"] or "云端根目录下没有可认领的目录", pr["cloud_root"],
+               "，云端有索引文件但恢复后仍无归档记录" if pr["index"] else "，云端没有索引文件"))
     st = mm.Store()
     rows = {r["folder"]: r for r in st.all()}
     todo = []
@@ -5008,7 +5167,10 @@ def api_cloud_restore(body):
                    if (r.get("cloud_state") or "") == "archived"]
         st.cx.close()
     if not folders:
-        return {"error": "没有已归档的 mod 需要取回"}
+        # ★ 新电脑/换机第一次点取回：本地索引里还没有归档记录 —— 以前这里直接报
+        #   「没有已归档的 mod 需要取回」，主人只能自己猜要先「从云端索引恢复」再「对账」。
+        #   现在让任务先自愈（只读云端 + 写本地索引），真没得取时任务里再给准确原因。
+        return {"folders": [], "heal": True}
     return {"folders": folders}
 
 
@@ -6045,6 +6207,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(api_cloud_check())
                 if u.path == "/api/cloud/state":
                     return self._json(api_cloud_state())
+                if u.path == "/api/cloud/ready":
+                    # 换机自检（只读）：本地索引 / 云端根目录 / 云端索引 都在不在 → 该点哪个按钮
+                    return self._json(api_cloud_ready())
                 if u.path == "/api/index/health":
                     return self._json(api_index_health())
                 if u.path == "/api/cloud/file":

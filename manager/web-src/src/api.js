@@ -62,6 +62,7 @@ const BUSY_LABELS = {
   '/api/bridge/propose': '送到游戏里',
   '/api/bridge/install': '装进游戏',
   '/api/cloud/state': '云盘状态统计',
+  '/api/cloud/ready': '云盘自检（换机）',
   '/api/cloud/check': '云盘体检（会真下载）',
   '/api/cloud/index-restore': '从云端索引恢复',
   '/api/cloud/index-preview': '云端索引预览',
@@ -192,6 +193,8 @@ export const api = {
   cloudRestore: (body) => req('/api/cloud/restore', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudVerify: (body) => req('/api/cloud/verify', { method: 'POST', body: JSON.stringify(body || {}) }),
   cloudDiscover: () => req('/api/cloud/discover'),          // 扫网盘（同步，几十秒）
+  // 换机自检（只读）：本地索引/云端根目录/云端索引在不在 → 该先点哪个按钮
+  cloudReady: () => req('/api/cloud/ready'),
   cloudIndexRestore: (write) => runJob('cloud_index_restore', { write: !!write }),  // 走任务：有真进度条
   cloudClaim: (items) => req('/api/cloud/claim',             // 把云端多的认领进索引库
     { method: 'POST', body: JSON.stringify({ items }) }),

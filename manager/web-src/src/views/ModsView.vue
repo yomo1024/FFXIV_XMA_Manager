@@ -669,6 +669,58 @@ onMounted(async () => {
   } catch (e) { /* 没填就为空，不影响 */ }
 })
 const cloudBusy = ref(false)
+// ---- 换机 / 新电脑恢复（owner 2026-09-30 在新电脑上撞的坑） ----
+//   归档状态分两半：`cloud_state`（来自归档/索引恢复/对账）与**云端载荷清单**
+//   （只由「归档」或「与网盘对账」产生）。新电脑上索引恢复只带前者，
+//   于是「取回」的判定（以前只看 archived_files）必然说「没有已归档的 Mod」—— 得先对账。
+const readyOpen = ref(false)        // 自检 + 一键恢复的弹窗
+const readyBusy = ref(false)
+const readyData = ref(null)
+const readyWhy = ref('')
+function hasCloud(m) {
+  return (m.cloud_state === 'archived') || (m.archived_files || 0) > 0 || (m.cloud_size || 0) > 0
+}
+async function askRescue(why) {
+  readyWhy.value = why || ''
+  readyData.value = null
+  readyOpen.value = true
+  try {
+    readyData.value = await api.cloudReady()
+  } catch (e) {
+    readyData.value = { error: e.message }
+  }
+}
+async function rescueStep(kind) {
+  const jobs = {
+    index: ['cloud_index_restore', { write: true }, '正在从云端索引恢复'],
+    reconcile: ['cloud_reconcile', { write: true }, '正在与网盘对账（重建云端载荷清单）'],
+    restore: ['cloud_restore', { heal: true }, '正在从云盘取回'],
+  }
+  const [k, params, label] = jobs[kind]
+  await withDialogProgress(label, () => runJob(k, params))
+}
+/** 一键：本地没条目就先恢复索引 → 对账（补载荷清单）→ 取回。每步都单独给结果，不闷着。 */
+async function rescueAll() {
+  readyBusy.value = true
+  const done = []
+  try {
+    const pr = readyData.value || (await api.cloudReady())
+    if (!pr.local_mods && pr.index) {
+      await rescueStep('index'); done.push('索引已恢复')
+    }
+    if ((pr.archived || 0) < (pr.local_mods || 0) || (pr.archived_with_payload || 0) < (pr.archived || 0) || !pr.archived) {
+      await rescueStep('reconcile'); done.push('归档状态已对账')
+    }
+    await rescueStep('restore'); done.push('取回已开始')
+    msg.success(done.join(' → '))
+    readyOpen.value = false
+  } catch (e) {
+    msg.error('恢复中断：' + e.message + (done.length ? `（已完成：${done.join(' → ')}）` : ''))
+  } finally {
+    readyBusy.value = false
+    try { readyData.value = await api.cloudReady() } catch (e) { /* 自检失败就算了 */ }
+  }
+}
 function cloudTargets() {
   return checked.value.length ? [...checked.value] : (cur.value ? [cur.value.folder] : [])
 }
@@ -709,8 +761,8 @@ async function archiveCloud(folders) {
 /** 校验：把云端那份下载回来逐文件比 sha1（只下载体检，不动本地 Mod 库） */
 async function verifyCloud(folders) {
   const list = (folders && folders.length) ? folders : cloudTargets()
-  const rows = props.mods.filter((m) => list.includes(m.folder) && (m.archived_files || 0))
-  if (!rows.length) return msg.warning('选中的里面没有「已归档」的 Mod')
+  const rows = props.mods.filter((m) => list.includes(m.folder) && hasCloud(m))
+  if (!rows.length) return askRescue('校验云端文件')
   const total = rows.reduce((s2, m) => s2 + (m.cloud_size || 0), 0)
   dialog.info({
     title: '校验云端文件',
@@ -736,9 +788,18 @@ async function verifyCloud(folders) {
 /** 取回：把云端载荷下载回本地（逐文件校验大小 + sha1） */
 async function restoreCloud(folders) {
   const list = (folders && folders.length) ? folders : cloudTargets()
-  if (!list.length) return msg.warning('先勾选（或点一条）要取回的 Mod')
-  const rows = props.mods.filter((m) => list.includes(m.folder) && (m.archived_files || 0))
-  if (!rows.length) return msg.warning('选中的里面没有「已归档」的 Mod')
+  if (!list.length) {
+    // 列表是空的（新电脑还没恢复索引）= 没什么可勾选的 → 直接给「换机恢复」自检，别只丢一句「先勾选」
+    if (!props.mods.length) return askRescue('从云盘取回（本地还没有 Mod）')
+    return msg.warning('先勾选（或点一条）要取回的 Mod')
+  }
+  // ★ 判定别只看 archived_files（那只是「云端载荷清单」的条数，新电脑上还没建过清单）——
+  //   有 cloud_state=archived 或有云端大小都算「云端有这条」；载荷清单缺了后端会先自愈再取。
+  const rows = props.mods.filter((m) => list.includes(m.folder) && hasCloud(m))
+  if (!rows.length) {
+    // 选中的在本地索引里完全没有云端痕迹 → 不是「报错」，而是「这台机器还没把云端状态拉回来」
+    return askRescue('取回选中')
+  }
   cloudBusy.value = true
   try {
     await withDialogProgress('正在从云盘取回',
@@ -1560,6 +1621,7 @@ async function copyPath() {
         <n-button size="small" :loading="cloudBusy" @click="archiveCloud()">归档到云盘</n-button>
         <n-button size="small" :loading="cloudBusy" @click="restoreCloud()">从云盘取回</n-button>
         <n-button size="small" :loading="cloudBusy" @click="askReconcile()">与网盘对账</n-button>
+        <n-button size="small" @click="askRescue('换机 / 新电脑')">换机恢复…</n-button>
         <n-button size="small" :loading="discBusy && discOpen" @click="scanCloud">扫描网盘新内容</n-button>
         <n-button size="small" :loading="idxBusy" @click="askIndexSync">同步索引到网盘</n-button>
         <n-button size="small" :loading="busy" @click="askRestoreIndex">从云端索引恢复</n-button>
@@ -2196,6 +2258,47 @@ async function copyPath() {
         <n-space justify="end">
           <n-button size="small" @click="showReplace = false">取消</n-button>
           <n-button size="small" type="primary" :loading="repReplacing" @click="submitReplace">开始替换</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+    <n-modal v-model:show="readyOpen" preset="card" style="width: 760px"
+             title="换机 / 新电脑：先把云端状态找回来">
+      <n-alert v-if="readyData && readyData.error" type="warning" :show-icon="false"
+               style="margin-bottom: 10px; font-size: 13px">
+        自检没通过：{{ readyData.error }}
+      </n-alert>
+      <div v-if="!readyData" class="dim">正在自检（只读，不动任何东西）…</div>
+      <template v-else>
+        <n-alert :type="(readyData.archived && readyData.archived_with_payload >= readyData.archived) ? 'success' : 'info'"
+                 :show-icon="false" style="margin-bottom: 10px; font-size: 13px">
+          本地索引 <b>{{ readyData.local_mods }}</b> 条 ｜ 其中已归档 <b>{{ readyData.archived }}</b> 条
+          ｜ 有云端载荷清单 <b>{{ readyData.archived_with_payload }}</b> 条<br>
+          云端根目录 <span class="mono">{{ readyData.cloud_root }}</span>：
+          {{ readyData.root_ok ? `读到了（顶层 ${readyData.mod_dirs} 个目录）` : '读不到' }}
+          ｜ 云端索引文件：{{ readyData.index ? '有' : '没有' }}
+          <div v-if="readyWhy" class="dim" style="margin-top: 4px">刚才的动作：{{ readyWhy }}</div>
+          <div style="margin-top: 6px"><b>建议：{{ readyData.next }}</b></div>
+        </n-alert>
+        <div class="dim" style="font-size: 12px; line-height: 1.8">
+          归档状态（<b>已归档</b>标记 + <b>云端载荷清单</b>）只存在本地索引里 —— 新电脑的索引是空的，
+          所以「从云盘取回」会说找不到已归档的 Mod。下面三步按顺序做一遍就好，
+          全程只读云端、只写本地索引，不动任何 Mod 文件、不下载载荷：
+          <br>①从云端索引恢复 —— 把分类 / 序号 / 地址 / 站点信息和「已归档」标记带回来
+          <br>②与网盘对账 —— 扫一遍云端目录，重建云端载荷清单（取回和「装进游戏」都靠它）
+          <br>③从云盘取回 —— 开始把载荷下载回本地
+        </div>
+      </template>
+      <template #footer>
+        <n-space justify="end">
+          <n-button size="small" @click="readyOpen = false">关闭</n-button>
+          <n-button size="small" :disabled="!readyData || !!readyData.error || readyBusy"
+                    @click="rescueStep('index')">① 只恢复索引</n-button>
+          <n-button size="small" :disabled="!readyData || !!readyData.error || readyBusy"
+                    @click="rescueStep('reconcile')">② 只对账</n-button>
+          <n-button size="small" :disabled="!readyData || !!readyData.error || readyBusy"
+                    @click="rescueStep('restore')">③ 只取回</n-button>
+          <n-button size="small" type="primary" :loading="readyBusy"
+                    :disabled="!readyData || !!readyData.error" @click="rescueAll()">自动按顺序做完</n-button>
         </n-space>
       </template>
     </n-modal>
