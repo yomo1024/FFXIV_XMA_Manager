@@ -10,7 +10,7 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.34.3**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.34.3**（最新 tag = **v2.34.3**，已发 Release）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
@@ -115,7 +115,8 @@
 ### 待办 / 正在做
 
 - 暂无（新会话接手时若主人没特别交代，先从「硬规则」与「高频坑」两节熟悉约束，再动手）
-- v2.34.0 已测（隔离库端到端 + exe 内端到端 + 线上实例解析）；**tag / Release 还没打**（等主人点头）
+- v2.34.3 已发版（tag + Release + 附件 `XMA-Manager-v2.34.3.zip`）；
+  **主人明确不做**：浏览器拓展的 heliosphere 页面支持（公开内容管理器直连即可，拓展没有功能必要性）
 - 可选小尾巴：`202609\衣服` 里还留着几张历史同级预览图（`3.Trigun.jpg` 等，文件夹已改名或被删），只是视觉垃圾、不影响取图；云端也留着那 4 个已删 Mod 的目录（主人要求当备份）
 
 ### 接手姿势（给新会话）
