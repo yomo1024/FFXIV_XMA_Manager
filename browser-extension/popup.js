@@ -1,5 +1,14 @@
 const $ = (s) => document.querySelector(s);
-const send = (m) => new Promise((r) => chrome.runtime.sendMessage(m, (x) => r(x || { ok: false, error: '扩展没响应' })));
+// 与后台通信；回调里读掉 chrome.runtime.lastError（弹窗关掉/后台被回收时不至于在控制台留警告）
+const send = (m) => new Promise((r) => {
+  try {
+    chrome.runtime.sendMessage(m, (x) => {
+      const err = chrome.runtime.lastError;
+      if (err) return r({ ok: false, error: err.message || '扩展没响应' });
+      r(x || { ok: false, error: '扩展没响应' });
+    });
+  } catch (e) { r({ ok: false, error: String(e) }); }
+});
 const TXT = { queued: '排队中', downloading: '下载中', importing: '入库中', done: '已完成', error: '失败' };
 const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
 

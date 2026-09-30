@@ -10,11 +10,25 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.35.1**（最新 tag = **v2.35.1**，已发 Release）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.35.1**（最新 tag = **v2.35.1**，已发 Release）｜拓展 **v1.2.8** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
+
+- **拓展 v1.2.8 修「后台控制台刷 Uncaught (in promise) Could not establish connection」**（主人 2026-09-30 报）：
+  队列一变就广播 `queueChanged`，写的是从 **SW** 发 `chrome.runtime.sendMessage` —— 而 MV3 里
+  **「后台 → content script」这条广播根本到不了**（无头 Edge + CDP 同时连 SW 与页面里的面板世界实测：
+  面板世界的 `onMessage.hasListeners() === true`，从 SW 发出去依旧 reject），
+  于是它既没刷新过面板、又每次都在后台留一条未捕获异常（还会被标错误角标）。
+  改法：`notifyQueueChanged()` 改用 `chrome.tabs.query({url:'https://www.xivmodarchive.com/*'})`
+  + 逐个 `chrome.tabs.sendMessage(tabId, …)`（**不需要加 tabs 权限**，host_permissions 已覆盖），
+  每个 tab 单独 catch「那个页面没在听」；`content.js` / `popup.js` 的 send 回调里补读
+  `chrome.runtime.lastError`（否则页面控制台会留 `Unchecked runtime.lastError` 警告）。
+  实测：无 XMA 页面时 `setQ([])` **0 未捕获异常**（旧版 1 条）；开着 XMA 页面时面板世界**真的收到**
+  `queueChanged`；队列写入/读取/patch/清空回归全过。
+  ⚠ 教训：**别用 SW 的 `runtime.sendMessage` 去叫 content script**（不会到），要按 tab 用 `tabs.sendMessage`；
+  另外「不带 callback 的 sendMessage 返回 Promise」，同步 try/catch 抓不到它的 rejection。
 
 - **v2.35.1 已发版**（tag + Release + 附件 `XMA-Manager-v2.35.1.zip`，纯 ASCII 名）：
   Release 正文把 v2.35.0 的实时刷新一起写了（两版合并发布）。

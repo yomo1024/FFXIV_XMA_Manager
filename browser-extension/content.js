@@ -3,9 +3,18 @@
   if (window.__ffmm_loaded) return;
   window.__ffmm_loaded = true;
 
+  // 与后台通信。★ 回调里必须读一下 chrome.runtime.lastError：
+  //   拓展刚被重载/后台被回收时，这条消息会「没有接收方」，Chrome 会在**页面控制台**留下
+  //   "Unchecked runtime.lastError: Could not establish connection. Receiving end does not exist."
+  //   读掉它就只是我们自己能处理的一个普通错误（下面照常回 ok:false）。
   const send = (msg) => new Promise((res) => {
-    try { chrome.runtime.sendMessage(msg, (r) => res(r || { ok: false, error: '扩展没响应' })); }
-    catch (e) { res({ ok: false, error: String(e) }); }
+    try {
+      chrome.runtime.sendMessage(msg, (r) => {
+        const err = chrome.runtime.lastError;
+        if (err) return res({ ok: false, error: err.message || '扩展没响应' });
+        res(r || { ok: false, error: '扩展没响应' });
+      });
+    } catch (e) { res({ ok: false, error: String(e) }); }
   });
 
   /* ---------------- 读页面 ---------------- */

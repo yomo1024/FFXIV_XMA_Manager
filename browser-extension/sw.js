@@ -126,9 +126,39 @@ const jpost = (path, body) => api(path, {
 
 /* ---------------- 队列（存在 storage：后台被回收、页面关掉都不丢） ---------------- */
 async function getQ() { const o = await chrome.storage.local.get([QKEY]); return o[QKEY] || []; }
+/* 通知「队列变了」给正在看队列的界面（XMA 页面右下角的小面板）。
+ *
+ * ★ 为什么用 chrome.tabs.sendMessage，而不是 chrome.runtime.sendMessage（主人 2026-09-30 报的报错）：
+ *   原来写的是 chrome.runtime.sendMessage({ type: 'queueChanged' }) 想在后台广播。
+ *   实测（无头 Edge + CDP 同时连后台 SW 和页面里的面板世界）：
+ *     · 「后台 → content script」这条广播**根本到不了** —— 面板世界里的
+ *       chrome.runtime.onMessage.hasListeners() === true，可从 SW 发 runtime.sendMessage 依旧被拒：
+ *         Uncaught (in promise) Error: Could not establish connection. Receiving end does not exist.
+ *     · 也就是说它既没刷新过面板，还每次队列变化都往后台控制台丢一条未捕获异常
+ *       （拓展还会被 Chrome 标错误角标）—— 主人看到的就是这条。
+ *   到 content script 的正路是 chrome.tabs.sendMessage(tabId, …)：按 host 权限挑出 XMA 标签页逐个发。
+ *   「现在没有 XMA 页面」本来就是正常情况（面板不在），静默跳过。
+ *   面板自己还有 1.5 秒轮询兜底（content.js 的 timerQ），这条只是让变化立刻可见。
+ */
+async function notifyQueueChanged() {
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://www.xivmodarchive.com/*' });
+    for (const t of tabs) {
+      if (!t || t.id == null) continue;
+      try {
+        await chrome.tabs.sendMessage(t.id, { type: 'queueChanged' });
+      } catch (e) {
+        /* 这个标签页没在听（脚本还没注入 / 是装拓展之前打开的）→ 正常，跳过 */
+      }
+    }
+  } catch (e) {
+    /* 拿不到标签页列表（权限之类）→ 不影响下载与入库 */
+  }
+}
+
 async function setQ(q) {
   await chrome.storage.local.set({ [QKEY]: q });
-  try { chrome.runtime.sendMessage({ type: 'queueChanged' }); } catch (e) { }
+  await notifyQueueChanged();
 }
 async function patch(id, p) {
   const q = await getQ();
