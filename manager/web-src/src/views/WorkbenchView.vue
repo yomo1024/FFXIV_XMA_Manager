@@ -462,7 +462,7 @@ const pendColumns = [
         </template>
 
         <n-space vertical size="small">
-          <n-input v-model:value="urlInput" placeholder="把 Mod 链接粘进来（也支持只填编号，例如 12345）"
+          <n-input v-model:value="urlInput" placeholder="把 Mod 链接粘进来（XIV Mod Archive / heliosphere.app 都行；也可只填编号，例如 12345）"
                    @keyup.enter="parse" />
           <n-space align="center" wrap>
             <n-button size="small" type="primary" :loading="parsing" @click="parse">

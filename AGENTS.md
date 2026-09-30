@@ -6,16 +6,30 @@
 
 ## 当前状态（新会话先读这段）
 
-> 最后更新：2026-09-29（本节的「最近完成」按 git log 维护；「待办」由主人补充）
+> 最后更新：2026-09-30（本节的「最近完成」按 git log 维护；「待办」由主人补充）
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.33.31**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.34.0**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.34.0 heliosphere.app 正式并入：从该站下载 mod + 取封面**（主人 2026-09-30 要求）：
+  侦查结论（别再猜）——① 页面是 SvelteKit，**SSR 里内嵌了 `/api/graphql` 的响应，匿名就能读到**
+  名称/作者/标签/Affects/版本/更新时间/下载大小/`versionId`/封面图 id（没有 Cloudflare、不用登录）；
+  ② 官方那个「Download as PMP」是**浏览器里 SharedWorker 客户端打包**
+  （`_app/immutable/workers/pmpDownloader.worker-*.js`）：`GraphQL getVersion(id)` → `neededFiles{baseUri,files}`
+  → 逐个下 `https://data.heliosphere.app/files/<key>`（**内容是 zstd**）→ 重压 → 打 zip；
+  ③ 封面直链 `https://heliosphere.app/api/web/package/<包id>/image/<图id>`（WebP，实测 2560×1440 / 268 KB）。
+  **实现**：新模块 `manager/heliosphere.py`（纯标准库）按同一规则复刻打包 —— 7-Zip 解 zstd
+  （`unzstd()`，7z 路径可用配置项的 `sevenzip` 覆盖）+ `zipfile` 打包（含 `heliosphere.json` / `meta.json`
+  的 `Groups` 数组、`>32` 选项的 Multi 拆 `Part N`、`ui/` 重名改名、`HS_*` 与 null 白名单键剔除等官方细节）。
+  **正确性证据**：用无头 Edge 跑官方 worker 生成对照 pmp → 16 个条目名一致、13 个文件内容 sha256 全同、
+  `meta.json` 深度相等（只有 zip 内条目顺序不同）。
+  接入：`_site_info`/`_site_download`/`_job_fetch`/`mod_fix_cover` 的 heliosphere 分支全部**纯 HTTP**
+  （不再弹内置浏览器），入库顺带写站点简介（`_put_site_desc`，本地已填不覆盖）。实测译文见提交说明。
 - **v2.33.31 / 拓展 v1.2.7 修「上传后封面还是缩略图」**（主人 2026-09-30 报的）：定位到真根因 ——
   `static.xivmodarchive.com/mod-images/<uuid>.jpg` 在 Cloudflare 后面，**拓展 service worker 里的 fetch
   拿到的是 CF 挑战页**（HTTP 403 / 「Just a moment...」，实测 len≈5.9KB），而 **`chrome.downloads.download()`
@@ -80,6 +94,7 @@
 ### 待办 / 正在做
 
 - 暂无（新会话接手时若主人没特别交代，先从「硬规则」与「高频坑」两节熟悉约束，再动手）
+- v2.34.0 已测（隔离库端到端 + exe 内端到端 + 线上实例解析）；**tag / Release 还没打**（等主人点头）
 - 可选小尾巴：`202609\衣服` 里还留着几张历史同级预览图（`3.Trigun.jpg` 等，文件夹已改名或被删），只是视觉垃圾、不影响取图；云端也留着那 4 个已删 Mod 的目录（主人要求当备份）
 
 ### 接手姿势（给新会话）
@@ -112,6 +127,7 @@ FFXIV Mod 管理器「三件套」，服务于 XIVModArchive / Heliosphere 两�
 | Dalamud 引用库（编译插件必需） | `E:\Hermes\dalamud-dev` → 环境变量 `DALAMUD_HOME` |
 | Node 22 / npm | `C:\Users\qwe26\.hermes-web-ui\desktop-runtime\hermes\0.21.3\win-x64\node` |
 | Python 3.12（含 PyInstaller 6.22.3 + tkinter） | `C:\Users\qwe26\AppData\Local\Programs\Python\Python312\python.exe` |
+| 7-Zip（**heliosphere 下载必需**：它的文件是 zstd） | `C:\Program Files\7-Zip\7z.exe`（`heliosphere.zstd_exe()` 会自动找；可用配置项 `sevenzip` 覆盖） |
 
 - **G 盘不是 NTFS**（`fsutil`/`Get-Volume` 显示 Unknown，实际 exFAT 类）：**不能建 junction / 符号链接**（`mklink /J` 报「需要本地 NTFS 卷」），而且 G↔F 之间复制很慢（实测约 17 MB/分钟，1.1 GB 花了 5 分半）—— 大批量搬运要后台跑 + 进度核对。
 - **git remote 必须走 SSH**（`git@github.com:yomo1024/FFXIV_XMA_Manager.git`）；HTTPS 到 github.com 在本机不通。
@@ -193,6 +209,15 @@ python scripts\check_api_contract.py        # 拓展/前端 ↔ 后端 的路由
 - 面向用户的文案里不出现真实客户/站点名；分发目录归用户所有，不许在其中删任何文件。
 
 ## 8. 高频坑（先读再改，能省几小时）
+
+0. **停实例只能按「完整路径精确匹配」定位进程**（2026-09-30 踩过）：查占用时用名字子串匹配
+   （`"ModManagerWeb" in exe`）会把 **F 盘线下副本里主人正开着的那个**一起杀掉 ——
+   要 `os.path.normcase(exe) == os.path.normcase(目标 exe)` 这样比，并且**杀掉之前先把 PID + 路径打出来**。
+   另外 PyInstaller onefile 的实例是**两个进程**（父+子），两个都要按路径认。
+0b. **heliosphere 下载链路**（v2.34.0）：页面 SSR 里有 GraphQL 响应（匿名可读）→ `manager/heliosphere.py`
+   用 `getVersion` 拿文件清单 → `data.heliosphere.app/files/<key>` 是 **zstd**（用 7-Zip 解）→ 本地打 zip 成 `.pmp`。
+   **纯 HTTP，别开内置浏览器**；下载必须核对 `Content-Length`（网络抖动会"读到一半 EOF"且不抛异常，
+   症状是 7z 报 `Unexpected end of data`）。新增模块记得加进 `manager/make_package.py` 的 `SRC_FILES` 与 `out` 列表。
 
 1. **PyInstaller 打包的 exe 内嵌 `web/`**，会盖过部署目录的 `web\` —— 改了前端只更新部署目录 = 看不到效果，
    必须重建 exe。快检：`GET /` 里 `assets/index-*.js` 的 hash 与部署目录 `web/assets` 是否一致。

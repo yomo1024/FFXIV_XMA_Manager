@@ -295,14 +295,15 @@ export const JOB_TITLES = {
 
 // ---- 更新能力的共享判据（原来只写在 ModsView 里，待办页也要用 → 提到这里做唯一来源）----
 
-// heliosphere 的下载按钮调站内接口、外部拿不到直链 → 不能自动更新
+// 来源判据：XMA = xivmodarchive.com，Heliosphere = heliosphere.app
 export function isHelio(m) {
   return !!(m && /heliosphere\.app/i.test(String(m.addr || '')))
 }
 
-// 能自动更新的：有新版 + 不是 heliosphere + 填了站点地址（否则提交了也只会失败）
+// 能自动更新的：有新版 + 填了站点地址（两家都能自动下 ——
+// heliosphere 由管理器自己读 GraphQL 清单 + 打包成 .pmp，见 manager/heliosphere.py）
 export function canAutoUpdate(m) {
-  return !!m && !!m.update_avail && !isHelio(m) && !!(m.addr || '').trim()
+  return !!m && !!m.update_avail && !!(m.addr || '').trim()
 }
 
 // 「导入后自动装进游戏」的结果尾巴（四个入库入口共用）

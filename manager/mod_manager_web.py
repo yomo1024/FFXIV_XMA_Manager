@@ -39,6 +39,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
 import mod_manager as mm                      # noqa: E402
+import heliosphere as hs                      # noqa: E402  heliosphere.app：读页面信息 / 下载 / 取封面
 import zipfile
 import app_version                            # noqa: E402  版本号唯一来源
 
@@ -730,7 +731,25 @@ def _job_fetch(job: Job):
     from_browser = q.get("page") if isinstance(q.get("page"), dict) else None
     path = None
 
-    if from_browser:
+    if hs.is_helio(url) and not from_browser:
+        # ★ heliosphere：**纯 HTTP** 就能读页面 + 下文件 + 取封面 —— 不弹内置浏览器、
+        #   不用等人机验证（和 XMA 完全不同的形态，见 heliosphere.py 顶部说明）。
+        job.set(1, 5, "读取 heliosphere 页面信息…")
+        info0 = hs.fetch_page_info(url)
+        if not info0.get("ok"):
+            raise RuntimeError(info0.get("error") or "读不到 heliosphere 页面信息")
+        job.set(1, 5, "从 heliosphere 下载并打包（v%s，%s）…"
+                % (info0.get("version") or "", ("%.1f MB" % info0["size_mb"]) if info0.get("size_mb") else ""))
+        path, _si = _helio_download(cfg, url, inbox, job=job)
+        info = {"is_mod": True, "helio": True, "modid": info0.get("modid") or "",
+                "name": info0.get("name") or "", "author": info0.get("author") or "",
+                "addr": hs.page_url(info0.get("modid") or ""), "cover": hs.cover_url(info0),
+                "tags": info0.get("tags") or [], "affects": info0.get("affects") or "",
+                "updated": info0.get("updated") or "", "desc": info0.get("desc") or "",
+                "version": info0.get("version") or "",
+                "package_id": info0.get("package_id") or "", "image_id": info0.get("image_id") or "",
+                "imgs": [hs.cover_url(info0)] if hs.cover_url(info0) else []}
+    elif from_browser:
         # 页面信息是你自己的浏览器（书签小工具）送来的：直接用直链下，不用内置浏览器
         info = from_browser
         dl = (info.get("dl") or "").strip()
@@ -836,17 +855,30 @@ def _job_fetch(job: Job):
     if q.get("cover", True) and info.get("cover"):
         job.set(3, 5, "抓封面当预览图…")
         cu = info["cover"]
-        ext = "." + (cu.rsplit(".", 1)[-1].split("?")[0].lower() if "." in cu else "jpg")
-        if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-            ext = ".jpg"
         tdir = Path(target)
-        try:
-            mm.browser_fetch(cfg, cu, tdir.parent / (tdir.name + ext))
-            got = ext
-        except Exception:
-            got = ""
-        if got:
-            cover_land_inside(tdir)
+        if info.get("helio"):
+            # heliosphere 的封面是公开直链（/api/web/package/<包id>/image/<图id>，内容是 WebP）
+            # → 纯 HTTP 拿字节就行；落盘走 write_cover_bytes（同级同名 + 文件夹内 + 升级旧糊图）
+            _raw = hs.cover_bytes(info)
+            _c = write_cover_bytes(tdir, base64.b64encode(_raw).decode("ascii"), "cover.webp") if _raw else {}
+            if _c.get("ok"):
+                got = ".webp"
+                mm.log("heliosphere 封面已落盘（%d B）" % len(_raw))
+            else:
+                mm.log("heliosphere 封面没落盘（%s），退回内置浏览器试一次"
+                       % (_c.get("why") or "没取到图"))
+        if not got:
+            ext = "." + (cu.rsplit(".", 1)[-1].split("?")[0].lower() if "." in cu else "jpg")
+            if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                ext = ".jpg"
+            tdir = Path(target)
+            try:
+                mm.browser_fetch(cfg, cu, tdir.parent / (tdir.name + ext))
+                got = ext
+            except Exception:
+                got = ""
+            if got:
+                cover_land_inside(tdir)
 
     job.set(4, 5, "重扫索引、写标签、生成 Excel…")
     mm.cmd_scan(cfg, quiet=True)
@@ -856,6 +888,7 @@ def _job_fetch(job: Job):
         tags=info.get("tags") or q.get("tags") or [],
         affects=q.get("affects") if q.get("affects") is not None else info.get("affects"),
         addr=addr)
+    _put_site_desc(cfg, target, info.get("desc"))
     # 同上：入库这步不为了更新时间弹浏览器
     _site = record_site_update(cfg, target, addr,
                                allow_browser=bool(cfg.get("auto_open_browser")) or mm.browser_running(cfg))
@@ -869,6 +902,32 @@ def _job_fetch(job: Job):
             "size": _size, "human": mm.fmt_size(_size),
             "addr": mm.norm_addr(addr), "target": str(target),
             "auto_install": ai, "auto_archive": aa}
+
+
+def _put_site_desc(cfg, target, desc) -> str:
+    """把站点上的「内容描述」写进索引（**本地已经填过就不覆盖** —— 主人手改的值优先）。
+
+    heliosphere 的页面 SSR 里带完整简介；XMA 页面解析里没有，所以这条只对 heliosphere 生效。
+    """
+    txt = str(desc or "").strip()
+    if not txt:
+        return ""
+    try:
+        st = mm.Store()
+        row = find_mod_row(st, target)
+        if row is None:
+            st.cx.close()
+            return ""
+        if (row.get("desc") or "").strip():
+            st.cx.close()
+            return ""
+        st.set_desc(row["folder"], txt)
+        st.cx.close()
+        mm.log("写站点内容描述：%s（%d 字）" % (Path(str(target)).name[:40], len(txt)))
+        return txt
+    except Exception as e:
+        mm.log("写站点内容描述失败：%s" % str(e)[:100])
+        return ""
 
 
 def _job_selfdownload(job: Job):
@@ -1131,6 +1190,57 @@ def _merge_site(a, b):
     return out
 
 
+def _helio_site_info(addr) -> dict:
+    """heliosphere 的站点信息 —— **纯 HTTP 就够，不需要内置浏览器**。
+
+    与 XIVModArchive 完全不同：那边 NSFW 页面纯 HTTP 一律 403、必须有真浏览器；
+    heliosphere 的页面 SSR 里内嵌了 `/api/graphql` 的响应（匿名可读），
+    一次 GET 就拿到 名称/作者/标签/Affects/版本/更新时间/下载大小/封面图 id（见 heliosphere.py）。
+    """
+    info = hs.fetch_page_info(addr)
+    out = {"ok": False, "meta_ok": False, "modid": info.get("modid") or "", "updated": "",
+           "version": "", "patch": "", "tags": [], "affects": "", "races": "", "genders": "",
+           "released": "", "history": [], "source": "heliosphere", "error": "",
+           "size_mb": 0.0, "name": "", "author": "", "package_id": "", "image_id": "",
+           "version_id": "", "desc": "", "helio": True}
+    if not info.get("ok"):
+        out["error"] = info.get("error") or "读不到 heliosphere 页面信息"
+        return out
+    out.update({"ok": True, "meta_ok": bool(info.get("meta_ok")),
+                "updated": info.get("updated") or "", "version": info.get("version") or "",
+                "tags": info.get("tags") or [], "affects": info.get("affects") or "",
+                "released": info.get("released") or "", "size_mb": info.get("size_mb") or 0.0,
+                "name": info.get("name") or "", "author": info.get("author") or "",
+                "package_id": info.get("package_id") or "", "image_id": info.get("image_id") or "",
+                "version_id": info.get("version_id") or "", "desc": info.get("desc") or ""})
+    return out
+
+
+def _helio_download(cfg, addr, inbox, job=None):
+    """从 heliosphere 下载最新版并打包成 .pmp（纯 Python；约 17 MB / 15 秒，可取消）。
+
+    官方那个「Download as PMP」按钮其实是**浏览器里的 SharedWorker 客户端打包**，
+    这里按同一规则复刻（7-Zip 解 zstd + zipfile 打包），产物与官方逐条比对过（见 heliosphere.py）。
+    """
+    inbox = Path(inbox)
+    inbox.mkdir(parents=True, exist_ok=True)
+    info0 = hs.fetch_page_info(addr)
+    if not info0.get("ok"):
+        raise RuntimeError(info0.get("error") or "读不到 heliosphere 页面信息")
+    safe = mm.safe_name(info0.get("name") or hs.modid_of(addr)) or ("helio_" + hs.modid_of(addr))
+    dest = inbox / ("%s.%s.pmp" % (safe, info0.get("version") or "latest"))
+
+    def tick(done, total, text, nbytes):
+        if job:
+            job.set(done, max(1, total), "%s ｜ %s" % (text, mm.fmt_size(nbytes)))
+
+    r = hs.download(cfg, addr, dest, on_tick=tick, should_cancel=(job.cancelled if job else None))
+    mm.log("heliosphere 下载完成：%s（v%s，%d 个文件，%.1f MB）"
+           % (Path(r["path"]).name, r.get("version"), int(r.get("files") or 0),
+              (r.get("size") or 0) / 1048576.0))
+    return Path(r["path"]), _helio_site_info(addr)
+
+
 def _site_info(cfg, addr, allow_browser=True):
     """读站点更新信息，三级兜底：
 
@@ -1138,7 +1248,12 @@ def _site_info(cfg, addr, allow_browser=True):
     ② 借内置浏览器的登录态直连（有些站点认 cookie）
     ③ **用内置浏览器真读一次页面** —— XIVModArchive 在 Cloudflare 后面，NSFW 那种
        纯 HTTP 请求带 cookie 也照样 403，只有真浏览器能过
+
+    ⚠ heliosphere.app 不需要上面这一套：匿名纯 HTTP 就能读到全部信息（没有 Cloudflare、
+      也不需要登录）→ 直接走 `_helio_site_info()`，一个浏览器窗口都不会弹。
     """
+    if hs.is_helio(addr):
+        return _helio_site_info(addr)
     info = mm.fetch_site_update(cfg, addr)
     # 只有「有更新时间 **且** 页面元信息（标签/影响替换）也读到」才算完事；
     # 只从版本接口拿到时间的话，还得继续想办法读页面 —— 否则标签/影响替换补不上
@@ -1322,7 +1437,12 @@ def _site_download(cfg, addr, inbox, job=None):
 
     ① 借内置浏览器的登录态直接抓页面 → 取直链 → 下（最省事，不用开浏览器窗口）
     ② 不行才开内置浏览器，让页面自己下载（NSFW + 人机验证那种）
+
+    heliosphere 是第三种：**纯 HTTP** 下文件（GraphQL 要清单 → data.heliosphere.app 取 zstd
+    → 本地解压打包成 .pmp），全程不碰浏览器。
     """
+    if hs.is_helio(addr):
+        return _helio_download(cfg, addr, inbox, job=job)
     info = _site_info(cfg, addr)
     page = str(addr or "").strip()
     ck = _browser_cookie_header(cfg)
@@ -3005,10 +3125,6 @@ def _job_mod_update(job: Job):
         if not addr:
             failed.append("%s：没有站点地址，无法从站点更新（可以手动上传替换）" % m["name"])
             continue
-        if "heliosphere" in addr:
-            failed.append("%s：heliosphere 的下载是页面上那个按钮（接口没公开）——"
-                          "点「打开页面下载」，下好后用「上传新文件替换」" % m["name"])
-            continue
         try:
             job.set(i - 1, len(folders), "下载最新版：%s" % m["name"][:34])
             path, info = _site_download(cfg, addr, inbox, job=job)
@@ -4430,10 +4546,27 @@ def api_fetch_parse(b):
 
     def result_from_page(info, source):
         return {"ok": True, "page": info, "url": info.get("url") or url, "from": source,
-                "has_download": bool(info.get("dl")), "warn": "",
+                # heliosphere 没有「页面上的直链」，但管理器自己能下（GraphQL + 官方打包规则）
+                "has_download": bool(info.get("dl")) or bool(info.get("helio")), "warn": "",
                 "suggest": {"name": info.get("name") or "", "author": info.get("author") or "",
                             "addr": info.get("addr") or "", "cover": info.get("cover") or "",
                             "affects": info.get("affects") or ""}}
+
+    # ⓿ heliosphere：纯 HTTP 解析（页面 SSR 里内嵌了 GraphQL 响应，匿名可读），
+    #    不弹内置浏览器、也不用等人机验证。
+    if hs.is_helio(url):
+        info0 = hs.fetch_page_info(url)
+        if not info0.get("ok"):
+            return {"error": info0.get("error") or "读不到这条 heliosphere Mod 的信息"}
+        page = {"is_mod": True, "helio": True, "modid": info0.get("modid") or "",
+                "name": info0.get("name") or "", "author": info0.get("author") or "",
+                "addr": hs.page_url(info0.get("modid") or ""), "cover": hs.cover_url(info0),
+                "tags": info0.get("tags") or [], "affects": info0.get("affects") or "",
+                "updated": info0.get("updated") or "", "desc": info0.get("desc") or "",
+                "version": info0.get("version") or "", "dl": "",
+                "imgs": [hs.cover_url(info0)] if hs.cover_url(info0) else []}
+        mm.log("解析 heliosphere 链接（纯 HTTP）：%s ｜ %s" % (info0.get("name", "")[:40], page["addr"]))
+        return result_from_page(page, "heliosphere")
 
     # ① 先看你自己浏览器（书签小工具）推过来的那条页面信息 —— 够用就绝不碰内置浏览器
     pushed = LAST_PAGE.get("data") or {}
@@ -4500,8 +4633,8 @@ def api_fetch_parse(b):
             host = urllib.parse.urlsplit(info.get("url") or "").netloc
         except Exception:
             pass
-        if host and "xivmodarchive" not in host:
-            return {"error": "自动下载只支持 xivmodarchive.com 的 Mod 页"
+        if host and "xivmodarchive" not in host and "heliosphere" not in host:
+            return {"error": "自动下载只支持 xivmodarchive.com / heliosphere.app 的 Mod 页"
                              "（当前是 %s）。可以把名称/作者/地址填好后用「添加 Mod」，"
                              "或者在内置浏览器里手动下载再用「监视下载目录」。" % host,
                     "page": info, "partial": partial}
@@ -6190,6 +6323,24 @@ class Handler(BaseHTTPRequestHandler):
         modid = _modid_of(addr)
         dest = fd / (fd.name + ".jpg")
         local = str(b.get("local_cover") or "")
+
+        # 0) heliosphere：封面是公开直链（/api/web/package/<包id>/image/<图id>）→ 纯 HTTP 拿，
+        #    不用浏览器、不用登录；落盘走 write_cover_bytes（同级同名 + 文件夹内 + 升级旧糊图）
+        if hs.is_helio(addr):
+            info0 = hs.fetch_page_info(addr)
+            raw = hs.cover_bytes(info0) if info0.get("ok") else b""
+            if raw:
+                wrote = write_cover_bytes(fd, base64.b64encode(raw).decode("ascii"), "cover.webp")
+                if wrote.get("ok"):
+                    _retire_lowres_cover(fd, old_img, str(wrote.get("path") or ""))
+                    mm.cmd_scan(cfg, quiet=True)
+                    mod_index(force=True)
+                    return self._json({"ok": True, "img": str(wrote.get("path") or ""),
+                                       "how": "heliosphere 封面（%d B）" % len(raw),
+                                       "name": Path(str(wrote.get("path") or "")).name})
+                tried.append("heliosphere 封面落盘失败：%s" % wrote.get("why"))
+            else:
+                tried.append("heliosphere：没取到封面（%s）" % (info0.get("error") or "没有图"))
 
         # 1) 本机给的封面图
         if local and Path(local).is_file():

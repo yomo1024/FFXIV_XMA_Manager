@@ -754,35 +754,29 @@ async function restoreCloud(folders) {
 // isHelio 见 ../api.js（同一个判据，待办页共用）
 async function updateOne(m) {
   if (!m) return msg.warning('先在左边选一条 Mod')
-  if (!isHelio(m)) return doUpdate([m.folder])
-  try {
-    await api.open('addr', m.folder)
-    msg.info('已用你的浏览器打开 heliosphere 页面：点「Download as PMP」下好，' +
-      '回来用「上传新文件替换」覆盖这条（它的下载按钮调的是站内接口，管理器拿不到直链）',
-      { duration: 15000 })
-  } catch (e) {
-    msg.error(e.message)
-  }
+  // heliosphere 也能一键更新了：管理器自己读 GraphQL 文件清单、下 zstd 文件、
+  // 按官方规则打包成 .pmp（纯 Python，不弹浏览器）—— 见 manager/heliosphere.py
+  return doUpdate([m.folder])
 }
 
 function doUpdate(folders, manualMods) {
   const want = (folders && folders.length) ? folders : updFolders.value
   if (!want.length) return msg.warning('先勾选「有新版」的 Mod，或点某条详情里的「从站点更新」')
-  // 拿不到直链的（heliosphere / 没填站点地址）提交了也只会失败 → 不进任务，只在弹窗里摊开。
+  // 没填站点地址的提交了也只会失败 → 不进任务，只在弹窗里摊开。
   // 「全部更新」时调用方直接把手动项传进来（它们本来就不在 want 里，否则这里算不出来）
   const skip = (manualMods && manualMods.length) ? manualMods
     : (props.mods || []).filter((m) => want.includes(m.folder) && !canAutoUpdate(m))
   const list = want.filter((f) => !skip.some((m) => m.folder === f))
   if (!list.length) {
-    return msg.warning(`这 ${skip.length} 条都拿不到下载直链，没法自动更新 —— ` +
-      '用「打开页面下载」下好，再「上传新文件替换」', { duration: 12000 })
+    return msg.warning(`这 ${skip.length} 条都没填站点地址，没法自动更新 —— ` +
+      '先在详情里补上站点地址，或自己下好再「上传新文件替换」', { duration: 12000 })
   }
   const names = list.map((f) => ((props.mods || []).find((m) => m.folder === f) || {}).name || f)
   dialog.warning({
     title: list.length > 1 ? `批量更新 ${list.length} 条（从站点下载最新版覆盖）` : '从站点下载最新版并覆盖',
     content: `将更新 ${list.length} 条：\n${names.slice(0, 6).map((n) => '· ' + n).join('\n')}` +
       (names.length > 6 ? `\n… 还有 ${names.length - 6} 条` : '') +
-      (skip.length ? `\n\n会跳过 ${skip.length} 条（拿不到直链，得手动「打开页面下载」或「上传新文件替换」）：` +
+      (skip.length ? `\n\n会跳过 ${skip.length} 条（没填站点地址，得自己下好再「上传新文件替换」）：` +
         `\n${skip.slice(0, 4).map((m) => '· ' + (m.name || m.folder)).join('\n')}` +
         (skip.length > 4 ? `\n… 还有 ${skip.length - 4} 条` : '') : '') +
       '\n\n旧文件会移入回收站（能还原）；地址.txt、预览图、编号、标签、影响/替换 都保留。' +
@@ -1581,7 +1575,7 @@ async function copyPath() {
           <n-button size="small" type="primary" ghost :loading="updating" :disabled="!allUpdFolders.length"
                     @click="doUpdate(allUpdFolders, allUpdManual)">全部更新（{{ allUpdFolders.length }}）</n-button>
           <span v-if="!allUpdFolders.length && allUpdManual.length" class="dim" style="font-size: 12px">
-            （有新版但都拿不到直链，需手动处理）
+            （有新版但没填站点地址，需手动处理）
           </span>
         </template>
         <span v-else class="dim">检查到站点有新版本时，这里会出现「只看有新版 / 更新选中」</span>
@@ -1882,8 +1876,11 @@ async function copyPath() {
 
           <div class="opgrid">
             <n-button class="opmain" block size="small" type="primary" ghost :disabled="!cur || !cur.addr"
+                      :title="isHelio(cur)
+                        ? '从 heliosphere.app 下载最新版并打包成 .pmp 覆盖这条（管理器自己下，不用浏览器）'
+                        : '从 XIV Mod Archive 下载最新版覆盖这条'"
                       @click="updateOne(cur)">
-              {{ isHelio(cur) ? '打开页面下载' : '从站点更新' }}
+              从站点更新
             </n-button>
             <n-button block size="small" type="primary" :disabled="!cur" :loading="installing"
                       @click="installToGame(false)">安装到游戏</n-button>

@@ -160,15 +160,15 @@ function doUpdate() {
   const skip = updManual.value
   if (!list.length) {
     return msg.warning(skip.length
-      ? `这 ${skip.length} 条拿不到下载直链（heliosphere 或没填站点地址）——`
-        + '去详情里点「打开页面下载」，下好再「上传新文件替换」'
+      ? `这 ${skip.length} 条没填站点地址，没法自动更新 ——`
+        + '去详情里补上站点地址再试，或自己下好再「上传新文件替换」'
       : '当前没有可自动更新的：先点「检查更新」', { duration: 12000 })
   }
   dialog.warning({
     title: `更新 ${list.length} 条（从站点下载最新版覆盖）`,
     content: `将更新：\n${updAuto.value.slice(0, 6).map((m) => '・' + m.name).join('\n')}`
       + (updAuto.value.length > 6 ? `\n… 还有 ${updAuto.value.length - 6} 条` : '')
-      + (skip.length ? `\n\n会跳过 ${skip.length} 条（拿不到直链）：\n${skip.slice(0, 4).map((m) => '・' + m.name).join('\n')}` : '')
+      + (skip.length ? `\n\n会跳过 ${skip.length} 条（没填站点地址）：\n${skip.slice(0, 4).map((m) => '・' + m.name).join('\n')}` : '')
       + '\n\n旧文件进回收站（可还原）；地址.txt、预览图、编号、标签、影响/替换 都保留。',
     positiveText: '开始更新',
     negativeText: '取消',

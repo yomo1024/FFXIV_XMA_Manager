@@ -34,7 +34,7 @@ export function buildTodos(mods, pending) {
     {
       key: 'update',
       label: '有新版',
-      hint: '站点上已有更新的版本（拿不到直链的会在弹窗里单独列出来）',
+      hint: '站点上已有更新的版本（XMA / Heliosphere 都能直接更新；没填站点地址的会在弹窗里列出来）',
       items: M.filter((m) => m.update_avail).map(rowOf),
       action: 'update',
     },

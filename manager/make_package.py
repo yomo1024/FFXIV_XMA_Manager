@@ -39,6 +39,7 @@ ROOT_FILES = ["ModManagerWeb.exe", "启动Web版.bat", "停止Web版.bat",
               "使用说明-Web版.txt", "使用说明.txt", "app.ico"]
 WEB_DIR = "web"                                  # 前端产物整目录
 SRC_FILES = ["mod_manager.py", "mod_manager_web.py", "app_version.py", "quark_drive.py",
+             "heliosphere.py",
              "build_web_exe.bat", "build_exe.bat",
              "make_package.py", "打包部署包.bat", "requirements.txt"]
 SRC_WEB = "web-src"                              # 前端源码（跳过 node_modules/dist）
@@ -155,7 +156,7 @@ def find_exe():
 def embedded_sources() -> list:
     """exe 里真正内嵌的东西（源码 + 前端产物）—— 用来判断 exe 是不是旧的。"""
     out = [APP_DIR / f for f in ("mod_manager_web.py", "mod_manager.py", "app_version.py",
-                                 "quark_drive.py")]
+                                 "quark_drive.py", "heliosphere.py")]
     web = APP_DIR / WEB_DIR
     if web.is_dir():
         for dp, dn, fn in os.walk(web):
