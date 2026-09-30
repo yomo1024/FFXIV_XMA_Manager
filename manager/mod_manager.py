@@ -1038,6 +1038,20 @@ def fmt_size(n) -> str:
     return "%.2f GB" % (n / 1073741824)
 
 
+# 让控制台子进程（7-Zip / wmic / taskkill / netstat…）**别弹黑框**：
+# 打成 --windowed 的 exe 后父进程没有控制台，这类子进程默认会被分配一个**新的控制台窗口**，
+# 于是用户点一次下载就看到十几下黑框闪烁（2026-09-30 主人报「能不能不要弹出命令窗口」）。
+# 实测：heliosphere 下载会调 13 次 7-Zip → conhost 净增 3（可见窗口闪 13 次）；加了这个就 0。
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def no_window(**kw) -> dict:
+    """给 subprocess 的 kwargs 补上「不要控制台窗口」（非 Windows 上是空操作）"""
+    if CREATE_NO_WINDOW:
+        kw["creationflags"] = int(kw.get("creationflags") or 0) | CREATE_NO_WINDOW
+    return kw
+
+
 def norm_addr(text: str) -> str:
     """把粘贴进来的网址补全（支持 xivmodarchive.com/modid/123 这种写法）"""
     a = (text or "").strip()
@@ -2079,7 +2093,7 @@ def browser_procs(exe) -> list:
     try:
         raw = subprocess.run(["wmic", "process", "get", "ProcessId,ExecutablePath", "/format:csv"],
                              capture_output=True, text=True, encoding="gbk", errors="replace",
-                             timeout=15).stdout
+                             timeout=15, **no_window()).stdout
     except Exception:
         return []
     out = []
@@ -2184,7 +2198,7 @@ def close_user_browser(exe, wait=12) -> dict:
     for p in pids:
         args += ["/PID", p]
     try:
-        subprocess.run(["taskkill"] + args, capture_output=True, text=True, timeout=20)
+        subprocess.run(["taskkill"] + args, capture_output=True, text=True, timeout=20, **no_window())
     except Exception:
         log("关浏览器失败：\n" + traceback.format_exc())
     t0 = time.time()
@@ -2198,7 +2212,8 @@ def close_user_browser(exe, wait=12) -> dict:
         for p in left:
             args2 += ["/PID", p]
         try:
-            subprocess.run(["taskkill", "/F"] + args2, capture_output=True, text=True, timeout=20)
+            subprocess.run(["taskkill", "/F"] + args2, capture_output=True, text=True, timeout=20,
+                           **no_window())
         except Exception:
             pass
         time.sleep(1.5)

@@ -4903,7 +4903,7 @@ def pid_on_port(port: int):
     """按端口找进程号（不依赖 psutil）"""
     try:
         out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
-                             text=True, timeout=10).stdout
+                             text=True, timeout=10, **mm.no_window()).stdout
         for line in out.splitlines():
             parts = line.split()
             if len(parts) >= 5 and parts[1].endswith(":%d" % port) \
@@ -4986,7 +4986,8 @@ def archive_list(arc) -> list:
         return []
     try:
         out = subprocess.run([exe, "l", "-ba", "-slt", str(arc)], capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=180).stdout
+                             encoding="utf-8", errors="replace", timeout=180,
+                             **mm.no_window()).stdout
     except Exception:
         mm.log("7-Zip 列清单失败：%s\n%s" % (arc, traceback.format_exc()))
         return []
@@ -5022,7 +5023,8 @@ def archive_extract(arc, names, dest) -> list:
         return []
     try:
         subprocess.run([exe, "x", "-y", "-o" + str(dest), str(arc)] + list(names),
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+                       **mm.no_window())
     except Exception:
         mm.log(traceback.format_exc())
     return [dest / n for n in names if (dest / n).is_file()]
@@ -6900,7 +6902,7 @@ class Handler(BaseHTTPRequestHandler):
             pid = pid_on_port(mm.browser_port(cfg))
             if pid:
                 subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                               capture_output=True)
+                               capture_output=True, **mm.no_window())
         time.sleep(0.5)
         return self._json({"ok": True, "running": mm.browser_running(cfg)})
 
