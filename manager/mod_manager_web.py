@@ -969,6 +969,14 @@ def _job_selfdownload(job: Job):
             job.set(3, 4, "抓封面当预览图…")
             if q.get("cover_data"):
                 cover_info = write_cover_bytes(target, q.get("cover_data"), q.get("cover_name"))
+                if not cover_info.get("ok"):
+                    mm.log("入库补封面：推来的封面字节写入失败（%s）"
+                           % (cover_info.get("why") or cover_info.get("error") or "原因未知"))
+            else:
+                # ★ 不静默：说清这次为什么拿不到全尺寸（主人 2026-09-30「怎么还是缩略图」）
+                mm.log("入库补封面：这次推送没带封面字节（%s）"
+                       % (("拓展报错：" + str(q.get("cover_error"))[:80]) if q.get("cover_error")
+                          else "既没有 cover_data 也没有 cover_error（拓展 < 1.2.4，或走的是书签小工具）"))
             if not cover_info.get("ok"):
                 cover_info = fetch_cover_with_fallback(cfg, target, cover,
                                                       q.get("imgs") or info.get("imgs"))
@@ -3220,7 +3228,8 @@ def fetch_cover_with_fallback(cfg, folder, cover_url, imgs=None) -> dict:
                             "path": keep, "tried": tried}
                 os.replace(str(tmp), str(_sib(ext)))
                 cover_land_inside(folder)
-                mm.log("入库补封面：低清兜底（封面自己的缩略图 %s）" % Path(u).name[:28])
+                mm.log("入库补封面：低清兜底（封面自己的缩略图 %s）｜全尺寸失败原因：%s"
+                       % (Path(u).name[:28], "；".join(tried[:2]) or "未尝试/无地址"))
                 return {"ok": True, "how": "低清兜底（封面自己的缩略图）", "lowres": True,
                         "path": str(_sib(ext)), "tried": tried}
             try:
@@ -3269,6 +3278,14 @@ def _job_import_file(job: Job):
             job.set(2, 3, "抓封面当预览图…")
             if q.get("cover_data"):
                 cover_info = write_cover_bytes(target, q.get("cover_data"), q.get("cover_name"))
+                if not cover_info.get("ok"):
+                    mm.log("入库补封面：推来的封面字节写入失败（%s）"
+                           % (cover_info.get("why") or cover_info.get("error") or "原因未知"))
+            else:
+                # ★ 不静默：说清这次为什么拿不到全尺寸（主人 2026-09-30「怎么还是缩略图」）
+                mm.log("入库补封面：这次推送没带封面字节（%s）"
+                       % (("拓展报错：" + str(q.get("cover_error"))[:80]) if q.get("cover_error")
+                          else "既没有 cover_data 也没有 cover_error（拓展 < 1.2.4，或走的是书签小工具）"))
             if not cover_info.get("ok"):
                 # 拓展没带（旧版/取不到）→ 才走网络：全尺寸优先，退公开缩略图兜底
                 cover_info = fetch_cover_with_fallback(cfg, target, cover,
