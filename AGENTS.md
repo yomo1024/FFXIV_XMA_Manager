@@ -10,11 +10,17 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.35.1**（最新 tag = **v2.35.1**，已发 Release）｜拓展 **v1.2.8** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.35.2**（最新 tag = **v2.35.2**，已发 Release）｜拓展 **v1.2.8** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
+
+- **v2.35.2 发版：把拓展 1.2.8 打进部署包**（主人 2026-09-30 要「带 1.2.8 的部署包 + 新 tag/Release」）。
+  管理器代码**没有任何改动**，纯粹是**版本落点**跟着走一版（否则同一个 v2.35.1 的附件换内容会说不清）；
+  按规矩**先升版本号再编 exe**，所以 exe / 桌面版都重打了一遍（自报 2.35.2 已实测）。
+  包内已核对：`browser-extension/manifest.json` = **1.2.8**、`sw.js` 是新版（tabs.sendMessage 修法）、
+  exe sha256 与仓库一致、zip 完整。
 
 - **拓展 v1.2.8 修「后台控制台刷 Uncaught (in promise) Could not establish connection」**（主人 2026-09-30 报）：
   队列一变就广播 `queueChanged`，写的是从 **SW** 发 `chrome.runtime.sendMessage` —— 而 MV3 里
