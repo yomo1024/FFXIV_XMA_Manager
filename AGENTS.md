@@ -10,12 +10,20 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.34.1**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.34.2**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
 
+- **v2.34.2 消灭「弹命令窗口」**（主人要求：别让用户看到命令窗口）：`--windowed` 的 exe 没有控制台，
+  启动控制台子进程（7-Zip / wmic / taskkill / netstat）时 Windows 会给它**新建一个可见的控制台窗口**
+  —— 下一个 heliosphere mod 要调 7-Zip 十几次（主人真下的一条有 **88 个文件 = 88 次**），满屏黑框闪。
+  修法：`mod_manager.CREATE_NO_WINDOW` / `no_window()` 助手，9 处控制台调用全部加上；
+  `启动Mod管理工具.bat` 改 `pythonw` 无控制台启动。
+  证据：① 受控对照（pythonw 模拟 windowed exe）不带 flag → 可见窗口 0→1（新增的是 ping.exe 的窗口），
+  带 flag → 0→0；② 端到端真下载（13 文件 / 13 次 7-Zip）409 次采样可见窗口 min=max=0。
+  ⚠ 新增任何 `subprocess` 调用控制台程序时，**必须**带上 `creationflags=/ **no_window()`**。
 - **v2.34.1 修「工作台对 heliosphere 误报没有读到下载链接」**（主人当天就撞上了）：
   `doFetch()` 用 `page.dl` 判「能不能下载」，而 heliosphere **没有页面直链**这个字段
   （下载是管理器读 GraphQL 清单后本地打包），后端早已返回 `has_download: true` ——
