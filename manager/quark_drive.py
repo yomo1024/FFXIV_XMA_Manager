@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.parse
 
-__all__ = ["QuarkDrive", "QuarkError", "norm", "share_list"]
+__all__ = ["QuarkDrive", "QuarkError", "norm", "share_list", "download_parallel"]
 
 PC_HOST = "https://drive-pc.quark.cn"      # PC 端主接口
 SHARE_HOST = "https://drive.quark.cn"      # 分享接口
@@ -226,6 +226,113 @@ def _request(method, url_host, path, cookie, params=None, body=None, timeout=60,
                              % (code, msg))
         raise QuarkError("夸克接口报错 %s：%s" % (code, msg or ("HTTP %s" % code_http)))
     return j.get("data") or {}
+
+
+def download_parallel(url, headers, size, dest, workers=6, chunk_size=16 << 20,
+                      on_step=None, should_stop=None, retries=4, reurl=None, quiet_log=None) -> int:
+    """多连接**分片**下载到本地文件（断点续传 / 单片重试 / 可取消）。
+
+    ★ 为什么必须多连接（主人 2026-09-30 报「Sakurin 下不下来」的真根因）：
+      夸克 CDN 对**单连接**限速到 ~**0.10 MB/s** —— 401 MB 的包要 **68 分钟**，
+      界面上看着就是「一直下不下来 / 卡住」。实测**同一账号、同一文件、同一时间**：
+        单连接 0.10 MB/s ｜ 4 连接 **18.1 MB/s** ｜ 8 连接 **23.6 MB/s**（快 200 倍）。
+      所以按 `Range` 切片并发拉（该 CDN 支持 206），每片独立重试、从已写位置续传。
+
+    参数
+      url       已签名的下载直链
+      headers   请求头（可传 callable，每次重试现取 —— 这样能带上刷新过的 cookie）
+      size      文件大小（必须 >0，用来切片与校验）
+      dest      落地文件路径
+      reurl     可选：某片遇到 403/412（多半是 __puus 又过期）时回调它重新签直链
+      on_step   可选：on_step(done_bytes, total_bytes) 报进度
+    返回实际写入字节数；不完整时抛 QuarkError。
+    """
+    import os as _os
+    import threading
+    import urllib.error
+    import urllib.request
+    total = int(size or 0)
+    if total <= 0:
+        raise QuarkError("云端没给出文件大小，没法分片下载")
+    dest = str(dest)
+    p = Path(dest)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.truncate(total)                      # 预分配：每片才能各自 seek 写入
+    lock = threading.Lock()
+    done = {"n": 0}
+    errs = []
+    stop = threading.Event()
+    cur = {"url": url}
+    ranges = [(s, min(chunk_size, total - s)) for s in range(0, total, chunk_size)]
+    task = {"i": 0}
+
+    def fetch(idx, start, length):
+        pos, end = start, start + length - 1
+        for attempt in range(retries):
+            if stop.is_set() or (should_stop and should_stop()):
+                return
+            try:
+                h = dict(headers() if callable(headers) else headers)
+                h["Range"] = "bytes=%d-%d" % (pos, end)
+                with urllib.request.urlopen(urllib.request.Request(cur["url"], headers=h), timeout=600) as r:
+                    fh = open(dest, "r+b")
+                    try:
+                        while pos <= end:
+                            b = r.read(min(1 << 20, end - pos + 1))
+                            if not b:
+                                raise IOError("连接提前结束（%d/%d）" % (pos - start, length))
+                            fh.seek(pos)
+                            fh.write(b)
+                            pos += len(b)
+                            with lock:
+                                done["n"] += len(b)
+                                if on_step:
+                                    on_step(done["n"], total)
+                    finally:
+                        fh.close()
+                return
+            except urllib.error.HTTPError as e:
+                if e.code in (403, 412) and reurl is not None:
+                    try:
+                        nu = reurl()
+                        if nu:
+                            cur["url"] = nu
+                            if quiet_log:
+                                quiet_log("分片 %d 被 %s 拒 → 重新签直链后重试" % (idx, e.code))
+                    except Exception:
+                        pass
+                elif attempt >= retries - 1:
+                    errs.append("片 %d：HTTP %s" % (idx, e.code))
+                    stop.set()
+                    return
+            except Exception as e:
+                if attempt >= retries - 1:
+                    errs.append("片 %d：%s" % (idx, str(e)[:80]))
+                    stop.set()
+                    return
+            time.sleep(1.2 * (attempt + 1))
+
+    def worker():
+        while not stop.is_set():
+            with lock:
+                if task["i"] >= len(ranges) or (should_stop and should_stop()):
+                    return
+                idx = task["i"]
+                task["i"] += 1
+            start, length = ranges[idx]
+            fetch(idx, start, length)
+
+    n_w = max(1, min(int(workers or 6), len(ranges)))
+    ths = [threading.Thread(target=worker, daemon=True) for _ in range(n_w)]
+    [t.start() for t in ths]
+    [t.join() for t in ths]
+    if should_stop and should_stop():
+        raise QuarkError("已取消")
+    if errs or done["n"] != total:
+        raise QuarkError("分片下载不完整（%d/%d 字节）%s" % (done["n"], total, ("：" + "；".join(errs[:3])) if errs else ""))
+    return done["n"]
+
 
 
 def cookie_report(cookie) -> dict:
