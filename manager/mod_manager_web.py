@@ -7056,8 +7056,14 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     ap.add_argument("--root", default="", help="临时 Mod 根目录（不写回配置，测试用）")
+    ap.add_argument("--show-console", action="store_true",
+                    help="调试用：允许子进程弹控制台窗口（默认**静默**，上线版本一个黑框都不弹）")
     a = ap.parse_args(argv)
     ROOT_OVERRIDE = a.root
+    if a.show_console:
+        # 想要在调试时看到 7-Zip 等子进程的窗口/输出，就关掉静默
+        mm.CONSOLE_DEBUG = True
+        print("  [调试] 已允许子进程弹控制台窗口（--show-console）")
     if ROOT_OVERRIDE:
         # 临时根目录：索引库也换成独立的，绝不动真实索引
         mm.DB_PATH = Path(ROOT_OVERRIDE).resolve().parent / "mod_manager.root-override.db"

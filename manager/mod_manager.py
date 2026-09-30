@@ -1044,12 +1044,22 @@ def fmt_size(n) -> str:
 # 实测：heliosphere 下载会调 13 次 7-Zip → conhost 净增 3（可见窗口闪 13 次）；加了这个就 0。
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+# 调试开关：**默认静默**（上线版本一个黑框都不许弹）。
+# 想在看得到窗口的环境里调试（子进程窗口/输出），用 `--show-console` 参数，
+# 或设环境变量 MODMANAGER_CONSOLE=1。两者都不设 = 线上行为。
+CONSOLE_DEBUG = str(os.environ.get("MODMANAGER_CONSOLE", "")).strip().lower() in ("1", "show", "on", "yes", "true")
+
 
 def no_window(**kw) -> dict:
     """给 subprocess 的 kwargs 补上「不要控制台窗口」（非 Windows 上是空操作）"""
-    if CREATE_NO_WINDOW:
+    if CREATE_NO_WINDOW and not CONSOLE_DEBUG:
         kw["creationflags"] = int(kw.get("creationflags") or 0) | CREATE_NO_WINDOW
     return kw
+
+
+def console_flags() -> int:
+    """直接当 creationflags 用的值（已经写死 creationflags= 的调用走这里）"""
+    return 0 if CONSOLE_DEBUG else CREATE_NO_WINDOW
 
 
 def norm_addr(text: str) -> str:

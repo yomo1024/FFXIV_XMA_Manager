@@ -10,7 +10,7 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.34.2**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.34.3**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
@@ -23,7 +23,11 @@
   `启动Mod管理工具.bat` 改 `pythonw` 无控制台启动。
   证据：① 受控对照（pythonw 模拟 windowed exe）不带 flag → 可见窗口 0→1（新增的是 ping.exe 的窗口），
   带 flag → 0→0；② 端到端真下载（13 文件 / 13 次 7-Zip）409 次采样可见窗口 min=max=0。
-  ⚠ 新增任何 `subprocess` 调用控制台程序时，**必须**带上 `creationflags=/ **no_window()`**。
+  ⚠ 新增任何 `subprocess` 调用控制台程序时，**必须**带上 `creationflags=` / `**no_window()`**。
+  **上线默认静默、调试可开**：`--show-console`（或环境变量 `MODMANAGER_CONSOLE=1`）会把
+  `mm.CONSOLE_DEBUG` 打开 → 子进程**不再**加 CREATE_NO_WINDOW（能看见 7-Zip 窗口，方便排查）；
+  两个都不设 = 线上行为（一个黑框都不弹）。两模式都实测过：默认下载 13 文件全程可见窗口 0 个，
+  `--show-console` 下同一个下载能看到 8 个 7z.exe 窗口。
 - **v2.34.1 修「工作台对 heliosphere 误报没有读到下载链接」**（主人当天就撞上了）：
   `doFetch()` 用 `page.dl` 判「能不能下载」，而 heliosphere **没有页面直链**这个字段
   （下载是管理器读 GraphQL 清单后本地打包），后端早已返回 `has_download: true` ——

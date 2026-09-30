@@ -469,12 +469,12 @@ def unzstd(cfg, data: bytes, tmp_dir) -> bytes:
     try:
         if os.path.basename(exe).lower().startswith("zstd"):
             p = subprocess.run([exe, "-d", "-c", "-q", src], capture_output=True,
-                               creationflags=mm.CREATE_NO_WINDOW)
+                               creationflags=mm.console_flags())
         else:
             # ★ creationflags：7-Zip 是控制台程序，不加这个，用户在 windowed 版里
             #   每下一个文件就会看到一个黑框闪一下（一个 mod 十几个文件 = 满屏闪）
             p = subprocess.run([exe, "e", "-so", "-y", src], capture_output=True,
-                               creationflags=mm.CREATE_NO_WINDOW)
+                               creationflags=mm.console_flags())
         if p.returncode != 0 or not p.stdout:
             raise RuntimeError("解压失败（%s，输入 %d 字节）：%s"
                                % (os.path.basename(exe), len(data),
