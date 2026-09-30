@@ -81,9 +81,11 @@ const BUSY_LABELS = {
   '/api/quit': '退出服务',
 }
 
-async function req(path, opts = {}, label) {
+// quiet=true 的请求**不进**全局加载条：给「实时刷新」的后台轮询用 ——
+// 它每 2 秒问一次「变了没」，要是也占加载条，界面上会一直挂着一条「处理中」。
+async function req(path, opts = {}, label, quiet) {
   const key = String(path).split('?')[0]
-  beginBusy(label || BUSY_LABELS[key] || key)
+  if (!quiet) beginBusy(label || BUSY_LABELS[key] || key)
   try {
     const r = await fetch(path, {
       headers: { 'Content-Type': 'application/json' },
@@ -94,7 +96,7 @@ async function req(path, opts = {}, label) {
     if (!r.ok) throw new Error((body && body.error) || 'HTTP ' + r.status)
     return body
   } finally {
-    endBusy()
+    if (!quiet) endBusy()
   }
 }
 
@@ -128,6 +130,9 @@ export const api = {
 
   state: () => req('/api/state'),
   mods: () => req('/api/mods'),
+  // 实时刷新探测：一次拿到「数据变了没（sig/changed）+ 现在有没有任务在跑（job）」。
+  // quiet=后台轮询不打加载条；since 传上一次的 sig（第一次传空 → changed 一定是 false）。
+  watch: (since) => req('/api/watch?since=' + encodeURIComponent(since || ''), {}, '', true),
   categories: () => req('/api/categories'),
   dupes: () => req('/api/dupes'),
   install: () => req('/api/install'),

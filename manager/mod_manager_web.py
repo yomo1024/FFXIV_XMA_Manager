@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -419,6 +420,9 @@ class Job:
                     "state": self.state, "done": self.done,
                     "total": self.total, "pct": max(0, min(100, pct)),
                     "text": self.text, "error": self.error, "result": self.result,
+                    # ★ t0：这次任务的「出生时间」。前端拿它当任务标识 ——
+                    #   结束态的提示只弹一次（以前没有标识，只能靠「不再轮询」来避免重复弹）
+                    "t0": self.t0,
                     "elapsed": round((self.t1 or time.time()) - self.t0, 1)}
 
 
@@ -3718,6 +3722,156 @@ def api_state():
             "log": str(mm.LOG_PATH), "temp_root": bool(ROOT_OVERRIDE)}
 
 
+# --------------------------------------------------- 实时刷新：数据变化探测（2026-09-30）
+
+# 主人 2026-09-30：下载 / 导入 / 归档之后，界面**不跟着动**，得自己刷新才看得到。
+# 真因（读代码得到的）：前端只在「**自己**发起的任务结束时」调一次 refreshAll ——
+#   · 任务**进行中**一律不刷新（归档一条大包要几分钟，列表一直停在旧样子）
+#   · 浏览器拓展 / 插件 / 另一个窗口发起的改动（任务由后端直接起）页面**根本不知道**
+# 做法：给界面一条便宜的「变了没」探测通道 `GET /api/watch`，一次请求同时回答两件事：
+#   ① 索引库 / 待导入目录 / 游戏里的 mod 目录 / 配置 有没有变 → 变了前端就重载（列表、统计、当前页）
+#   ② 现在有没有任务在跑（**别处发起的也能看到**）→ 进度条与结果提示都跟着走
+# 为什么不用 WebSocket / SSE：服务是标准库 http.server，SSE 要为每个页面挂住一个线程；
+#   而这条通道只需要「变没变」这一个比特，轮询 2 秒一次（几百字节）最省事也最稳。
+# ⚠ 这个函数**必须保持很轻**：库里只读 PRAGMA data_version + 行数，磁盘只 stat/浅扫目录。
+#   真要拿数据时前端会去调 /api/mods —— 不要在这里读整表或递归列目录。
+_WATCH = {"path": "", "cx": None, "lock": threading.Lock(), "logged": False}
+
+
+def _db_ro_conn():
+    """常驻的**只读**连接：专门用来读 `PRAGMA data_version`。
+
+    为什么用它而不是文件 mtime：data_version 是 SQLite 给的「**别的连接**提交过就 +1」计数器，
+    不依赖文件时间戳精度（NTFS 上同一秒内的两次提交用 mtime 是看不出来的）；
+    而且索引库是「每次操作开一个连接」的写法，任何一次写入都会被它看见。
+
+    ★ 这里必须 `check_same_thread=False` + 自己加锁：服务是 ThreadingHTTPServer（**每个请求一个线程**），
+      连接又要在请求之间常驻（data_version 是「连接私有」的计数器，每次新建连接就没意义了）。
+      踩过的坑：忘了这个参数 → 第 2 次调用起 sqlite 抛「SQLite objects created in a thread can only be
+      used in that same thread」→ 指纹里退化成 `db:err`，表现是「明明没改却报有变化 / 改了却不报」，
+      两头的假信号都会出现（当时确实被绕了一圈）。
+    """
+    p = str(mm.DB_PATH)
+    if _WATCH["cx"] is not None and _WATCH["path"] == p:
+        return _WATCH["cx"]
+    try:
+        if _WATCH["cx"] is not None:
+            try:
+                _WATCH["cx"].close()
+            except Exception:
+                pass
+        _WATCH["cx"] = None
+        # mode=ro：库还没建时**绝不**把空库建出来（connect 到不存在的路径会凭空造一个文件）
+        uri = "file:%s?mode=ro" % urllib.parse.quote(str(mm.DB_PATH).replace("\\", "/"), safe="/:")
+        cx = sqlite3.connect(uri, uri=True, timeout=1.0, check_same_thread=False)
+        cx.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        _WATCH["cx"] = cx
+        _WATCH["path"] = p
+    except Exception:
+        _WATCH["cx"] = None          # 失败不记 path → 下次再试（库可能是刚被建出来）
+    return _WATCH["cx"]
+
+
+def _db_ro_drop():
+    """探测出错 → 丢掉这条连接，下次重建（只记一次日志，别每 2 秒刷屏）"""
+    try:
+        if _WATCH["cx"] is not None:
+            _WATCH["cx"].close()
+    except Exception:
+        pass
+    _WATCH["cx"] = None
+    if not _WATCH["logged"]:
+        _WATCH["logged"] = True
+        mm.log("实时刷新：索引库探测连接出错，稍后重建（%s）" % traceback.format_exc().strip().splitlines()[-1])
+
+
+def _file_sig(p) -> str:
+    try:
+        st = os.stat(str(p))
+    except OSError:
+        return "-"
+    return "%d/%d" % (st.st_mtime_ns, st.st_size)
+
+
+def _dir_sig(p, cap=300) -> str:
+    """目录的轻量指纹：目录 mtime + 顶层条数 + 顶层总大小 + 最新的 mtime。
+
+    顶层大小是为了「下载中」也看得出来（文件在长个子，目录 mtime 不变）；
+    只扫顶层、最多 cap 条 —— 游戏那个 mod 目录有几百个子目录，深扫一次几毫秒，没必要。
+    """
+    if not p:
+        return "-"
+    try:
+        st = os.stat(str(p))
+    except OSError:
+        return "-"
+    n = total = newest = 0
+    try:
+        with os.scandir(str(p)) as it:
+            for e in it:
+                if n >= cap:
+                    break
+                n += 1
+                try:
+                    es = e.stat()
+                    total += es.st_size
+                    newest = max(newest, int(es.st_mtime))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return "%d/%d/%d/%d" % (int(st.st_mtime), n, total, newest)
+
+
+def data_signature(cfg) -> str:
+    """「看起来变了没」的指纹：索引库 + 待导入/下载目录 + 游戏 mod 目录 + 配置文件"""
+    parts = []
+    cx = _db_ro_conn()
+    if cx is not None:
+        try:
+            with _WATCH["lock"]:
+                dv = cx.execute("PRAGMA data_version").fetchone()[0]
+                n = cx.execute("SELECT COUNT(*) FROM mods").fetchone()[0]
+            parts.append("db:%s:%s" % (dv, n))
+        except Exception:
+            _db_ro_drop()
+            parts.append("db:err")
+    else:
+        parts.append("db:-")
+    try:
+        dl, ib = mm.resolve_dirs(cfg)
+        parts.append("dl:%s" % _dir_sig(dl))
+        parts.append("ib:%s" % _dir_sig(ib))
+    except Exception:
+        parts.append("dirs:err")
+    try:
+        # 游戏里的 mod 目录变动（Penumbra 装好/删掉）→ 列表的「是否安装」列要跟着变
+        parts.append("inst:%s" % _dir_sig(mm.find_install_dir(cfg) or ""))
+    except Exception:
+        parts.append("inst:-")
+    try:
+        p = override_cfg_path() if ROOT_OVERRIDE else mm.CONFIG_PATH
+        parts.append("cfg:%s" % _file_sig(p))
+    except Exception:
+        parts.append("cfg:-")
+    return "|".join(parts)
+
+
+def api_watch(q=None):
+    """`GET /api/watch?since=<上次的 sig>` —— 界面实时刷新的探测口。
+
+    changed 只在「带了 since 且与当前指纹不同」时为真：第一次（since 为空）不算变化，
+    免得页面刚加载完又白刷一次。
+    """
+    since = (q.get("since") or [""])[0] if q else ""
+    cfg = cfg_now()
+    sig = data_signature(cfg)
+    cur = JOBS["cur"]
+    return {"sig": sig, "changed": bool(since) and since != sig,
+            "job": None if cur is None else cur.snap(),
+            "at": round(time.time(), 2)}
+
+
 def api_mods():
     cfg = cfg_now()
     _st = mm.Store()
@@ -5848,6 +6002,9 @@ class Handler(BaseHTTPRequestHandler):
                 if u.path == "/api/job":
                     cur = JOBS["cur"]
                     return self._json({"state": "idle"} if cur is None else cur.snap())
+                if u.path == "/api/watch":
+                    # 界面实时刷新：变了没 + 现在在跑什么（别处发起的任务也算）
+                    return self._json(api_watch(q))
                 if u.path == "/api/thumb":
                     return self.api_thumb(q)
                 if u.path == "/api/raw":

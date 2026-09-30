@@ -50,7 +50,14 @@ const mods = ref([])
 const pending = ref([])          // 「待导入」的文件清单：侧栏待办角标要用
 const view = ref(new URLSearchParams(location.search).get('view') || 'mods')
 const collapsed = ref(false)
-let timer = null
+// ★ 实时刷新（v2.35.0，主人 2026-09-30：下载/导入/归档之后界面**不跟着动**）
+//   以前只有「**自己**发起的任务跑完」才 refreshAll —— 任务跑着的时候列表一直停着，而
+//   浏览器拓展 / 插件 / 另一个窗口发起的改动（任务由后端直接起）这里**完全不知道**。
+//   现在每 2 秒（任务在跑时 600ms）问一次 /api/watch：变了就重载，别处起的任务也照样显示进度条。
+const dataSig = ref('')          // 上次看到的数据指纹（后端给：索引库 + 待导入目录 + 游戏目录 + 配置）
+let watchTimer = null
+let refreshing = false           // 重载在飞时不再叠一次
+let lastDoneJob = ''             // 已经收尾提示过的任务（避免同一个结束态反复弹）
 
 const icon = (comp) => () => h(NIcon, null, { default: () => h(comp) })
 
@@ -106,40 +113,92 @@ function goView(p) {
   if (p && p.view) view.value = p.view
 }
 
-function pollJob() {
-  clearTimeout(timer)
-  timer = setTimeout(async () => {
-    let s
-    try {
-      s = await api.job()
-    } catch (e) {
-      return
-    }
-    if (s.state === 'idle') {
-      job.value = null
-      return
-    }
+// ---- 数据重载（列表 / 统计 / 侧栏角标 / 当前页自己的数据）----
+async function reloadData() {
+  if (refreshing) return
+  refreshing = true
+  try {
+    await refreshAll()
+    await bus.refresh?.()          // 各页自己的 load（标签、检查报告、备份列表…）
+  } catch (e) {
+    /* 服务可能正在忙：交给下一次探测 */
+  } finally {
+    refreshing = false
+  }
+}
+
+// ---- 任务条：跑着就显示（**别处发起的也显示**），结束 → 重载一次 + 提示一次 ----
+function jobKey(s) {
+  return s ? `${s.kind}@${s.t0 || ''}:${s.state}` : ''
+}
+
+async function syncJobBar(s) {
+  if (!s || s.state === 'idle') {
+    job.value = null
+    return
+  }
+  if (s.state === 'running') {
     job.value = s
-    if (s.state === 'running') return pollJob()
-    try {
-      await refreshAll()
-      await bus.refresh?.()
-    } catch (e) {}
-    // 任务结果文案里可能带 **粗体**/`代码` → 统一走 markdown 渲染（不然是一堆星号）
-    // 有些任务的结果由**发起它的那个弹窗**自己展示（「从云端索引恢复」要弹预览表格）→
-    // 这里就别再弹一遍，免得两条消息打架。
-    if (!QUIET_JOBS.includes(s.kind)) {
-      s.state === 'error' ? msg.error(mdToast(jobResultText(s))) : msg.success(mdToast(jobResultText(s)))
+    return
+  }
+  const key = jobKey(s)
+  if (key && key === lastDoneJob) return       // 这个任务的收尾已经处理过，别再弹一遍
+  lastDoneJob = key
+  job.value = s
+  await reloadData()
+  // 任务结果文案里可能带 **粗体**/`代码` → 统一走 markdown 渲染（不然是一堆星号）
+  // 有些任务的结果由**发起它的那个弹窗**自己展示（「从云端索引恢复」要弹预览表格）→
+  // 这里就别再弹一遍，免得两条消息打架。
+  if (!QUIET_JOBS.includes(s.kind)) {
+    s.state === 'error' ? msg.error(mdToast(jobResultText(s))) : msg.success(mdToast(jobResultText(s)))
+  }
+  setTimeout(() => { if (jobKey(job.value) === key) job.value = null }, 6000)
+}
+
+async function watchTick() {
+  watchTimer = null
+  let s = null
+  try {
+    s = await api.watch(dataSig.value)         // 后台轮询：走 quiet 通道，不占「处理中」加载条
+  } catch (e) {
+    s = null
+  }
+  if (s) {
+    const first = !dataSig.value
+    if (s.sig && s.sig !== dataSig.value) {
+      dataSig.value = s.sig
+      // 数据真的变了（下载入库 / 归档 / 拓展推来的导入 / 另一个窗口改的…）→ 界面立刻跟着变。
+      // 第一次只是「记下基线」，不算变化（刚 onMounted 已经刷过了）。
+      if (s.changed && !first) await reloadData()
     }
-    setTimeout(() => (job.value = null), 6000)
-  }, 300)
+    await syncJobBar(s.job)
+  }
+  scheduleWatch()
+}
+
+function scheduleWatch() {
+  if (watchTimer) clearTimeout(watchTimer)
+  watchTimer = null
+  if (document.hidden) return                  // 页面在后台就不轮询（省资源），切回来立刻补一次
+  const running = !!(job.value && job.value.state === 'running')
+  watchTimer = setTimeout(watchTick, running ? 600 : 2000)
+}
+
+function onVisibility() {
+  if (document.hidden) {
+    if (watchTimer) clearTimeout(watchTimer)
+    watchTimer = null
+  } else if (!watchTimer) {
+    watchTick()
+  }
 }
 
 async function startJob(kind, params) {
   try {
     await api.startJob(kind, params)
+    // 立刻把任务条显示出来（真进度由下一次探测填），并让轮询切到 600ms
     job.value = { kind, state: 'running', pct: 0, done: 0, total: 0, text: '准备中…', elapsed: 0 }
-    pollJob()
+    scheduleWatch()
   } catch (e) {
     msg.error(e.message)
   }
@@ -216,16 +275,18 @@ onMounted(async () => {
   busyTick = setInterval(() => { if (busy.visible) now.value = Date.now() }, 1000)
   try {
     await refreshAll()
-    const s = await api.job()
-    if (s.state === 'running') {
-      job.value = s
-      pollJob()
-    }
   } catch (e) {
     msg.error('加载失败：' + e.message)
   }
+  // ★ 实时刷新：第一次探测会顺手记下基线指纹，并把「已经在跑的任务」接进任务条
+  document.addEventListener('visibilitychange', onVisibility)
+  watchTick()
 })
-onUnmounted(() => { clearTimeout(timer); if (busyTick) clearInterval(busyTick) })
+onUnmounted(() => {
+  if (watchTimer) clearTimeout(watchTimer)
+  if (busyTick) clearInterval(busyTick)
+  document.removeEventListener('visibilitychange', onVisibility)
+})
 </script>
 
 <template>
