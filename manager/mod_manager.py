@@ -737,6 +737,12 @@ def find_duplicates(mods):
     return out
 
 
+# 重排时的**临时号**起点：先改成 900000+i 避开撞名，再改成正式号。
+# 它是「不是真序号」的哨兵 —— 分类级取下一个号时必须忽略这个区间的文件夹
+# （不然一次中断的重排会留下一堆 9xxxxx，之后新入库的号直接跳到 900023）。
+RENUMBER_TMP_BASE = 900000
+
+
 def renumber_plan(cfg, category="", subcat="", start=1):
     """算出重排计划 [(记录, 新序号)]；category 为空或「全部分类」时，按分类各自编号"""
     allm = Store().all()
@@ -765,7 +771,7 @@ def renumber(cfg, category="", subcat="", start=1, dry_run=True, export=False):
         return plan
     tmp = []
     for i, (m, new_seq) in enumerate(plan):
-        t = rename_mod(cfg, m["folder"], seq=900000 + i)
+        t = rename_mod(cfg, m["folder"], seq=RENUMBER_TMP_BASE + i)
         tmp.append((str(t), new_seq))
     done = []
     for folder, new_seq in tmp:
@@ -2491,8 +2497,12 @@ def browser_download(cfg, dest_dir, timeout=900, on_tick=None, should_cancel=Non
 
 
 # ------------------------------------------------------------------- library
-def next_seq(parent: Path) -> int:
-    """同一目录里下一个可用序号（现有最大序号 + 1）"""
+def next_seq_in_dir(parent: Path) -> int:
+    """**只在一个目录里**的下一个可用序号（现有最大 + 1）。
+
+    ⚠ 给「新 Mod 编号」请不要用它 —— 序号的不变量是**每个分类各自 1..N**（见 next_seq_in_category）。
+      它只适合「同一个文件夹里排一组东西」这种局部场景。
+    """
     n = 0
     if parent.is_dir():
         for d in parent.iterdir():
@@ -2500,6 +2510,60 @@ def next_seq(parent: Path) -> int:
                 m = MOD_RE.match(d.name)
                 if m:
                     n = max(n, int(m.group(1)))
+    return n + 1
+
+
+def next_seq_in_category(cfg, category, exclude=None, root: Path | None = None) -> int:
+    """分类内下一个可用序号 = **整棵分类子树**（含 SFW/NSFW 与任意层子分类）里最大序号 + 1。
+
+    为什么不是「当前目录里最大 + 1」（主人 2026-09-30 报的「拓展下载入库后序号是错的」）：
+      序号的不变量是**每个分类各自连续编号** ——
+      · `renumber_plan()` 就是「每个分类各自编号」（跨 zone、跨子分类一起排）
+      · `cmd_check()` 判重也是按 **(分类, 序号)** 这一对
+      · 库里现有数据同样是这个口径（衣服 1..12 里，3 号住在子分类 Katami ☆；皮肤 1..14 跨 纹身/氏族印记）
+      而入库以前用的是 `next_seq_in_dir(目标目录)`：往**子分类**或**另一个 zone** 里入库时，
+      它只看得见那个小目录 → 给出一个**已经被本分类占用的号**
+      （皮肤/SFW/纹身 里最大是 1 → 给新号 2，可 2 号早被 皮肤/NSFW/纹身 拿走了）。
+
+    exclude：算最大值时跳过的文件夹（编辑时传这条 Mod 自己 —— 只是「移动一下子分类」不该把号顶到末尾）。
+    root：单元测试用；默认取配置里的 Mod 根目录。
+    """
+    base_root = Path(root) if root is not None else Path(cfg.get("root") or "")
+    if not str(base_root) or str(base_root) in ("", "."):
+        return 1
+    cat = safe_name(category, fallback="") if (category or "").strip() else ""
+    base = (base_root / cat) if cat else base_root
+    skip = None
+    if exclude:
+        try:
+            skip = Path(exclude).resolve()
+        except OSError:
+            skip = None
+    n = 0
+    if base.is_dir():
+        stack = [base]
+        while stack:
+            cur = stack.pop()
+            try:
+                entries = list(cur.iterdir())
+            except OSError:
+                continue
+            for d in entries:
+                if not d.is_dir():
+                    continue
+                if skip is not None:
+                    try:
+                        if d.resolve() == skip:
+                            continue
+                    except OSError:
+                        pass
+                m = MOD_RE.match(d.name)
+                if m:
+                    v = int(m.group(1))
+                    if v < RENUMBER_TMP_BASE:      # 重排临时号不算
+                        n = max(n, v)
+                else:
+                    stack.append(d)                # 分类 / SFW·NSFW / 子分类层：继续往下找
     return n + 1
 
 
@@ -2555,7 +2619,9 @@ def import_mod(cfg, src, category, zone="SFW", subdir="", author=None, name=None
     if not name:
         raise SystemExit("Mod 名称不能为空")
     parent = mod_parent(cfg, category, zone, subdir)      # 统一走这里（含非法字符清洗）
-    seq = next_seq(parent) if seq in (None, "", 0) else int(seq)
+    # ★ 没带序号 → 本**分类**的下一个号（不是「本目录的下一个号」）：序号以分类为单位连续，
+    #   `renumber_plan` 与 `cmd_check` 都是这个口径 —— 见 next_seq_in_category 的说明。
+    seq = next_seq_in_category(cfg, category) if seq in (None, "", 0) else int(seq)
     target = parent / mod_folder_name(seq, author, name)
     if target.exists():
         raise SystemExit("目标已存在：%s" % target)
@@ -4519,7 +4585,8 @@ def gui(cfg):
 
         def update_seq(*_):
             try:
-                v_seq2.set(str(next_seq(target_parent())))
+                # 建议值也用**分类级**的号（以前是「目标目录里最大 +1」，往子分类里加就会撞号）
+                v_seq2.set(str(next_seq_in_category(cfg, v_cat2.get())))
             except Exception:
                 pass
 
@@ -4676,7 +4743,9 @@ def gui(cfg):
         def update_seq(*_):
             try:
                 if target_parent().resolve() != cur_parent.resolve():
-                    v_seq2.set(str(next_seq(target_parent())))
+                    # 换了目录才重给建议值；**排除自己**，免得「只移动子分类」把号顶到分类末尾
+                    v_seq2.set(str(next_seq_in_category(cfg, v_cat2.get(),
+                                                        exclude=m["folder"])))
             except Exception:
                 pass
             preview_target()

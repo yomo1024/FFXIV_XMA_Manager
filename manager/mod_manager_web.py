@@ -1028,6 +1028,10 @@ def _job_selfdownload(job: Job):
         # 封面：和「拓展下载入库」走同一套（拓展带字节 → 全尺寸 → 公开缩略图兜底），
         # 别再各写一套（这条路上原来也是 use_browser=... 静默失败 → 空封面，主人报过）
         cover_info = {"ok": False}
+        # ★ got 必须在分支外先给初值：payload 带 cover:false（不需要这次处理封面）时，
+        #   以前这个变量只在上面的分支里赋值 → 返回时 UnboundLocalError，
+        #   表现是「Mod 其实已经入库了，任务却报 error」，界面上什么都看不到（2026-09-30 顺手修）
+        got = ""
         if q.get("cover", True):
             job.set(3, 4, "抓封面当预览图…")
             if q.get("cover_data"):
@@ -3462,6 +3466,7 @@ def _job_import_file(job: Job):
         target, _exist, _removed = import_or_update(cfg, src, cat, zone, subdir,
                                                     author or None, name or None, None, addr, info, job)
         cover_info = {"ok": False}
+        got = ""                      # 见 _job_selfdownload 里的同名注释：cover:false 时别让 got 未赋值
         if q.get("cover", True):
             job.set(2, 3, "抓封面当预览图…")
             if q.get("cover_data"):

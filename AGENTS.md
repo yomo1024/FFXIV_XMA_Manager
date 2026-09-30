@@ -10,11 +10,26 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.35.0**（最新 tag = **v2.34.3**）｜拓展 **v1.2.7** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.35.1**（最新 tag = **v2.34.3**）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
+
+- **v2.35.1 修「拓展下载入库后序号是错的」**（主人 2026-09-30 报）：序号的不变量是
+  **每个分类各自 1..N**（`renumber_plan` 按分类连续排、`cmd_check` 按「(分类, 序号)」判重复、
+  库里现有数据也是这个口径 —— 衣服 1..12 里 3 号住在子分类 Katami ☆），
+  可新入库用的是 `next_seq(目标目录)`（**只在本目录里取最大 + 1**）→ 往子分类或另一个 zone 里入库就
+  **撞号**（皮肤/SFW/纹身 里最大是 1 → 给新号 2，而 2 早被 皮肤/NSFW/纹身 拿走了）。
+  改法：新增 `next_seq_in_category(cfg, category, exclude=None)`（整棵分类子树取最大 + 1，
+  忽略重排临时号区 `RENUMBER_TMP_BASE=900000`），`import_mod` 与桌面 GUI 两处建议值都改用它；
+  旧的 `next_seq` 改名 `next_seq_in_dir` 并把「别拿它给新 Mod 编号」写进 docstring（防回归）。
+  **实测**（隔离库按真实结构搭）：拓展推送入库 → 皮肤新号 **15**（旧口径是 2）、
+  手加 Mod 到 子分类 → 衣服 **13**（旧口径 4 冲突）、到同分类另一 zone → **14**、显式序号照旧尊重、
+  同地址再推认成更新不换号、重排后每分类 1..N 无冲突。
+  顺带修：`_job_selfdownload` / `_job_import_file` 的 `got` 只在「要处理封面」分支里赋值 →
+  payload 带 `cover:false` 时 `UnboundLocalError`，**Mod 已入库但任务报 error**（界面上什么都看不到）。
+- **v2.35.0 界面实时跟随内容变化**（同上一条的上一版，见下方「界面实时刷新」一节）
 
 - **v2.35.0 界面实时跟随内容变化**（主人 2026-09-30 报：下载/导入/归档之后界面**不跟着动**）：
   真因是前端只在「**自己**发起的任务结束时」才 `refreshAll()` —— 任务跑着的时候一律不刷新（归档一条大包
