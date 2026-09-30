@@ -24,6 +24,7 @@ import json
 import mimetypes
 import re
 from pathlib import Path
+import threading
 import time
 import urllib.parse
 
@@ -122,6 +123,39 @@ def _default_params(extra=None) -> dict:
     return p
 
 
+# 每次 API 响应都会通过 Set-Cookie 下发**新的登录态**（关键就是 __puus），必须收下来 ——
+# 见 _merge_set_cookie 的说明。这里用线程局部存「最近一次响应刷出来的 cookie」。
+_COOKIE_SINK = threading.local()
+
+
+def _merge_set_cookie(cookie, headers) -> str:
+    """把响应头里的 Set-Cookie 合并进 cookie 字符串（同名覆盖，其它字段原样保留）。
+
+    ★ 为什么非做不可（主人 2026-09-30 报「从云盘取回也没有取回」的真根因）：
+      夸克的下载直链是用 Cookie 里的 **`__puus`** 校验的，而它 **24 小时就过期**：
+      过期之后 —— **API 照旧能调（列目录、上传、归档全正常），但 CDN 下载必被拒**
+      （实测：索引文件 HTTP 412、载荷文件 HTTP 403，同一 URL 换成刚下发的 __puus 立刻 200）。
+      客户端只要把 Set-Cookie 里的新值收下来，下载就一直正常；丢掉它 → 「上传好好的、
+      取回/索引恢复永远失败」，而且报错信息一点线索都没有（Tengine 的 412 正文是空壳）。
+    """
+    out = str(cookie or "")
+    try:
+        raw = headers.get_all("Set-Cookie") if headers else None
+    except Exception:
+        raw = None
+    for line in (raw or []):
+        m = re.match(r"\s*([A-Za-z0-9_\-.]+)=([^;]*)", line or "")
+        if not m:
+            continue
+        k, v = m.group(1), m.group(2)
+        if re.search(r"(?:^|;\s*)%s=" % re.escape(k), out):
+            out = re.sub(r"(^|;\s*)%s=[^;]*" % re.escape(k),
+                         lambda mm: "%s%s=%s" % (mm.group(1), k, v), out)
+        else:
+            out = (out + "; " if out else "") + "%s=%s" % (k, v)
+    return out
+
+
 def _headers(cookie, ua=None) -> dict:
     return {
         "user-agent": ua or UA,
@@ -156,9 +190,11 @@ def _request(method, url_host, path, cookie, params=None, body=None, timeout=60,
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 code_http, raw = r.status, r.read().decode("utf-8", "replace")
+                hdrs = r.headers
             break
         except urllib.error.HTTPError as e:             # 报错体里也有 quark 的中文原因，要读出来
             code_http, raw = e.code, e.read().decode("utf-8", "replace")
+            hdrs = e.headers
             break
         except Exception as e:
             last = str(e)[:120]
@@ -166,6 +202,12 @@ def _request(method, url_host, path, cookie, params=None, body=None, timeout=60,
                 time.sleep(1.5 * (attempt + 1))
                 continue
             raise QuarkError("连不上夸克（重试 3 次都失败）：%s" % last)
+
+    # 收下这次响应刷出来的登录态（__puus 等），供调用方更新 self.cookie
+    try:
+        _COOKIE_SINK.value = _merge_set_cookie(cookie, hdrs)
+    except Exception:
+        pass
 
     try:
         j = _json.loads(raw or "{}")
@@ -218,14 +260,32 @@ class QuarkDrive:
         if ck.lower().startswith("cookie:"):          # 主人常把 "Cookie:" 前缀一起粘进来
             ck = ck.split(":", 1)[1].strip()
         self.cookie = ck
+        self.cookie_dirty = False        # 自从上次写回配置后，cookie 有没有被刷新过
         self.root_path = "/" + str(root_path or "/MOD").strip().strip("/")
         self.timeout = int(timeout or 60)
         self._dir_cache = {}
 
     # ------------------------------------------------------------- 底层
     def _call(self, method, host, path, params=None, body=None, ua=None, timeout=None) -> dict:
-        return _request(method, host, path, self.cookie, params, body,
-                        timeout or self.timeout, ua=ua)
+        d = _request(method, host, path, self.cookie, params, body,
+                     timeout or self.timeout, ua=ua)
+        # 响应里刷出来的新登录态 → 立刻用上（否则 CDN 下载会拿旧 __puus 去签名，被 412/403 拒）
+        try:
+            nw = getattr(_COOKIE_SINK, "value", None)
+            if nw and nw != self.cookie:
+                self.cookie = nw
+                self.cookie_dirty = True
+        except Exception:
+            pass
+        return d
+
+    def refresh_cookie(self) -> bool:
+        """逼一次 API 调用把新登录态收进来（下载被 403/412 拒时兜底用；失败返回 False）"""
+        try:
+            self._call("GET", ACCOUNT_HOST, "/account/info", {"fr": "pc", "platform": "pc"})
+            return True
+        except Exception:
+            return False
 
     # ------------------------------------------------------------- 账号
     def account(self) -> dict:

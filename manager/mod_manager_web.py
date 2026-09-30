@@ -3012,19 +3012,65 @@ def auto_install_after_import(cfg, folders, job):
         return {"error": "自动推送失败，看日志"}
 
 
+def _persist_cloud_cookie(cfg, drv):
+    """把 API 响应里刷新出来的云盘登录态写回配置（**只动 cloud_cookie 一个字段**）。
+
+    为什么必须写回：夸克的 `__puus` 24 小时过期，而每次 API 响应都会下发新的 ——
+    只在内存里用，重启后又拿旧的，下载又会 403/412。写回之后主人就不用频繁重贴 Cookie 了。
+    """
+    try:
+        new = str(getattr(drv, "cookie", "") or "")
+        if not new or not getattr(drv, "cookie_dirty", False):
+            return
+        if new == str(cfg.get("cloud_cookie") or ""):
+            drv.cookie_dirty = False
+            return
+        cfg["cloud_cookie"] = new
+        save_cfg(cfg)
+        drv.cookie_dirty = False
+        mm.log("云盘登录态已刷新（__puus）并写回配置")
+    except Exception:
+        mm.log(traceback.format_exc())
+
+
 def _cloud_download(drv, cfg, fid) -> bytes:
-    """下载云端文件（**必须带 Cookie**，否则 403 —— 实测）"""
+    """下载云端文件（**必须带 Cookie**，否则 403 —— 实测）。
+
+    ★ 2026-09-30 修（主人报「从云盘取回也没有取回」的真根因）：
+      夸克的下载直链是用 Cookie 里的 **`__puus`** 校验的，**它 24 小时就过期**；过期后
+      **API 照旧全通（列目录/上传/归档都正常），但 CDN 下载必被拒** ——
+      实测索引文件 HTTP **412**、载荷文件 HTTP **403**，而且 Tengine 的 412 正文是空壳，
+      光看报错根本查不出原因。所以这里三道保险：
+        ① 取直链时会顺带把响应里新的 `__puus` 收进 `drv.cookie`（quark_drive._call 干的）；
+        ② 真被 403/412 拒 → 主动刷一次登录态、重新签直链，再试一次；
+        ③ 下成功后把刷新过的登录态**写回配置**，下次启动就不是旧的 __puus 了。
+    """
     import urllib.request
+    import urllib.error
     qd = _qd()
-    url = drv.download_url(fid)
-    if not url:
-        raise RuntimeError("取不到下载直链")
-    # 直链签名跟「请求 /file/download 时的 UA + cookie」绑定 → 下载必须用同一个客户端 UA
-    req = urllib.request.Request(url, headers={
-        "user-agent": qd.CLIENT_UA, "cookie": drv.cookie,
-        "referer": "https://pan.quark.cn/", "origin": "https://pan.quark.cn"})
-    with urllib.request.urlopen(req, timeout=1800) as r:
-        return r.read()
+    last = None
+    for attempt in (1, 2):
+        url = drv.download_url(fid)          # ← 这一步的 API 响应会带上新的 __puus
+        if not url:
+            raise RuntimeError("取不到下载直链")
+        # 直链签名跟「请求 /file/download 时的 UA + cookie」绑定 → 下载必须用同一个客户端 UA
+        req = urllib.request.Request(url, headers={
+            "user-agent": qd.CLIENT_UA, "cookie": drv.cookie,
+            "referer": "https://pan.quark.cn/", "origin": "https://pan.quark.cn"})
+        try:
+            with urllib.request.urlopen(req, timeout=1800) as r:
+                data = r.read()
+            _persist_cloud_cookie(cfg, drv)
+            return data
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (403, 412) and attempt == 1:
+                mm.log("云端下载被 %s 拒（多半是 Cookie 里的 __puus 过期：API 能用、下载被拒）"
+                       "→ 刷新登录态后重签直链重试" % e.code)
+                drv.refresh_cookie()
+                continue
+            raise
+    raise last
 
 
 def _cloud_restore_files(cfg, folder, rows, dest_root=None, on_step=None) -> dict:
@@ -3143,8 +3189,9 @@ def _job_cloud_restore(job: Job):
     qd = _qd()
     import hashlib
     folders = [str(f) for f in (job.params.get("folders") or [])]
+    heal_notes = []
     if job.params.get("heal") or not folders:
-        _heal_archive_state(cfg, folders or None, job)
+        heal_notes = (_heal_archive_state(cfg, folders or None, job) or {}).get("notes") or []
         st0 = mm.Store()
         if not folders:
             folders = [r["folder"] for r in st0.all()
@@ -3154,9 +3201,10 @@ def _job_cloud_restore(job: Job):
         pr = cloud_probe(cfg)
         raise RuntimeError(
             "这台机器的索引里没有已归档的 Mod，云端也没能补上 —— %s"
-            "（云端根目录：%s%s）"
+            "（云端根目录：%s%s）%s"
             % (pr["error"] or "云端根目录下没有可认领的目录", pr["cloud_root"],
-               "，云端有索引文件但恢复后仍无归档记录" if pr["index"] else "，云端没有索引文件"))
+               "，云端有索引文件但恢复后仍无归档记录" if pr["index"] else "，云端没有索引文件",
+               ("；自愈时的原始报错：" + "；".join(heal_notes)) if heal_notes else ""))
     st = mm.Store()
     rows = {r["folder"]: r for r in st.all()}
     todo = []

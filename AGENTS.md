@@ -10,11 +10,27 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.35.3**（最新 tag = **v2.35.2**）｜拓展 **v1.2.8** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.35.4**（最新 tag = **v2.35.2**）｜拓展 **v1.2.8** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
+
+- **v2.35.4 修「从云盘取回也没有取回」的真根因：夸克 `__puus` 过期 → 下载被 412/403**（主人 2026-09-30 报）：
+  夸克的**下载直链是用 Cookie 里的 `__puus` 校验的，24 小时过期**；过期之后
+  **API 一切正常（列目录 / 上传 / 归档都成功），但 CDN 下载必被拒** ——
+  实测：索引文件 **HTTP 412**、载荷文件 **HTTP 403**，而且是 Tengine 的空壳正文，光看报错查不出原因
+  （v2.35.3 的自愈就是死在这一步：`cloud_index_restore_core` 下载云端索引 412 → 没有条目 → 取回空手而归）。
+  每次 API 响应其实都用 `Set-Cookie` 下发**新的 `__puus`**，而驱动把它丢了。
+  **修法**：`quark_drive._merge_set_cookie()` 把响应里的 Set-Cookie 合并进 `drv.cookie`（`_call` 里落）；
+  `_cloud_download` 被 403/412 拒时 `drv.refresh_cookie()` 后重签直链重试一次；
+  下成功后 `_persist_cloud_cookie()` 把刷新过的登录态**写回配置**（否则重启又拿旧的）。
+  **实测（真云盘）**：同一 URL 旧 cookie → 412，换新 `__puus` → 200；
+  修好后索引恢复一次成功（56 条）、对账重建清单、取回真下到 `[D] Soft Tummy Tights.pmp`（2,200,023 字节，
+  与云端一致）；空库 + **配置里故意放过期 cookie** 走「从云盘取回」→ 自愈按「先索引恢复 → 再对账」跑通；
+  线上「测试连接」从报“下载被拒”变成 `download_ok: true（实下 49041 字节 OK）`。
+  ⚠ 以后凡是「API 好、下载坏」的云盘故障，先看 Cookie 里的 __puus 有没有被 Set-Cookie 刷新。
+- **v2.35.3 修「新电脑上点从云盘取回 → 没有已归档的 Mod」**（新电脑报的）：见下（自愈 + 换机恢复入口）
 
 - **v2.35.3 修「新电脑上点从云盘取回 → 没有已归档的 Mod」**（主人 2026-09-30 在新电脑报的）：
   **归档状态只存在本地索引里**（`cloud_state` + `payload_files` 云端载荷清单），新机器索引是空的
