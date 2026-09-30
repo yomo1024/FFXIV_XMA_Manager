@@ -10,11 +10,21 @@
 
 | 组件 | 当前版本 | 唯一来源 |
 |---|---|---|
-| 管理器 ModManager | **v2.33.28**（最新 tag = **v2.33.12**）｜拓展 **v1.2.6** | `manager/app_version.py` |
+| 管理器 ModManager | **v2.33.31**（最新 tag = **v2.33.12**）｜拓展 **v1.2.7** | `manager/app_version.py` |
 | 游戏插件 ModBridge | v0.2.13 | `plugin/ModBridge/ModBridge.csproj` |
 | 浏览器拓展 | 见文件 | `browser-extension/manifest.json` |
 
 ### 最近完成（倒序，来自 git log）
+
+- **v2.33.31 / 拓展 v1.2.7 修「上传后封面还是缩略图」**（主人 2026-09-30 报的）：定位到真根因 ——
+  `static.xivmodarchive.com/mod-images/<uuid>.jpg` 在 Cloudflare 后面，**拓展 service worker 里的 fetch
+  拿到的是 CF 挑战页**（HTTP 403 / 「Just a moment...」，实测 len≈5.9KB），而 **`chrome.downloads.download()`
+  走浏览器下载通道能完整拿到 1920×1080 / 1.2 MB**。所以拓展改成「先下载封面 → 把本地文件路径推给管理器」，
+  入库完删临时文件；管理器新增 `write_cover_path()` 直接读本地文件。配套修 `write_cover_bytes`：
+  以前只写同级大图、`ensure_cover_inside` 见「文件夹里已有图」就返回 → 文件夹内那张 355×200 永远留着，
+  新增 `upgrade_inside_cover()` 在「新图更大」时一起替换（包内封面 Penumbra 用的是文件夹内那份）。
+- **v2.33.29 / v2.33.30**（另一会话）：`site_time_missing` 改名漏改两处 return 键 → 上传 100% 后 NameError；
+  以及补封面不再静默（记录「没带封面字节/拓展报错/全尺寸失败原因」）。
 
 - **v2.33.28 / 拓展 v1.2.6 修「封面取成缩略图」**（主人报的）：封面**改从页面头图轮播取** ——
   `<img class="d-block w-100 mod-carousel-image">` 里的 `mod-images/<uuid>.jpg` 才是本体（实测 1920×1080）；

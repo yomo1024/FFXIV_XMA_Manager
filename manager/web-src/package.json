@@ -1,7 +1,7 @@
 {
   "name": "ffxiv-mod-manager-web",
   "private": true,
-  "version": "2.33.30",
+  "version": "2.33.31",
   "type": "module",
   "scripts": {
     "dev": "vite",

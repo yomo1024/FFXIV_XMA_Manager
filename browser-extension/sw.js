@@ -49,6 +49,57 @@ async function api(path, opts) {
 /* 在**扩展自己**的上下文里抓封面图（带你的 cookie）。
    全尺寸封面在 Cloudflare 后面：管理器那边纯 HTTP 抓是 403，扩展这边有你的登录态/指纹 → 能拿到。
    拿不到就退回不放，管理器会用公开缩略图兜底（v1.2.4 加）。*/
+/* ★ 封面字节：先试 SW 里的 fetch，不行就**让浏览器自己下载**（2026-09-30 实测定位）。
+   为什么：static.xivmodarchive.com/mod-images/<uuid>.jpg 在 Cloudflare 后面，
+   service worker 里的 fetch 拿到的是 CF 挑战页（HTTP 403 / 「Just a moment...」，实测 len=5931），
+   而 chrome.downloads.download() 走浏览器下载通道（导航类请求）→ 完整拿到 1,229,365 B 真封面。
+   下载好的本地文件路径交给管理器读（不用再联网），入库完成后由这里删掉，不留垃圾。*/
+async function coverViaDownload(u) {
+  u = String(u || '').trim();
+  if (!/^https?:/i.test(u)) return {};
+  const base = (u.split('/').pop() || 'cover.jpg').split('?')[0].replace(/[^A-Za-z0-9._-]/g, '_').slice(-40);
+  let id = null;
+  try {
+    id = await chrome.downloads.download({
+      url: u, filename: '_ffmm_cover_' + Date.now() + '_' + base,
+      conflictAction: 'overwrite', saveAs: false
+    });
+  } catch (e) {
+    return { cover_error: '封面下载起不来：' + String(e).slice(0, 60) };
+  }
+  for (let i = 0; i < 120; i++) {                 // 最多等 60 秒
+    await new Promise((r) => setTimeout(r, 500));
+    let it = null;
+    try { const r = await chrome.downloads.search({ id }); it = r && r[0]; } catch (e) { }
+    if (!it) break;
+    if (it.state === 'complete') {
+      if (!it.bytesReceived) break;
+      return { cover_file: it.filename, cover_bytes: it.bytesReceived, cover_dl: id };
+    }
+    if (it.state === 'interrupted') break;
+  }
+  try { await chrome.downloads.removeFile(id); } catch (e) { }
+  try { await chrome.downloads.erase({ id: id }); } catch (e) { }
+  return { cover_error: '封面下载没完成' };
+}
+
+async function dropCoverDownload(id) {
+  if (!id) return;
+  try { await chrome.downloads.removeFile(id); } catch (e) { }
+  try { await chrome.downloads.erase({ id: id }); } catch (e) { }
+}
+
+/* 取封面的总入口：XMA 直接走下载（fetch 一定被 CF 挑战），其它站点先 fetch 再退下载 */
+async function coverExtra(page) {
+  const u = String((page && page.cover) || '').trim();
+  if (!/^https?:/i.test(u)) return {};
+  if (String(u).indexOf('xivmodarchive.com/') > -1) return await coverViaDownload(u);
+  const r = await fetchCoverBytes(page);
+  if (r && r.cover_data) return r;
+  const d = await coverViaDownload(u);
+  return (d && d.cover_file) ? d : Object.assign({}, r, d);
+}
+
 async function fetchCoverBytes(page) {
   try {
     const u = String((page && page.cover) || '').trim();
@@ -128,7 +179,8 @@ async function runOne(it) {
       await new Promise((r) => setTimeout(r, 1000));
     }
     await patch(it.id, { detail: '带上封面图…' });
-    const covExtra = await fetchCoverBytes(it.page);     // 拿不到也没关系，管理器会兜底
+    const covExtra = await coverExtra(it.page);          // 拿不到也没关系，管理器会兜底
+    const covTmp = covExtra.cover_dl || 0;               // 我们自己下载的临时封面文件，入库完删掉
     await jpost('/api/push/downloaded', Object.assign({
       file: doneDl.filename, page: it.page, tags: it.tags || it.page.tags || [],
       affects: it.affects != null ? it.affects : (it.page.affects || ''),
@@ -151,6 +203,7 @@ async function runOne(it) {
     } else {
       await patch(it.id, { state: 'error', error: (snap && snap.error) || '入库没成功' });
     }
+    await dropCoverDownload(covTmp);                     // 管理器已经读完封面文件了，删掉临时下载
   } catch (e) {
     await patch(it.id, { state: 'error', error: String((e && e.message) || e) });
   }

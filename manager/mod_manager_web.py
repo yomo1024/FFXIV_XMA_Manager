@@ -972,11 +972,18 @@ def _job_selfdownload(job: Job):
                 if not cover_info.get("ok"):
                     mm.log("入库补封面：推来的封面字节写入失败（%s）"
                            % (cover_info.get("why") or cover_info.get("error") or "原因未知"))
+            elif q.get("cover_file"):
+                # ★ 拓展 1.2.7 起：XMA 的全尺寸封面改由**浏览器下载**取（SW 里的 fetch 过不了
+                #   Cloudflare，实测拿到的是 CF 挑战页 → 403）。下载好的就是本地文件，直接读。
+                cover_info = write_cover_path(target, q.get("cover_file"))
+                if not cover_info.get("ok"):
+                    mm.log("入库补封面：拓展下载的封面文件没读成（%s）"
+                           % (cover_info.get("why") or cover_info.get("error") or "原因未知"))
             else:
                 # ★ 不静默：说清这次为什么拿不到全尺寸（主人 2026-09-30「怎么还是缩略图」）
                 mm.log("入库补封面：这次推送没带封面字节（%s）"
                        % (("拓展报错：" + str(q.get("cover_error"))[:80]) if q.get("cover_error")
-                          else "既没有 cover_data 也没有 cover_error（拓展 < 1.2.4，或走的是书签小工具）"))
+                          else "既没有 cover_data 也没有 cover_file（拓展 < 1.2.7，或走的是书签小工具）"))
             if not cover_info.get("ok"):
                 cover_info = fetch_cover_with_fallback(cfg, target, cover,
                                                       q.get("imgs") or info.get("imgs"))
@@ -3037,6 +3044,66 @@ def _job_mod_update(job: Job):
     return {"ok": done, "failed": failed}
 
 
+def upgrade_inside_cover(folder, raw, ext=".jpg") -> str:
+    """文件夹内那张如果是**更小的旧图**（低清兜底那种），一起换成新的全尺寸。
+
+    为什么（2026-09-30 实测）：`write_cover_bytes` 只写同级大图 + 调 `cover_land_inside`，
+    而 `ensure_cover_inside` 一看「文件夹里已经有图」就立刻返回 —— 于是里面那张 355×200 的糊图
+    会永远留着；偏偏**包内封面**（Penumbra 注封面走 `local_covers`）看的就是文件夹内那份。
+    只在「新图更大」时替换（和 `_mirror_cover_sibling` 同一尺度），绝不把好图换小。
+    实测：Heels to [CRITICAL HIT] 同级 1920×1080、文件夹内仍是 355×200 —— 就是这条漏的。
+    """
+    folder = Path(folder)
+    try:
+        inside = [(q, q.stat().st_size) for q in folder.iterdir()
+                  if q.is_file() and q.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
+    except OSError:
+        return ""
+    if not inside:
+        return ""
+    big, sz = max(inside, key=lambda x: x[1])
+    if sz >= len(raw):
+        return ""
+    try:
+        if big.suffix.lower() == ext:
+            big.write_bytes(raw)
+            mm.log("文件夹内的旧封面也换成全尺寸：%s（%d B → %d B）" % (big.name, sz, len(raw)))
+            return str(big)
+        dst = folder / (folder.name + ext)
+        dst.write_bytes(raw)
+        mm.log("文件夹内另写一份全尺寸封面：%s（旧图 %s 是 %d B，保留）" % (dst.name, big.name, sz))
+        return str(dst)
+    except Exception as e:
+        mm.log("替换文件夹内的旧封面失败（不影响同级那张）：%s" % str(e)[:100])
+        return ""
+
+
+def write_cover_path(folder, src) -> dict:
+    """把拓展**用浏览器下载**下来的封面文件写成正式封面（同级 + 文件夹内），不联网。
+
+    为什么要有这条路（2026-09-30 实测定位「怎么封面还是缩略图」）：
+      static.xivmodarchive.com/mod-images/<uuid>.jpg 在 Cloudflare 后面，
+      拓展 service worker 里的 fetch 拿到的是 CF 挑战页（HTTP 403 / Just a moment...，len≈5.9KB）；
+      而 chrome.downloads.download() 走浏览器下载通道（导航类请求）→ 完整拿到 1,229,365 B 的真封面。
+      所以拓展改成「先下载、把路径交给管理器」，这条路不依赖调试端口，也不需要另开浏览器。
+    """
+    try:
+        src = Path(str(src or ""))
+        if not src.is_file():
+            return {"ok": False, "why": "文件不存在：%s" % str(src)[:100]}
+        raw = src.read_bytes()
+    except OSError as e:
+        return {"ok": False, "why": "读不到：%s" % str(e)[:90]}
+    if len(raw) < 1024:
+        return {"ok": False, "why": "太小了（%d B，多半是错误页）" % len(raw)}
+    if len(raw) > 12 * 1024 * 1024:
+        return {"ok": False, "why": "太大（%.1f MB）" % (len(raw) / 1048576.0)}
+    r = write_cover_bytes(folder, base64.b64encode(raw).decode("ascii"), src.name)
+    if r.get("ok"):
+        mm.log("入库补封面：拓展下载来的全尺寸（%s，%d B）" % (src.name, len(raw)))
+    return r
+
+
 def write_cover_bytes(folder, b64, name="cover.jpg") -> dict:
     """把拓展在**你自己浏览器里**取到的封面字节直接落盘（不用任何网络、不用浏览器）。
 
@@ -3062,6 +3129,7 @@ def write_cover_bytes(folder, b64, name="cover.jpg") -> dict:
     try:
         dest.write_bytes(raw)
         cover_land_inside(folder)
+        upgrade_inside_cover(folder, raw, ext)      # 文件夹里若还留着旧的糊图，一起换掉
     except Exception as e:
         return {"ok": False, "why": "写不进去：%s" % str(e)[:80]}
     mm.log("入库补封面：拓展带过来的全尺寸（%s，%d B）" % (dest.name, len(raw)))
@@ -3281,11 +3349,18 @@ def _job_import_file(job: Job):
                 if not cover_info.get("ok"):
                     mm.log("入库补封面：推来的封面字节写入失败（%s）"
                            % (cover_info.get("why") or cover_info.get("error") or "原因未知"))
+            elif q.get("cover_file"):
+                # ★ 拓展 1.2.7 起：XMA 的全尺寸封面改由**浏览器下载**取（SW 里的 fetch 过不了
+                #   Cloudflare，实测拿到的是 CF 挑战页 → 403）。下载好的就是本地文件，直接读。
+                cover_info = write_cover_path(target, q.get("cover_file"))
+                if not cover_info.get("ok"):
+                    mm.log("入库补封面：拓展下载的封面文件没读成（%s）"
+                           % (cover_info.get("why") or cover_info.get("error") or "原因未知"))
             else:
                 # ★ 不静默：说清这次为什么拿不到全尺寸（主人 2026-09-30「怎么还是缩略图」）
                 mm.log("入库补封面：这次推送没带封面字节（%s）"
                        % (("拓展报错：" + str(q.get("cover_error"))[:80]) if q.get("cover_error")
-                          else "既没有 cover_data 也没有 cover_error（拓展 < 1.2.4，或走的是书签小工具）"))
+                          else "既没有 cover_data 也没有 cover_file（拓展 < 1.2.7，或走的是书签小工具）"))
             if not cover_info.get("ok"):
                 # 拓展没带（旧版/取不到）→ 才走网络：全尺寸优先，退公开缩略图兜底
                 cover_info = fetch_cover_with_fallback(cfg, target, cover,
